@@ -151,7 +151,7 @@ fn wait(seconds: f64, cancel: &AtomicBool) {
 }
 
 /// 用一个工具：自带的、能力的动作；名字写走样的按 Friday 的别名表认回来
-fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, context: &Context) -> Outcome {
+fn execute(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, context: &Context) -> Outcome {
     let canonical = tool_aliases::canonical_name(name);
     let read_only = capabilities::is_read_only(name) || crate::mcp::is_read_only(name);
     if !context.tools.allows(name, read_only) && !context.tools.allows(&canonical, read_only) {
@@ -160,7 +160,7 @@ fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &Atom
     // 改东西、往外发、碰敏感的：先批准（approval.rs）；名字写走样的按认回来的那个审
     let checked = if tools::BUILTINS.contains(&name) { name } else { canonical.as_str() };
     let checked_arguments = if checked == name { arguments.clone() } else { tool_aliases::canonical_arguments(checked, arguments) };
-    let private_ok = match crate::approval::check(checked, &checked_arguments, cwd, context, cancel) {
+    let private_ok = match crate::approval::check(call, checked, &checked_arguments, cwd, context, cancel) {
         Ok(private_ok) => private_ok,
         Err(text) => return Outcome { ok: false, text },
     };
@@ -406,7 +406,7 @@ pub fn run(
             } else if cancel.load(Ordering::Relaxed) {
                 Outcome { ok: false, text: "（用户停下了，没有执行）".into() }
             } else {
-                execute(&name, &arguments, cwd, cancel, context)
+                execute(&id, &name, &arguments, cwd, cancel, context)
             };
             on(Event::Result { id: id.clone(), name: name.clone(), ok: outcome.ok, text: outcome.text.clone() });
             results.push((id, name, outcome.text));

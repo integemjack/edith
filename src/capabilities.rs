@@ -686,9 +686,16 @@ impl Capability {
     }
 
     fn origin(&self, params: &Value) -> Origin {
+        // user：用户自己打的字（Friday 客户端、edith attach），交给模型时不包「由能力传来」——只有全权的连接能这样说，
+        // 客人说 user 照样当能力传来的；agent 是子智能体交回的专用说法，能力不能冒用
+        let kind = match params.get("kind").and_then(Value::as_str).unwrap_or("") {
+            "user" if !self.full() => "message",
+            "agent" => "message",
+            kind => kind,
+        };
         Origin {
             capability: self.name.clone(),
-            kind: params.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
+            kind: kind.to_string(),
             from: params.get("from").and_then(Value::as_str).unwrap_or("").to_string(),
             tools: self.grant.tools.clone(),
         }
@@ -758,6 +765,17 @@ impl Capability {
                     return Err(invalid(format!("工作目录不存在：{cwd}")));
                 }
                 let mut session = Session::new(&cwd);
+                // 用对方给的 id（edith-friday：Friday 客户端自己定会话的 UUID）；已经有这个会话就照旧回它
+                if let Some(id) = params.get("id").and_then(Value::as_str) {
+                    let id = id.to_lowercase();
+                    if uuid::Uuid::parse_str(&id).is_err() {
+                        return Err(invalid(format!("id 要是 UUID：{id}")));
+                    }
+                    if let Some(existing) = Session::load(&id).filter(|existing| self.owns(&existing.id)) {
+                        return Ok(existing.summary());
+                    }
+                    session.id = id;
+                }
                 if !self.full() {
                     session.owner = self.name.clone();
                 }

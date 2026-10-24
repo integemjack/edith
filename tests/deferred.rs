@@ -6,7 +6,11 @@ use common::{command, fake, fake_model, python, scratch, text};
 use serde_json::{Value, json};
 
 fn requests(home: &std::path::Path) -> Vec<Value> {
-    std::fs::read_to_string(home.join("requests.jsonl")).unwrap_or_default().lines().filter_map(|line| serde_json::from_str(line).ok()).collect()
+    std::fs::read_to_string(home.join("requests.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
 }
 
 fn tool_names(request: &Value) -> Vec<String> {
@@ -29,7 +33,10 @@ fn tools_load_on_demand() {
     assert!(names.contains(&"delegate_task".to_string()) && names.contains(&"load_tools".to_string()), "{names:?}");
     assert!(!names.iter().any(|name| name == "run_workflow" || name == "demo__echo"), "{names:?}");
     let system = first["messages"][0]["content"].as_str().unwrap();
-    assert!(system.contains("按需加载的工具") && system.contains("run_workflow") && system.contains("MCP 服务「demo」：还没连过"), "{system}");
+    assert!(
+        system.contains("按需加载的工具") && system.contains("run_workflow") && system.contains("MCP 服务「demo」：还没连过"),
+        "{system}"
+    );
     // load_tools 连上它、取回工具；下一段请求就有了，缓存也记下了
     assert!(String::from_utf8_lossy(&output.stdout).contains("已取回 1 个工具"), "{}", text(&output));
     assert!(tool_names(&sent[1]).contains(&"demo__echo".to_string()));
@@ -48,12 +55,16 @@ fn skills_are_listed_and_read_on_demand() {
     // EDITH 自己的和 Claude Code 的技能都认
     let user = work.join("user");
     std::fs::create_dir_all(home.join("skills").join("release")).unwrap();
-    std::fs::write(home.join("skills/release/SKILL.md"), "---\nname: release\ndescription: 发版的步骤\n---\n先跑测试，再打标签 v1。").unwrap();
+    std::fs::write(home.join("skills/release/SKILL.md"), "---\nname: release\ndescription: 发版的步骤\n---\n先跑测试，再打标签 v1。")
+        .unwrap();
     std::fs::create_dir_all(user.join(".claude/skills/pdf")).unwrap();
     std::fs::write(user.join(".claude/skills/pdf/SKILL.md"), "---\nname: pdf\ndescription: 处理 PDF\n---\n用 pdftotext。").unwrap();
     let run = |task: &str| command(&home, model.port, &work, &[task]).env("HOME", &user).env("USERPROFILE", &user).output().unwrap();
     let listed = run("skills");
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("release（EDITH）") && String::from_utf8_lossy(&listed.stdout).contains("pdf（Claude Code）"));
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("release（EDITH）")
+            && String::from_utf8_lossy(&listed.stdout).contains("pdf（Claude Code）")
+    );
     let output = run(r#"调用工具 use_skill 参数 {"name":"release"}"#);
     assert!(String::from_utf8_lossy(&output.stdout).contains("先跑测试，再打标签 v1"), "{}", text(&output));
     let first = &requests(&home)[0];

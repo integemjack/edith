@@ -115,7 +115,9 @@ fn sense_starts_a_turn_and_notes() {
         json!([
             { "delay": 0.3, "send": sense("只聊天", "queue") },
             { "delay": 1.5, "send": request(7, "sense", json!({ "text": "明天下雨", "urgency": "note" })) },
-            { "delay": 0.3, "send": request(8, "sessions.list", json!({})) },
+            // 全权的连接说是用户自己打的：交给模型时不标来源
+            { "delay": 0.3, "send": request(9, "sense", json!({ "text": "亲手打的：只聊天", "kind": "user" })) },
+            { "delay": 1.5, "send": request(8, "sessions.list", json!({})) },
         ]),
         "done,turn.started",
     );
@@ -133,6 +135,7 @@ fn sense_starts_a_turn_and_notes() {
     // 模型看到的是标了来源的话；只记下的进了会话
     let requests = std::fs::read_to_string(home.join("requests.jsonl")).unwrap();
     assert!(requests.contains("由能力「cap」（speech）传来，说话的是 小明"), "{requests}");
+    assert!(requests.contains("\"content\": \"亲手打的：只聊天\""), "{requests}");
     let id = sessions[0]["id"].as_str().unwrap();
     let stored = common::read_session(&common::project_dir(&home, &work).join("sessions").join(format!("{id}.jsonl"))).to_string();
     assert!(stored.contains("明天下雨") && stored.contains("不用回复"), "{stored}");

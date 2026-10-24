@@ -9,7 +9,8 @@ MCP 服务（直接读 `.mcp.json`）把事做完、存好会话；活大时派�
 
 - 设计：[docs/EDITH.md](docs/EDITH.md)
 - **能力协议（开放接口）**：[docs/CAPABILITY-PROTOCOL.md](docs/CAPABILITY-PROTOCOL.md)——任何语言照着写一个能力就能接上
-- 共用的工具（WebSocket 中转、共享设备）：[edith.tools](https://github.com/integemjack/edith.tools)，`edith tools` 下载，要用时也会自己下
+- 共用的工具（WebSocket 中转、共享设备、Friday 客户端的网关）：[edith.tools](https://github.com/integemjack/edith.tools)，`edith tools` 下载，要用时也会自己下
+- Friday 客户端（Mac / Windows / Linux）连 EDITH：那台机器装 `edith-friday` 当 `friday-server`（[edith.tools 的 FRIDAY.md](https://github.com/integemjack/edith.tools/blob/main/docs/FRIDAY.md)）
 - 示例能力：[examples/notes.py](examples/notes.py)（动作）、[examples/inbox.py](examples/inbox.py)（主动推内容 + 收事件）
 
 ```bash

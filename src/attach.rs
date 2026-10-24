@@ -136,7 +136,7 @@ pub fn run(entry: &Value, task: Option<String>, quiet: bool, verbose: bool, inte
             break;
         }
         let urgency = if link.working.lock().unwrap().is_some() { "interject" } else { "queue" };
-        let reply = link.request("sense", json!({ "text": line.trim(), "urgency": urgency }));
+        let reply = link.request("sense", json!({ "text": line.trim(), "urgency": urgency, "kind": "user" }));
         match (reply["result"]["disposition"].as_str(), reply["error"]["message"].as_str()) {
             (Some("interjected"), _) => eprintln!("\x1b[2m（补充进了正在做的这一轮）\x1b[0m"),
             (_, Some(error)) => eprintln!("\x1b[31m{error}\x1b[0m"),

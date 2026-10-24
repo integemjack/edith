@@ -66,8 +66,13 @@ impl Origin {
         json!({ "capability": self.capability, "kind": self.kind, "from": self.from })
     }
 
+    /// 用户自己打的（终端里，或全权连接说是 user 的）
+    fn is_user(&self) -> bool {
+        self.capability.is_empty() || self.kind == "user"
+    }
+
     fn source(&self) -> String {
-        match (self.capability.is_empty(), self.kind.is_empty()) {
+        match (self.is_user(), self.kind.is_empty()) {
             (true, _) => "用户".into(),
             (false, true) => format!("能力「{}」", self.capability),
             (false, false) => format!("能力「{}」（{}）", self.capability, self.kind),
@@ -76,7 +81,7 @@ impl Origin {
 
     /// 交给模型的那段话（终端里打的原样；子智能体交回的自带说明，也原样）
     fn wrap(&self, key: &str, text: &str) -> String {
-        if self.capability.is_empty() && (key == "edith.input" || self.kind == "agent") {
+        if (self.is_user() && key == "edith.input") || (self.capability.is_empty() && self.kind == "agent") {
             return text.to_string();
         }
         let from = if self.from.is_empty() { String::new() } else { format!("，说话的是 {}", self.from) };

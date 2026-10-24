@@ -306,7 +306,14 @@ pub fn classify(name: &str, arguments: &Map<String, Value>, cwd: &Path) -> Optio
 }
 
 /// 用工具之前：要批准的去问；不许做返回原因（交给模型）。Ok 里是许不许访问本机 / 内网（fetch_url 每一跳都看）
-pub fn check(name: &str, arguments: &Map<String, Value>, cwd: &Path, context: &Context, cancel: &AtomicBool) -> Result<bool, String> {
+pub fn check(
+    call: &str,
+    name: &str,
+    arguments: &Map<String, Value>,
+    cwd: &Path,
+    context: &Context,
+    cancel: &AtomicBool,
+) -> Result<bool, String> {
     let guest = context.tools != Tools::All;
     // 主人的这一轮：问过、批了的（或 --auto）可以访问本机 / 内网；客人的从来不行
     let Some(need) = classify(name, arguments, cwd) else { return Ok(!guest && auto()) };
@@ -331,6 +338,8 @@ pub fn check(name: &str, arguments: &Map<String, Value>, cwd: &Path, context: &C
         "summary": need.summary,
         "arguments": arguments,
         "origin": context.origin,
+        // 是哪一个工具调用（同 tool 事件的 id：界面按它把确认按钮放在那张工具卡片上）
+        "call": call,
     });
     let decision = ask(&request, &context.origin, guest, cancel).ok_or_else(|| {
         format!(

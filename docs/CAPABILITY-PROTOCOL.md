@@ -157,7 +157,7 @@ EDITH                                  能力
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `text` | 是 | 内容（文字） |
-| `kind` | 否 | 哪种感知（同 `senses` 里的 `kind`） |
+| `kind` | 否 | 哪种感知（同 `senses` 里的 `kind`）。`"user"`：用户自己打的字（Friday 客户端、`edith attach`），交给模型时同终端里打的、不标来源——只有全权的连接能这样说，客人说了也照能力传来的标 |
 | `from` | 否 | 说话的是谁（聊天渠道里的用户名、哪台设备……） |
 | `urgency` | 否 | 急缓（[§4.3](#43-急缓urgency)），默认 `queue` |
 | `session` | 否 | 交给哪个会话：会话 id（写开头几位也行，要唯一）、`"focus"`（默认）、`"new"`（在焦点会话的工作目录新开一个） |
@@ -215,7 +215,7 @@ EDITH                                  能力
 | 方法 | 参数 | 回话 |
 |---|---|---|
 | `sessions.list` | 无 | `[{id, title, cwd, created, updated, working}]`，新的在前 |
-| `sessions.create` | `{cwd?, focus?}` | 新会话 `{id, title, cwd, created, updated}`；`cwd` 默认焦点会话的工作目录；`focus: true` 顺便设成焦点 |
+| `sessions.create` | `{cwd?, focus?, id?}` | 新会话 `{id, title, cwd, created, updated}`；`cwd` 默认焦点会话的工作目录；`focus: true` 顺便设成焦点；`id`：用这个 UUID（客户端先定好 id 再建，比如 Friday 的网关），这个 id 已经有了就回那段会话 |
 | `sessions.get` | `{id}` | 会话全文：上面的字段 + `history`（OpenAI 格式的历史）+ `working`（在干的那一轮的 id 或 `null`）+ `focus` |
 | `sessions.focus` | `{id}` | `{focus}`：设焦点 |
 | `sessions.stop` | `{id?}` | `{stopping}`：停下正在干的一轮（排着的也不干了）；不给 `id` 是焦点会话 |
@@ -293,9 +293,11 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 ```json
 {"jsonrpc": "2.0", "id": 30, "method": "approve", "params": {
   "session": "…", "turn": "…", "tool": "run_shell", "target": "rm -rf build", "summary": "跑命令：rm -rf build（在 /w）",
-  "arguments": {"command": "rm -rf build"}, "origin": "phone"
+  "arguments": {"command": "rm -rf build"}, "origin": "phone", "call": "call_8f2…"
 }}
 ```
+
+`call` 是哪一个工具调用（同 `tool` 事件的 `id`）：界面按它把「允许 / 拒绝」放在那张工具卡片上。
 
 回话：`{"decision": "allow" | "always" | "deny", "reason"?: "…"}`。`always`：这个会话里同类的都行；`deny` 的 `reason` 交给模型。
 最多等 10 分钟，这一轮被停下就不等了。没人能批的就不做（`--auto`、`~/.edith/config.json` 的 `permissions` 见 [EDITH.md](EDITH.md#信任与审批)）。
@@ -357,6 +359,7 @@ edith capabilities                                  列出能力（三层合起�
 edith capabilities add <名字> <命令> [参数…]         接一个能力（起它、它连得进来才记进配置）
 edith capabilities remove <名字>                     去掉
 edith run                                           一直开着，只听能力的
+edith run --idle                                    同上，但不新开会话（没有焦点会话，能力用 sessions.create 自己建；Friday 的网关这样起大脑）
 ```
 
 这个目录有大脑在跑时，`edith capabilities` 不另起一份（独占的设备会撞），`add` / `remove` 只改配置，那个大脑重启后生效。

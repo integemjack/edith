@@ -47,7 +47,7 @@ const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作�
   edith [目录]                     一句一句聊（新开一个会话；干活时再打字算补充；空行或 Ctrl+D 结束）
   edith -c [\"…\"]                   接着这个目录最近的一个会话
   edith -r <会话 id> [\"…\"]         接着某个会话（id 写开头几位就行）
-  edith run [目录]                 一直开着，只听能力的（新开一个会话；-c 接最近的；Ctrl+C 退出）
+  edith run [目录]                 一直开着，只听能力的（新开一个会话；-c 接最近的；--idle 不开；Ctrl+C 退出）
   edith attach [目录] [\"…\"]        接到这个目录正在跑的大脑上（一句一句聊，或干一件事就退）
   edith sessions                   列出这个目录的会话
   edith instances                  列出这台机器上在跑的大脑
@@ -135,6 +135,8 @@ struct Options {
     worktree: bool,
     /// --auto：不问就做（审批全放开，deny 规则照样挡）
     auto: bool,
+    /// run --idle：不开会话
+    idle: bool,
     words: Vec<String>,
 }
 
@@ -258,6 +260,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         layer: capabilities::Layer::Local,
         worktree: false,
         auto: false,
+        idle: false,
         words: Vec::new(),
     };
     let mut rest = arguments.iter();
@@ -281,6 +284,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "--local" => options.layer = capabilities::Layer::Local,
             "-w" | "--worktree" => options.worktree = true,
             "--auto" => options.auto = true,
+            "--idle" => options.idle = true,
             "-c" | "--continue" => options.continue_latest = true,
             "-r" | "--resume" => options.resume = Some(rest.next().ok_or("-r 后面要跟会话 id")?.clone()),
             "--" => options.words.extend(rest.by_ref().cloned()),
@@ -335,16 +339,23 @@ fn prepare() -> Result<(), String> {
 /// edith run：一直开着，干活的事都由能力交来（这个目录的主会话是焦点）
 fn run(options: Options) -> Result<(), String> {
     home::Model::load()?;
-    // 先定好焦点会话再起能力：能力一连上就可能交话（没指明会话的交给焦点）
-    let session = match options.continue_latest.then(sessions::latest).flatten() {
-        Some(session) => session,
-        None => {
-            let mut session = Session::new(&home::workspace().to_string_lossy());
-            session.save()?;
-            session
-        }
+    // 先定好焦点会话再起能力：能力一连上就可能交话（没指明会话的交给焦点）。
+    // --idle：不开会话、没有焦点（edith-friday 这类按会话交话的入口起的大脑，不然每起一次多一个空会话）
+    let session = if options.idle {
+        None
+    } else {
+        Some(match options.continue_latest.then(sessions::latest).flatten() {
+            Some(session) => session,
+            None => {
+                let mut session = Session::new(&home::workspace().to_string_lossy());
+                session.save()?;
+                session
+            }
+        })
     };
-    mind::set_focus(&session.id);
+    if let Some(session) = &session {
+        mind::set_focus(&session.id);
+    }
     prepare()?;
     let printer = Arc::new(Mutex::new(Printer::new(options.quiet, options.verbose)));
     mind::listen(move |envelope| printer.lock().unwrap().show(envelope.kind, &envelope.session, &envelope.data, true));
@@ -353,9 +364,9 @@ fn run(options: Options) -> Result<(), String> {
         read_approvals();
     }
     eprintln!(
-        "EDITH 在 {} 开着（会话 {}，{} 个能力）。Ctrl+C 退出。",
+        "EDITH 在 {} 开着（{}，{} 个能力）。Ctrl+C 退出。",
         home::workspace().display(),
-        &session.id[..8],
+        session.as_ref().map_or("没开会话".to_string(), |session| format!("会话 {}", &session.id[..8])),
         capabilities::names().len()
     );
     loop {

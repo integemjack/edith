@@ -126,7 +126,7 @@ edith [目录]                            一句一句聊（新会话）；干�
 edith -c "接着把第二条做了"             接着这个目录最近的会话（-r <会话 id> 接着指定的）
 edith -w "…"                            开一个 git worktree 去那里干（没改东西退出时删掉）
 edith worktree [list | prune | remove <编号> [--force]]   看 -w 开的 worktree、清掉没改东西的（被强行结束留下的）、删掉一个
-edith run [目录]                        一直开着，只听能力的（新会话是焦点；-c / -r 同上）
+edith run [目录]                        一直开着，只听能力的（新会话是焦点；-c / -r 同上；--idle 不新开会话）
 edith attach [目录] ["…"]               接到这个目录正在跑的大脑上（经套接字，自己当一个叫 terminal 的能力）
 edith sessions                          列出这个目录的会话
 edith instances                         列出这台机器上在跑的大脑、它们的能力和入口地址
