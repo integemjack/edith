@@ -9,6 +9,7 @@ mod attach;
 mod brain;
 mod capabilities;
 mod checks;
+mod deferred;
 mod downloads;
 mod home;
 mod http;
@@ -19,6 +20,7 @@ mod mind;
 mod permissions;
 mod protocol;
 mod sessions;
+mod skills;
 mod team;
 mod terminal;
 mod tools;
@@ -57,6 +59,7 @@ const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作�
   edith mcp remove <名字>          去掉
   edith worktree [list | prune | remove <编号> [--force]]   edith -w 开的 worktree：看、清掉没改东西的、删掉一个
   edith trust [--yes | revoke]     看这个目录的项目 / 本地配置要起哪些程序、信任它（内容变了要再信任）
+  edith skills                     列出技能（~/.edith/skills、~/.claude/skills、Friday 的、项目的 .edith/skills 和 .claude/skills）
   edith tools                      列出 edith.tools 里的工具（装了哪个版本、有没有新的）
   edith tools install <工具>       下载、装上（edith-websocket、edith-connect……；能力要用时也会自己下）
   edith tools remove <工具>        去掉
@@ -186,7 +189,7 @@ fn main() {
     // --worktree：开一个 git worktree 去那里干（干活、聊天、run 才开）
     let starts_brain = !matches!(
         command.as_str(),
-        "sessions" | "instances" | "capabilities" | "caps" | "attach" | "tools" | "mcp" | "trust" | "worktree" | "worktrees"
+        "sessions" | "instances" | "capabilities" | "caps" | "attach" | "tools" | "mcp" | "trust" | "worktree" | "worktrees" | "skills"
     );
     if starts_brain && options.worktree {
         match worktree::create(&workspace) {
@@ -216,6 +219,15 @@ fn main() {
         }
         "tools" => exit_on(tools_command(&options.words[1..])),
         "trust" => exit_on(trust_command(&options.words[1..])),
+        "skills" => {
+            let skills = skills::list();
+            if skills.is_empty() {
+                println!("还没有技能（放进 ~/.edith/skills/<名字>/SKILL.md，Claude Code 的 ~/.claude/skills/ 也认）");
+            }
+            for skill in skills {
+                println!("{}（{}）：{}\n  {}", skill.name, skill.source, skill.description, skill.file.display());
+            }
+        }
         "worktree" | "worktrees" => exit_on(worktree_command(&options.words[1..])),
         "mcp" => {
             let rest: Vec<String> = options.words[1..].to_vec();
@@ -316,7 +328,7 @@ fn prepare() -> Result<(), String> {
     instance::serve()?;
     trust::ensure();
     capabilities::start_all(&mut |message| eprintln!("\x1b[33m{message}\x1b[0m"));
-    mcp::start_all(&mut |message| eprintln!("\x1b[33m{message}\x1b[0m"));
+    // MCP 服务不在这里起：用到时再起（mcp.rs）
     Ok(())
 }
 

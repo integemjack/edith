@@ -29,6 +29,8 @@ use crate::tools::Outcome;
 
 /// 最多几层（主智能体是第 0 层）
 pub const MAX_DEPTH: usize = 3;
+/// 一直给的派发工具（其余的按需取回：deferred.rs）
+pub const ALWAYS: &[&str] = &["delegate_task"];
 /// 派子智能体的工具
 pub const TOOLS: &[&str] =
     &["delegate_task", "run_parallel_tasks", "run_workflow", "rework_agent", "read_agent_log", "message_agent", "stop_agent"];

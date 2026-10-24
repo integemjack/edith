@@ -2,7 +2,9 @@
 //! 配置三层，和 Claude Code 一样的写法 `{"mcpServers": {"<名字>": {command, args?, env?, cwd?} | {type: "http", url, headers?}}}`：
 //! 全局 `~/.edith/mcp.json` → 项目 `<工作目录>/.mcp.json`（提交进仓库）→ 本地 `<工作目录>/.edith/mcp.local.json`；
 //! 同名的后面盖前面，`{"disabled": true}` 关掉前面那层的。字符串里的 `${VAR}`、`${VAR:-默认}` 换成环境变量。
-//! 连上后它的工具和自带工具一起交给模型，名字「<服务名>__<工具名>」；写了 readOnlyHint 的算只读（权限 tools: "read" 时能用）。
+//! 工具名「<服务名>__<工具名>」；写了 readOnlyHint 的算只读（权限 tools: "read" 时能用）。
+//! **用到时再起**（同 Claude Code 的按需加载）：起来时不连；工具清单按配置的哈希记在 `~/.edith/mcp-cache.json`，系统提示里只列名字
+//! （deferred.rs），模型用 load_tools 取回定义、或者调用它的工具时才连上；连上后刷新缓存。没连过的服务清单里写「还不知道有哪些工具」。
 //! MCP 客户端是 friday-core 的 mcp_client；它的 HTTP 交给宿主发（mcpClient.httpPost 事件），EDITH 就是这个宿主。
 
 use std::collections::{BTreeMap, HashMap};
@@ -130,16 +132,74 @@ fn expand_all(value: &Value) -> Value {
     }
 }
 
-/// 启动时把配置里没关掉的都连上（一起连；连不上的报原因、跳过）
-pub fn start_all(report: &mut dyn FnMut(String)) {
-    let wanted: Vec<(String, Value)> = configs().into_iter().filter(|(_, config)| !disabled(config)).collect();
-    let handles: Vec<_> =
-        wanted.into_iter().map(|(name, config)| std::thread::spawn(move || (name.clone(), attach(&name, config)))).collect();
-    for handle in handles {
-        if let Ok((name, Err(error))) = handle.join() {
-            report(format!("MCP 服务「{name}」连不上：{error}"));
-        }
+/// 缓存的工具清单：服务名 → {hash（配置的哈希）, tools}
+fn cache_path() -> std::path::PathBuf {
+    home::dir().join("mcp-cache.json")
+}
+
+/// 配置的哈希（只算起服务用的那些：configs() 加的 scope、disabled 不算）
+fn config_hash(config: &Value) -> String {
+    use sha2::Digest;
+    let mut config = config.clone();
+    if let Some(object) = config.as_object_mut() {
+        object.remove("scope");
+        object.remove("disabled");
     }
+    sha2::Sha256::digest(config.to_string().as_bytes()).iter().take(8).map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn remember_tools(name: &str, config: &Value, tools: &[Value]) {
+    let path = cache_path();
+    let mut cache = home::read_json(&path).filter(Value::is_object).unwrap_or_else(|| json!({}));
+    cache[name] = json!({ "hash": config_hash(config), "tools": tools });
+    let _ = home::write_json(&path, &cache);
+}
+
+/// 配置里开着的服务：名字 → 配置（不含 scope 等加的字段）
+fn enabled() -> Vec<(String, Value)> {
+    configs()
+        .into_iter()
+        .filter(|(_, config)| !disabled(config))
+        .map(|(name, mut config)| {
+            if let Some(object) = config.as_object_mut() {
+                object.remove("scope");
+            }
+            (name, config)
+        })
+        .collect()
+}
+
+/// 知道工具清单的服务：连着的用实时的，没连的用缓存的（配置变了的缓存不算）
+pub fn known() -> Vec<(String, Vec<Value>)> {
+    let live: BTreeMap<String, Arc<Limb>> = LIMBS.read().unwrap().clone();
+    let cache = home::read_json(&cache_path()).unwrap_or(Value::Null);
+    enabled()
+        .into_iter()
+        .filter_map(|(name, config)| {
+            if let Some(limb) = live.get(&name) {
+                return Some((name, limb.tools.clone()));
+            }
+            let cached = &cache[&name];
+            (cached["hash"].as_str() == Some(config_hash(&config).as_str()))
+                .then(|| (name.clone(), cached["tools"].as_array().cloned().unwrap_or_default()))
+        })
+        .collect()
+}
+
+/// 还不知道有哪些工具的服务（没连过，或者配置改过）
+pub fn unknown() -> Vec<String> {
+    let known: Vec<String> = known().into_iter().map(|(name, _)| name).collect();
+    enabled().into_iter().map(|(name, _)| name).filter(|name| !known.contains(name)).collect()
+}
+
+/// 用到时连上（已经连着就不动）
+pub fn ensure(name: &str) -> Result<(), String> {
+    if LIMBS.read().unwrap().contains_key(name) {
+        return Ok(());
+    }
+    let config =
+        enabled().into_iter().find(|(server, _)| server == name).map(|(_, config)| config).ok_or(format!("没有 MCP 服务「{name}」"))?;
+    attach(name, config).map(|_| ())
 }
 
 /// 退出前：都断开
@@ -153,6 +213,7 @@ pub fn stop_all() {
 /// 连上一个 MCP 服务（同名的先断开）；name 已经规整过
 pub fn attach(name: &str, config: Value) -> Result<Arc<Limb>, String> {
     install_http_host();
+    let raw = config.clone();
     let config = expand_all(&config);
     let object = config.as_object().ok_or("MCP 服务的设置要是 JSON 对象")?;
     let name = name.to_string();
@@ -205,6 +266,7 @@ pub fn attach(name: &str, config: Value) -> Result<Arc<Limb>, String> {
             break;
         }
     }
+    remember_tools(&name, &raw, &tools);
     let limb = Arc::new(Limb { name: name.clone(), client, client_id, tools });
     LIMBS.write().unwrap().insert(name, limb.clone());
     Ok(limb)
@@ -219,21 +281,18 @@ pub fn detach(name: &str) -> bool {
     removed.is_some()
 }
 
-pub fn all() -> Vec<Arc<Limb>> {
-    LIMBS.read().unwrap().values().cloned().collect()
-}
-
 fn read_only(tool: &Value) -> bool {
     tool.get("readOnlyHint").and_then(Value::as_bool) == Some(true)
 }
 
-/// MCP 服务带来的工具定义（OpenAI 格式；名字「<服务名>__<工具名>」，太长的截到 64 个字符；只给这一轮许可的）
+/// MCP 服务带来的工具定义（OpenAI 格式；名字「<服务名>__<工具名>」，太长的截到 64 个字符；只给这一轮许可的）。
+/// 没连的服务用缓存的清单（不为了列定义去起服务）
 pub fn specs(allowed: &Tools) -> Vec<Value> {
     let mut specs = Vec::new();
-    for limb in all() {
-        for tool in &limb.tools {
+    for (server, tools) in known() {
+        for tool in &tools {
             let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
-            let full: String = format!("{}{SEPARATOR}{name}", limb.name).chars().take(64).collect();
+            let full: String = format!("{server}{SEPARATOR}{name}").chars().take(64).collect();
             if !allowed.allows(&full, read_only(tool)) {
                 continue;
             }
@@ -242,7 +301,7 @@ pub fn specs(allowed: &Tools) -> Vec<Value> {
                 "type": "function",
                 "function": {
                     "name": full,
-                    "description": format!("（MCP 服务「{}」）{description}", limb.name),
+                    "description": format!("（MCP 服务「{server}」）{description}"),
                     "parameters": tool.get("inputSchema").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
                 },
             }));
@@ -251,32 +310,16 @@ pub fn specs(allowed: &Tools) -> Vec<Value> {
     specs
 }
 
-/// 给提示词看的：连着哪些 MCP 服务
-pub fn summary() -> String {
-    all()
-        .iter()
-        .map(|limb| {
-            let names: Vec<&str> = limb.tools.iter().filter_map(|tool| tool.get("name").and_then(Value::as_str)).collect();
-            format!("- {}（MCP 服务）：工具 {}", limb.name, names.join("、"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// 工具名 → (服务, 工具)；名字截过的按前缀找回原名
-fn find(full_name: &str) -> Option<(Arc<Limb>, Value)> {
-    let (limb_name, rest) = full_name.split_once(SEPARATOR)?;
-    let limb = LIMBS.read().unwrap().get(limb_name).cloned()?;
-    let tool = limb
-        .tools
-        .iter()
-        .find(|tool| {
-            tool.get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|name| name == rest || (full_name.chars().count() == 64 && name.starts_with(rest)))
-        })?
-        .clone();
-    Some((limb, tool))
+/// 工具名 → (服务名, 工具)：连着的、缓存的都找；名字截过的按前缀找回原名
+fn find(full_name: &str) -> Option<(String, Value)> {
+    let (server, rest) = full_name.split_once(SEPARATOR)?;
+    let (_, tools) = known().into_iter().find(|(name, _)| name == server)?;
+    let tool = tools.into_iter().find(|tool| {
+        tool.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name == rest || (full_name.chars().count() == 64 && name.starts_with(rest)))
+    })?;
+    Some((server.to_string(), tool))
 }
 
 /// 这个工具名是 MCP 服务的工具
@@ -289,9 +332,13 @@ pub fn is_read_only(full_name: &str) -> bool {
     find(full_name).is_some_and(|(_, tool)| read_only(&tool))
 }
 
-/// 调 MCP 服务的工具（名字不是它们的返回 None）
+/// 调 MCP 服务的工具（名字不是它们的返回 None）：服务还没起就先起
 pub fn call(full_name: &str, arguments: &Map<String, Value>) -> Option<Outcome> {
-    let (limb, tool) = find(full_name)?;
+    let (server, tool) = find(full_name)?;
+    if let Err(error) = ensure(&server) {
+        return Some(Outcome { ok: false, text: format!("MCP 服务「{server}」起不来：{error}") });
+    }
+    let limb = LIMBS.read().unwrap().get(&server).cloned()?;
     let tool = tool.get("name").and_then(Value::as_str).unwrap_or("").to_string();
     Some(match limb.client.call_tool(&tool, Value::Object(arguments.clone()), CALL_TIMEOUT_MS, None) {
         Ok(result) => {

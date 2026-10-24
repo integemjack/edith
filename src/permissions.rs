@@ -25,8 +25,18 @@ pub enum Tools {
 }
 
 /// 自带工具里只读的
-const READ_ONLY: &[&str] =
-    &["get_current_time", "list_directory", "read_file", "find_files", "search_files", "search_keywords", "web_search", "fetch_url"];
+const READ_ONLY: &[&str] = &[
+    "get_current_time",
+    "list_directory",
+    "read_file",
+    "find_files",
+    "search_files",
+    "search_keywords",
+    "web_search",
+    "fetch_url",
+    "load_tools",
+    "use_skill",
+];
 
 impl Tools {
     fn parse(value: &Value) -> Option<Tools> {

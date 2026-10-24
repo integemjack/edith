@@ -152,7 +152,8 @@ const READ_TOOLS: &[&str] = &["list_directory", "read_file", "find_files", "sear
 pub fn sensitive(path: &Path) -> bool {
     let text = crate::tools::slash_path(path);
     let edith = crate::tools::slash_path(&home::dir());
-    if text == edith || text.starts_with(&format!("{edith}/")) {
+    let skills = format!("{edith}/skills");
+    if (text == edith || text.starts_with(&format!("{edith}/"))) && text != skills && !text.starts_with(&format!("{skills}/")) {
         return true;
     }
     path.components().any(|component| {
@@ -188,7 +189,9 @@ pub fn sensitive(path: &Path) -> bool {
 fn inside_roots(path: &Path, cwd: &Path) -> bool {
     let canonical = |path: &Path| crate::tools::slash_path(&std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
     let target = canonical(path);
+    // 技能的文件夹也算：use_skill 读了之后要用里面的脚本、参考资料
     let mut roots = vec![home::workspace(), cwd.to_path_buf(), std::env::temp_dir()];
+    roots.extend(crate::skills::dirs());
     roots.extend(rules("additionalDirectories").iter().map(|dir| PathBuf::from(expand_home(dir))));
     roots.iter().any(|root| {
         let root = canonical(root);

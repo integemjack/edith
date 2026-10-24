@@ -94,7 +94,7 @@ fn args(pairs: &[(&str, String)]) -> prompts::Args {
 
 /// 系统提示
 pub fn instructions(cwd: &Path) -> String {
-    let list = [capabilities::summary(), crate::mcp::summary()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n");
+    let list = capabilities::summary();
     let capabilities = if list.is_empty() { String::new() } else { prompts::text("edith.capabilities", &args(&[("list", list)]), None) };
     prompts::text(
         "edith.main",
@@ -113,16 +113,29 @@ pub fn instructions(cwd: &Path) -> String {
         + &prompts::text("edith.team", &args(&[]), None)
 }
 
-/// 给模型的工具：自带的 + 派子智能体的 + 能力的动作 + MCP 的（只给这一轮许可的）
-pub fn tool_specs(context: &Context) -> Vec<Value> {
+/// 系统提示后面接的：按需工具的清单、技能的清单（deferred.rs、skills.rs）
+fn on_demand(context: &Context) -> String {
+    [crate::deferred::prompt(context), crate::skills::prompt()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n\n")
+}
+
+/// 给模型的工具（只给这一轮许可的）：一直给的（自带的、delegate_task、load_tools、有技能时 use_skill）+ 历史里取回过的按需工具
+/// （按第一次取回的先后接在后面，前面不变）
+pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
     let allowed = &context.tools;
-    let mut specs: Vec<Value> =
-        tools::specs().into_iter().filter(|spec| allowed.allows(spec["function"]["name"].as_str().unwrap_or(""), false)).collect();
+    let name = |spec: &Value| spec["function"]["name"].as_str().unwrap_or("").to_string();
+    let mut specs: Vec<Value> = tools::specs().into_iter().filter(|spec| allowed.allows(&name(spec), false)).collect();
     specs.extend(
-        crate::team::specs(context).into_iter().filter(|spec| allowed.allows(spec["function"]["name"].as_str().unwrap_or(""), false)),
+        crate::team::specs(context)
+            .into_iter()
+            .filter(|spec| crate::team::ALWAYS.contains(&name(spec).as_str()) && allowed.allows(&name(spec), false)),
     );
-    specs.extend(capabilities::specs(allowed));
-    specs.extend(crate::mcp::specs(allowed));
+    if !crate::deferred::available(context).is_empty() || !crate::mcp::unknown().is_empty() {
+        specs.push(crate::deferred::spec());
+    }
+    if !crate::skills::list().is_empty() {
+        specs.push(crate::skills::spec());
+    }
+    specs.extend(crate::deferred::specs(context, history));
     specs
 }
 
@@ -151,6 +164,12 @@ fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &Atom
         Ok(private_ok) => private_ok,
         Err(text) => return Outcome { ok: false, text },
     };
+    if name == crate::deferred::LOAD {
+        return crate::deferred::load(arguments, context);
+    }
+    if name == crate::skills::USE {
+        return crate::skills::use_skill(arguments);
+    }
     if let Some(outcome) = tools::run(name, arguments, cwd, cancel, &context.session, private_ok)
         .or_else(|| crate::team::call(name, arguments, cwd, context))
         .or_else(|| capabilities::call(name, arguments, context, cancel))
@@ -306,20 +325,23 @@ pub fn run(
         thinking: model.thinking.clone(),
         extra_body: model.extra_body.clone(),
     };
-    let mut brain = Loop::new(config, history);
-    brain.begin(Settings {
-        instructions: match &context.me {
-            Some(me) => crate::team::instructions(cwd, me),
-            None => instructions(cwd),
-        },
-        tools: tool_specs(context),
+    let base = match &context.me {
+        Some(me) => crate::team::instructions(cwd, me),
+        None => instructions(cwd),
+    };
+    let extra = on_demand(context);
+    let mut settings = Settings {
+        instructions: if extra.is_empty() { base } else { format!("{base}\n\n{extra}") },
+        tools: tool_specs(context, &history),
         temperature: model.temperature,
         enable_thinking: model.enable_thinking,
         max_tool_rounds: MAX_TOOL_ROUNDS,
         continues_when_truncated: true,
         has_dispatch: true,
         ..Settings::default()
-    });
+    };
+    let mut brain = Loop::new(config, history);
+    brain.begin(settings.clone());
     brain.append(vec![json!({ "role": "user", "content": user_text })]);
     let finish = |brain: &Loop, answer: String, error: Option<String>, stopped: bool| Turn {
         history: brain.history().to_vec(),
@@ -394,5 +416,11 @@ pub fn run(
             on(Event::Notice(format!("收到 {} 段补充，接着做时一起考虑", added.len())));
         }
         brain.tool_results(results, 0, None, added, None);
+        // 这一步取回了工具（load_tools）、或者调了还没给的按需工具：下一段请求就给它们
+        let tools_next = tool_specs(context, brain.history());
+        if tools_next.len() != settings.tools.len() {
+            settings.tools = tools_next;
+            brain.configure(settings.clone());
+        }
     }
 }

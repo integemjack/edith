@@ -75,7 +75,17 @@ fn block(kind: BlockKind) -> MessageBlock {
 /// 工具的权限（readOnly / writeFiles / execute / network）：自带的、能力的动作、MCP 的、派子智能体的
 pub fn permissions(blocks: &[MessageBlock]) -> Permissions {
     let mut map = Permissions::new();
-    for name in ["get_current_time", "list_directory", "read_file", "find_files", "search_files", "search_keywords", "read_agent_log"] {
+    for name in [
+        "get_current_time",
+        "list_directory",
+        "read_file",
+        "find_files",
+        "search_files",
+        "search_keywords",
+        "read_agent_log",
+        "load_tools",
+        "use_skill",
+    ] {
         map.insert(name.into(), "readOnly".into());
     }
     for name in ["write_file", "edit_file"] {

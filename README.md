@@ -22,7 +22,8 @@ edith attach                          # 接到这个目录正在跑的大脑上
 edith instances                       # 这台机器上在跑的大脑
 edith capabilities add inbox python3 -u examples/inbox.py ~/edith-inbox   # 接一个能力
 edith capabilities add ws edith-websocket          # 让网页、手机连进来（edith-websocket 本机没有就自己下）
-edith mcp add fs npx -y @modelcontextprotocol/server-filesystem ~/Documents   # 接一个 MCP 服务（也可以直接写 .mcp.json）
+edith mcp add fs npx -y @modelcontextprotocol/server-filesystem ~/Documents   # 接一个 MCP 服务（也可以直接写 .mcp.json；用到时才起）
+edith skills                          # 列出技能（~/.edith/skills、~/.claude/skills 都认；只列名字和用途，用到时读全文）
 edith run                             # 一直开着，只听能力的
 ```
 
