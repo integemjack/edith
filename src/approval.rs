@@ -95,6 +95,8 @@ pub struct Need {
     always: String,
     /// 访问本机 / 内网
     pub private_network: bool,
+    /// 读敏感的文件（什么权限模式都问）
+    pub sensitive: bool,
 }
 
 /// 0 按配置、1 问、2 不问（--auto）
@@ -263,14 +265,23 @@ fn clip(text: &str, limit: usize) -> String {
 
 /// 这个工具调用要不要批准；要的话是什么事
 pub fn classify(name: &str, arguments: &Map<String, Value>, cwd: &Path) -> Option<Need> {
-    let need =
-        |target: String, summary: String, always: String| Need { tool: name.to_string(), target, summary, always, private_network: false };
+    let need = |target: String, summary: String, always: String| Need {
+        tool: name.to_string(),
+        target,
+        summary,
+        always,
+        private_network: false,
+        sensitive: false,
+    };
     let path = |key: &str| crate::tools::resolve(arguments.get(key).and_then(Value::as_str).unwrap_or("."), cwd);
     if READ_TOOLS.contains(&name) {
         let target = path("path");
         let shown = crate::tools::slash_path(&target);
         if sensitive(&target) {
-            return Some(need(shown.clone(), format!("读敏感的文件 / 目录：{shown}"), format!("{name}({shown})")));
+            return Some(Need {
+                sensitive: true,
+                ..need(shown.clone(), format!("读敏感的文件 / 目录：{shown}"), format!("{name}({shown})"))
+            });
         }
         if !inside_roots(&target, cwd) {
             let folder = if target.is_dir() { shown.clone() } else { target.parent().map(crate::tools::slash_path).unwrap_or_default() };
@@ -311,6 +322,21 @@ pub fn classify(name: &str, arguments: &Map<String, Value>, cwd: &Path) -> Optio
     }
 }
 
+/// Friday 选的权限模式（只有全权的连接带得来）放不放行：完全 = 都不问；自动 = 删除类、改系统的才问（同 Friday 的 approvalFor）；
+/// 计划、没选照 EDITH 的规则问
+fn mode_allows(name: &str, arguments: &Map<String, Value>, mode: Option<&str>) -> bool {
+    let command = arguments.get("command").and_then(Value::as_str);
+    let path = arguments.get("path").and_then(Value::as_str);
+    match mode {
+        Some("full") => true,
+        Some("auto") => {
+            !friday_core::approval::is_destructive(name, command, cfg!(windows))
+                && !friday_core::approval::is_system_change(name, command, path)
+        }
+        _ => false,
+    }
+}
+
 /// 用工具之前：要批准的去问；不许做返回原因（交给模型）。Ok 里是许不许访问本机 / 内网（fetch_url 每一跳都看）
 pub fn check(
     call: &str,
@@ -331,6 +357,9 @@ pub fn check(
     }
     if auto() {
         return Ok(!guest);
+    }
+    if !guest && !need.private_network && !need.sensitive && mode_allows(name, arguments, context.prefs.mode.as_deref()) {
+        return Ok(false);
     }
     let session_rules = SESSION_RULES.lock().unwrap().get(&context.session).cloned().unwrap_or_default();
     if rules("allow").iter().chain(session_rules.iter()).any(|rule| matches(rule, &need)) {
@@ -478,6 +507,7 @@ mod tests {
             summary: String::new(),
             always: String::new(),
             private_network: false,
+            sensitive: false,
         };
         assert!(matches("run_shell(git status*)", &need) && matches("run_shell", &need) && !matches("run_shell(git push*)", &need));
         assert!(!matches("write_file", &need));
@@ -491,5 +521,19 @@ mod tests {
         );
         assert_eq!(Decision::from_line("n 别删"), Decision::Deny("别删".into()));
         assert_eq!(Decision::from_line("a"), Decision::Always);
+    }
+
+    #[test]
+    fn friday_permission_modes() {
+        let arguments = |value: Value| value.as_object().unwrap().clone();
+        let write = arguments(json!({ "path": "a.txt", "content": "x" }));
+        let remove = arguments(json!({ "command": "rm -rf build" }));
+        let list = arguments(json!({ "command": "ls" }));
+        let system = arguments(json!({ "path": "/etc/hosts", "content": "x" }));
+        // 完全：都不问；自动：删除类、往系统目录写的才问；计划、没选：照 EDITH 的规则
+        assert!(mode_allows("run_shell", &remove, Some("full")));
+        assert!(mode_allows("write_file", &write, Some("auto")) && mode_allows("run_shell", &list, Some("auto")));
+        assert!(!mode_allows("run_shell", &remove, Some("auto")) && !mode_allows("write_file", &system, Some("auto")));
+        assert!(!mode_allows("write_file", &write, Some("plan")) && !mode_allows("write_file", &write, None));
     }
 }

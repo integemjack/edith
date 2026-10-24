@@ -43,6 +43,8 @@ pub enum Event {
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     pub session: String,
+    /// 这一轮按什么来（Friday 客户端在会话上选的）；子智能体照派它的那一轮
+    pub prefs: Prefs,
     pub turn: String,
     pub tools: crate::permissions::Tools,
     /// 话是谁交来的：能力名，终端里打的是空（审批问谁看它）
@@ -51,6 +53,34 @@ pub struct Context {
     pub cancel: Option<std::sync::Arc<AtomicBool>>,
     /// 子智能体自己是谁（主智能体是 None）
     pub me: Option<crate::team::Me>,
+}
+
+/// 这一轮按什么来（sense 带来的，只认全权的连接；没给的照 EDITH 自己的规则和 config.json）
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Prefs {
+    /// 权限模式（同 Friday）：auto = 删除类、改系统的才问；plan = 先给计划、照 EDITH 的规则问；full = 都不问。读敏感的、访问本机 / 内网什么模式都问
+    pub mode: Option<String>,
+    /// 思考档位：off / low / medium / high / ultra（按 high 发）
+    pub thinking: Option<String>,
+    /// 用哪个模型：config.json 的 engines 里的 id
+    pub engine: Option<String>,
+}
+
+impl Prefs {
+    pub fn from_params(params: &Value) -> Prefs {
+        let text = |key: &str, allowed: &[&str]| {
+            params.get(key).and_then(Value::as_str).filter(|value| allowed.is_empty() || allowed.contains(value)).map(str::to_string)
+        };
+        Prefs {
+            mode: text("mode", &["auto", "plan", "full"]),
+            thinking: text("thinking", &["off", "low", "medium", "high", "ultra"]),
+            engine: text("engine", &[]).filter(|engine| !engine.is_empty()),
+        }
+    }
+
+    pub fn plan(&self) -> bool {
+        self.mode.as_deref() == Some("plan")
+    }
 }
 
 /// 一轮的结果
@@ -193,6 +223,50 @@ enum Request {
 }
 
 /// 发一段请求、读完流
+/// 图片在历史里只记路径（file://…，存档不变大）：发请求时才读成 base64；模型看不了图、文件没了的换成一句话
+const IMAGE_PREFIX: &str = "file://";
+
+fn user_content(text: &str, images: &[String], model: &Model) -> Value {
+    if images.is_empty() || !model.supports_vision {
+        return json!(text);
+    }
+    let mut parts = vec![json!({ "type": "text", "text": text })];
+    parts.extend(images.iter().map(|path| json!({ "type": "image_url", "image_url": { "url": format!("{IMAGE_PREFIX}{path}") } })));
+    Value::Array(parts)
+}
+
+fn image_type(path: &str) -> &'static str {
+    match Path::new(path).extension().and_then(|extension| extension.to_str()).map(str::to_lowercase).as_deref() {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        _ => "image/png",
+    }
+}
+
+fn inline_images(mut body: Value, vision: bool) -> Value {
+    use base64::Engine;
+    for message in body["messages"].as_array_mut().into_iter().flatten() {
+        let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) else { continue };
+        for part in parts.iter_mut() {
+            let Some(path) = part["image_url"]["url"].as_str().and_then(|url| url.strip_prefix(IMAGE_PREFIX)).map(str::to_string) else {
+                continue;
+            };
+            let bytes = std::fs::read(&path).ok().filter(|bytes| bytes.len() <= 20 * 1024 * 1024);
+            *part = match bytes {
+                Some(bytes) if vision => {
+                    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    json!({ "type": "image_url", "image_url": { "url": format!("data:{};base64,{data}", image_type(&path)) } })
+                }
+                Some(_) => json!({ "type": "text", "text": format!("（附了一张图片：{path}；这个模型看不了图）") }),
+                None => json!({ "type": "text", "text": format!("（附过一张图片：{path}，已经不在了或太大）") }),
+            };
+        }
+    }
+    body
+}
+
 fn request(
     brain: &mut Loop,
     model: &Model,
@@ -203,7 +277,7 @@ fn request(
     on: &mut dyn FnMut(Event),
 ) -> Request {
     let url = format!("{}/chat/completions", model.base_url);
-    let body = brain.body(include_tools, None);
+    let body = inline_images(brain.body(include_tools, None), model.supports_vision);
     let mut parser = Parser::new(show_reasoning, true);
     let started = now_ms();
     let mut first: Option<i64> = None;
@@ -310,6 +384,7 @@ pub fn run(
     model: &Model,
     history: Vec<Value>,
     user_text: &str,
+    images: &[String],
     cwd: &Path,
     cancel: &AtomicBool,
     context: &Context,
@@ -329,7 +404,14 @@ pub fn run(
         Some(me) => crate::team::instructions(cwd, me),
         None => instructions(cwd),
     };
-    let extra = on_demand(context);
+    let mut extra = on_demand(context);
+    if context.prefs.plan() {
+        extra = [extra, prompts::text("edith.plan-mode", &args(&[]), None)]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+    }
     let mut settings = Settings {
         instructions: if extra.is_empty() { base } else { format!("{base}\n\n{extra}") },
         tools: tool_specs(context, &history),
@@ -340,9 +422,18 @@ pub fn run(
         has_dispatch: true,
         ..Settings::default()
     };
+    // Friday 选的思考档位（这个模型能调的才管用）
+    if let Some(level) = context.prefs.thinking.as_deref().filter(|_| model.thinking != "none") {
+        settings.enable_thinking = level != "off";
+        settings.reasoning_effort = match level {
+            "low" | "medium" | "high" => Some(level.to_string()),
+            "ultra" => Some("high".into()),
+            _ => None,
+        };
+    }
     let mut brain = Loop::new(config, history);
     brain.begin(settings.clone());
-    brain.append(vec![json!({ "role": "user", "content": user_text })]);
+    brain.append(vec![json!({ "role": "user", "content": user_content(user_text, images, model) })]);
     let finish = |brain: &Loop, answer: String, error: Option<String>, stopped: bool| Turn {
         history: brain.history().to_vec(),
         answer,

@@ -50,6 +50,10 @@ pub struct Origin {
     pub from: String,
     /// 它交来的话那一轮能用哪些工具（令牌定的；终端里打的全部能用）
     pub tools: crate::permissions::Tools,
+    /// 这一轮按什么来（权限模式、思考档位、模型；只认全权的连接）
+    pub prefs: brain::Prefs,
+    /// 附的图片（这台上的路径）：模型能看图时随这段话一起给它（只认全权的连接）
+    pub images: Vec<String>,
 }
 
 impl Origin {
@@ -387,7 +391,7 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
     if session.title.is_empty() {
         session.title = input.text.replace('\n', " ").chars().take(40).collect();
     }
-    let model = match Model::load() {
+    let model = match Model::load_engine(input.origin.prefs.engine.as_deref()) {
         Ok(model) => model,
         Err(message) => return failed(message),
     };
@@ -395,6 +399,7 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
     let cwd = if cwd.is_dir() { cwd } else { crate::home::user_home() };
     let context = brain::Context {
         session: session_id.to_string(),
+        prefs: input.origin.prefs.clone(),
         turn: input.turn.clone(),
         tools: input.origin.tools.clone(),
         origin: input.origin.capability.clone(),
@@ -420,18 +425,20 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         }
         taken.iter().map(|item| item.origin.wrap("edith.interjection", &item.text)).collect::<Vec<_>>()
     };
-    let mut turn = brain::run(&model, std::mem::take(&mut session.history), &text, &cwd, cancel, &context, &mut on_event, &mut interject);
+    let history = std::mem::take(&mut session.history);
+    let mut turn = brain::run(&model, history, &text, &input.origin.images, &cwd, cancel, &context, &mut on_event, &mut interject);
     // 交付检查（checks.rs）：写完没验证、交的是方案、只说了下一步、问要不要修——追一条提醒接着做，每种最多一次
     let request = request_of(session_id);
     let delegates = context.tools.allows("delegate_task", false);
     let mut checked = std::collections::HashSet::new();
-    while !turn.stopped && turn.error.is_none() && !cancel.load(Ordering::Relaxed) {
+    // 计划模式交的就是计划：不追「只交了方案」这类提醒（同 Friday）
+    while !turn.stopped && turn.error.is_none() && !cancel.load(Ordering::Relaxed) && !context.prefs.plan() {
         let followup = crate::checks::main_followup(&request, &recorder.lock().unwrap().blocks, delegates, &checked);
         let Some(followup) = followup else { break };
         checked.insert(followup.kind);
         emit(session_id, &input.turn, "notice", json!({ "text": followup.notice }));
         let previous = turn.answer.clone();
-        turn = brain::run(&model, turn.history, &followup.prompt, &cwd, cancel, &context, &mut on_event, &mut interject);
+        turn = brain::run(&model, turn.history, &followup.prompt, &[], &cwd, cancel, &context, &mut on_event, &mut interject);
         if turn.answer.trim().is_empty() {
             turn.answer = previous;
         }

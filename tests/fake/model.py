@@ -47,6 +47,10 @@ class Handler(BaseHTTPRequestHandler):
         with open(LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(body, ensure_ascii=False) + "\n")
         messages = body["messages"]
+        # 带图片的用户消息是一段段的（text / image_url）：按文字看
+        for m in messages:
+            if isinstance(m.get("content"), list):
+                m["content"] = "\n".join(part.get("text", "") for part in m["content"] if part.get("type") == "text")
         tools = [m for m in messages if m["role"] == "tool"]
         last_user = [m for m in messages if m["role"] == "user"][-1]["content"]
         # 「出错测试」：第一次回 400（不会自动重试的那种），之后照常（测重试）

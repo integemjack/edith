@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -696,11 +696,24 @@ impl Capability {
             "agent" => "message",
             kind => kind,
         };
+        // 权限模式、思考档位、模型、附图：只有全权的连接说了算（客人不能替自己放开审批，也不能拿这台的文件给模型看）
+        let full = self.full();
+        let images = params
+            .get("images")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|path| full && Path::new(path).is_file())
+            .map(str::to_string)
+            .collect();
         Origin {
             capability: self.name.clone(),
             kind: kind.to_string(),
             from: params.get("from").and_then(Value::as_str).unwrap_or("").to_string(),
             tools: self.grant.tools.clone(),
+            prefs: if full { crate::brain::Prefs::from_params(params) } else { Default::default() },
+            images,
         }
     }
 

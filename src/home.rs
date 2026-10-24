@@ -139,11 +139,41 @@ pub struct Model {
     pub extra_body: String,
 }
 
+/// 密钥库：`~/.edith/secrets.json`（{名字: 值}，只有自己能读）。config.json 的 engines 按名字引用（apiKeySecret），值不出这台
+pub fn secrets_path() -> PathBuf {
+    dir().join("secrets.json")
+}
+
+/// 一个密钥的值：密钥库里的，没有看同名的环境变量
+pub fn secret(name: &str) -> Option<String> {
+    read_json(&secrets_path())
+        .and_then(|all| all.get(name).and_then(Value::as_str).map(str::to_string))
+        .or_else(|| std::env::var(name).ok())
+        .filter(|value| !value.is_empty())
+}
+
 impl Model {
-    /// config.json 的值，环境变量 EDITH_BASE_URL / EDITH_API_KEY / EDITH_MODEL 盖掉同名的
+    /// 默认的模型（见 load_engine）
     pub fn load() -> Result<Model, String> {
+        Model::load_engine(None)
+    }
+
+    /// 用哪个模型：engine 是 config.json 的 `engines` 里的 id（格式同 Friday 的 EngineConfig：id、baseURL、model、apiKeySecret、
+    /// supportsVision、thinking、extraBody……，密钥按名字在 secrets.json 里）；没给时用 `defaultEngine`，再没有（或设了环境变量
+    /// EDITH_MODEL）用顶层的 baseURL / apiKey / model，环境变量 EDITH_BASE_URL / EDITH_API_KEY / EDITH_MODEL 盖掉同名的
+    pub fn load_engine(engine: Option<&str>) -> Result<Model, String> {
         let path = dir().join("config.json");
         let config = read_json(&path).unwrap_or_else(|| json!({}));
+        let overridden = std::env::var("EDITH_MODEL").is_ok_and(|value| !value.is_empty());
+        let wanted = engine
+            .map(str::to_string)
+            .or_else(|| config.get("defaultEngine").and_then(Value::as_str).filter(|_| !overridden).map(str::to_string));
+        let entry = wanted.and_then(|id| {
+            config.get("engines")?.as_array()?.iter().find(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str())).cloned()
+        });
+        if let Some(entry) = entry {
+            return Model::from_engine(&config, entry);
+        }
         let text = |key: &str, variable: &str| {
             std::env::var(variable)
                 .ok()
@@ -177,6 +207,29 @@ impl Model {
                 .unwrap_or_default(),
             base_url,
             model,
+        })
+    }
+
+    fn from_engine(config: &Value, entry: Value) -> Result<Model, String> {
+        let engine = friday_core::engines::normalize(vec![entry]).pop().ok_or("config.json 的 engines 里有一项读不了")?;
+        let secret_name = engine.api_key_secret.trim().to_string();
+        let api_key = if secret_name.is_empty() || secret_name.eq_ignore_ascii_case("none") {
+            String::new()
+        } else {
+            secret(&secret_name).unwrap_or_default()
+        };
+        Ok(Model {
+            base_url: engine.base_url.trim_end_matches('/').to_string(),
+            api_key,
+            thinking: engine
+                .thinking
+                .clone()
+                .unwrap_or_else(|| friday_core::engines::inferred_thinking(&engine.base_url, engine.sends_enable_thinking).to_string()),
+            enable_thinking: config.get("enableThinking").and_then(Value::as_bool).unwrap_or(false),
+            temperature: config.get("temperature").and_then(Value::as_f64).unwrap_or(0.7),
+            supports_vision: engine.supports_vision,
+            extra_body: engine.extra_body.clone(),
+            model: engine.model,
         })
     }
 

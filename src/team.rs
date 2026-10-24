@@ -92,6 +92,8 @@ struct Agent {
     /// 派它的那一轮的权限、来源（审批问谁看它）
     tools: Tools,
     origin: String,
+    /// 派它的那一轮按什么来（权限模式、思考档位、模型）
+    prefs: crate::brain::Prefs,
     /// 通知记在哪一轮（打回时换成打回它的那一轮）
     turn: Mutex<String>,
     deadline: Option<u64>,
@@ -338,6 +340,7 @@ fn create(spec: &Value, context: &Context, cwd: &Path, call: &str, slot: usize, 
         cwd: cwd.to_path_buf(),
         tools: context.tools.clone(),
         origin: context.origin.clone(),
+        prefs: context.prefs.clone(),
         turn: Mutex::new(context.turn.clone()),
         deadline: spec.get("deadline_seconds").and_then(Value::as_u64).filter(|seconds| *seconds > 0),
         state: Mutex::new(State::Waiting),
@@ -571,9 +574,10 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
         } else {
             notice(agent, format!("子 Agent「{}」按验收意见接着改", agent.name));
         }
-        let model = Model::load().map_err(|error| (State::Failed, error))?;
+        let model = Model::load_engine(agent.prefs.engine.as_deref()).map_err(|error| (State::Failed, error))?;
         let context = Context {
             session: agent.session.clone(),
+            prefs: agent.prefs.clone(),
             turn: agent.turn.lock().unwrap().clone(),
             tools: agent.tools.clone(),
             origin: agent.origin.clone(),
@@ -601,7 +605,7 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
                 }
                 taken
             };
-            let turn = brain::run(&model, history, &message, &agent.cwd, &cancel, &context, &mut on, &mut interject);
+            let turn = brain::run(&model, history, &message, &[], &agent.cwd, &cancel, &context, &mut on, &mut interject);
             history = turn.history;
             if turn.stopped {
                 *agent.history.lock().unwrap() = history;

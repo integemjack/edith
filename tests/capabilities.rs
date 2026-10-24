@@ -549,3 +549,34 @@ fn sessions_fork_truncate_and_copy() {
     assert!(full > 2);
     assert_eq!((history(&fork), history(&session)), (2, full));
 }
+
+#[test]
+fn sense_brings_mode_thinking_engine_and_images() {
+    let (work, home) = scratch("prefs");
+    let model = fake_model(&home.join("requests.jsonl"));
+    // 第二个模型（同一个假模型、另一个名字），密钥按名字在 secrets.json 里
+    let engine = json!({
+        "id": "second", "title": "第二个", "baseURL": format!("http://127.0.0.1:{}/v1", model.port), "model": "second-model",
+        "apiKeySecret": "SECOND_KEY", "supportsVision": true, "thinking": "effort",
+    });
+    std::fs::write(home.join("config.json"), json!({ "engines": [engine] }).to_string()).unwrap();
+    std::fs::write(home.join("secrets.json"), json!({ "SECOND_KEY": "k" }).to_string()).unwrap();
+    std::fs::write(work.join("shot.png"), [0x89, b'P', b'N', b'G']).unwrap();
+    // 完全模式：写文件不问（这个能力不能批准，照 EDITH 的规则就没人能批、不做）
+    let params = json!({
+        "text": r#"调用工具 write_file 参数 {"path":"made.txt","content":"x\n"}"#, "kind": "user",
+        "mode": "full", "thinking": "high", "engine": "second", "images": [work.join("shot.png")],
+    });
+    configure_cap(&home, json!([{ "delay": 0.3, "send": { "jsonrpc": "2.0", "method": "sense", "params": params } }]), "done");
+    let _edith = run(&home, model.port, &work);
+    assert!(wait_until(30, || work.join("made.txt").exists()), "完全模式下写文件没做：{:?}", received(&home));
+    let requests: Vec<Value> =
+        std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let first = &requests[0];
+    assert_eq!((first["model"].as_str(), first["reasoning_effort"].as_str()), (Some("second-model"), Some("high")), "{first}");
+    // 图片随这段话给模型（存档里只记路径，发的时候才读成 base64）
+    let user = first["messages"].as_array().unwrap().iter().find(|message| message["role"] == "user").unwrap();
+    assert!(user["content"].to_string().contains("data:image/png;base64,iVBORw=="), "{user}");
+    let stored = common::read_sessions(&home, &work)[0]["history"][0]["content"].to_string();
+    assert!(stored.contains("file://") && !stored.contains("base64"), "{stored}");
+}
