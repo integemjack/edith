@@ -1,13 +1,13 @@
 # EDITH
 
 下一代的大脑（原型）。给它用户的话，它自己调模型、用内置工具（读写改文件、找文件、搜内容、抓网页、跑命令）把事做完、存好会话。
-助手、聊天渠道、浏览器、本地模型、通话、桌面客户端都是**能力**（四肢）：本机进程，经 stdio 和大脑**双向、实时**地通信——
-能力能主动把内容推给大脑（打断、补充、排队、只记下），大脑能让能力做动作、把干活的过程实时推给它。没有能力也能干活，接上了更强。
+助手、聊天渠道、浏览器、本地模型、通话、桌面客户端都是**能力**（四肢）。大脑只有一个接口——本机套接字，所有能力都从它连进来、
+都是一级能力，和大脑**双向、实时**地通信：能力能主动把内容推给大脑（打断、补充、排队、只记下），大脑能让能力做动作、
+把干活的过程实时推给它。没有能力也能干活，接上了更强。
 
 - 设计：[docs/EDITH.md](docs/EDITH.md)
 - **能力协议（开放接口）**：[docs/CAPABILITY-PROTOCOL.md](docs/CAPABILITY-PROTOCOL.md)——任何语言照着写一个能力就能接上
-- WebSocket 能力（让网页、手机、别的机器连 EDITH）：[docs/WEBSOCKET.md](docs/WEBSOCKET.md)
-- 共享设备（麦克风、摄像头、串口这类独占设备，几个目录的大脑共用一个）：[docs/DEVICES.md](docs/DEVICES.md)
+- 共用的工具（WebSocket 中转、共享设备、MCP 桥）：[edith.tools](https://github.com/integemjack/edith.tools)，`edith tools` 下载，要用时也会自己下
 - 示例能力：[examples/notes.py](examples/notes.py)（动作）、[examples/inbox.py](examples/inbox.py)（主动推内容 + 收事件）
 
 ```bash
@@ -16,8 +16,8 @@ edith .                               # 一句一句聊（干活时再打字算�
 edith attach                          # 接到这个目录正在跑的大脑上
 edith instances                       # 这台机器上在跑的大脑
 edith capabilities add inbox python3 -u examples/inbox.py ~/edith-inbox   # 接一个能力
-edith capabilities add ws edith-websocket --listen 127.0.0.1:7789         # 让网页、手机连进来
-edith capabilities add-mcp fs npx -y @modelcontextprotocol/server-filesystem ~/Documents   # 接一个 MCP 服务
+edith capabilities add ws edith-websocket          # 让网页、手机连进来（edith-websocket 本机没有就自己下）
+edith capabilities add-mcp fs npx -y @modelcontextprotocol/server-filesystem ~/Documents   # 接一个 MCP 服务（经 edith-mcp）
 edith run                             # 一直开着，只听能力的
 ```
 
@@ -28,13 +28,12 @@ edith run                             # 一直开着，只听能力的
 
 ```
 src/            main（命令行）、mind（调度：会话、急缓、事件）、brain（一轮对话）、tools（自带工具）、
-                capabilities + protocol（能力协议）、mcp（MCP 能力）、instance（本机接入、登记）、attach（接上去的终端）、
+                capabilities + protocol（能力协议）、instance（套接字、登记）、attach（接上去的终端）、downloads（edith tools）、
                 worktree（目录忙时开 git worktree）、terminal（终端上的样子）、sessions、http、home
-capabilities/   websocket/：edith-websocket（WebSocket 能力）；connect/：edith-connect（共享设备的中转和设备服务）——都只讲能力协议
 examples/       示例能力（Python 标准库）
 prompts/        提示词：edith.md 是 EDITH 自己的；prompts-tools.md、prompts-framework.md 抄自 Friday（工具说明、循环里的提醒）
 core/           子模块 integemjack/friday.core（Friday 的 Swift / Qt 两端也用它）：对话循环、请求体、流式解析、文件工具、MCP 客户端等规则
-tests/          端到端测试：tests/fake/ 里的假模型（OpenAI 流式）、假能力（cap.py）、假 MCP 服务（limb.py）
+tests/          端到端测试：tests/fake/ 里的假模型（OpenAI 流式）、假能力（cap.py，连进套接字）
 ```
 
 ## 开发
@@ -45,7 +44,7 @@ cargo test            # 要 python3（假模型、假能力）
 cargo build --release
 ```
 
-每次推送 GitHub Actions 编全平台、全架构的包：macOS（arm64、x64）、Windows（x64、x86、arm64）、Linux（x64、x86、arm64、armv7、
+每次推送 GitHub Actions 编全平台、全架构的包（只有 edith 一个程序）：macOS（arm64、x64）、Windows（x64、x86、arm64）、Linux（x64、x86、arm64、armv7、
 armv6、riscv64、loong64、ppc64le、s390x；zig 编成 musl 静态程序，不挑发行版），能在运行器上原生跑的同时跑端到端测试；
 推到 `main` 的发一个 Release（`v<版本前两位>.<序号>`，只留最新一个）。
 改 friday.core：在 `core/` 里拉新提交，提交子模块指针。

@@ -1,24 +1,30 @@
-"""测试用的能力（讲 EDITH 能力协议，只用标准库）：
+"""测试用的能力（讲 EDITH 能力协议，只用标准库）：大脑起它，它连进大脑的套接字（EDITH_ACCESS，先报令牌）；
 - 回 initialize：一个动作 remember、一种感知 speech；订哪些事件看环境变量 CAP_RECEIVES（逗号分开，默认 done,turn.started）
 - 回 act：remember → 「记住了：<text>」（先等 CAP_ACT_DELAY 秒）
 - 握手后按 CAP_SCRIPT（JSON 数组：[{"delay": 秒, "send": 一条消息}]）按时发消息给 EDITH
-- 收到的每一条都记进 CAP_LOG（一行一条）；EDITH 关 stdin 或发 shutdown 就退出"""
+- 收到的每一条都记进 CAP_LOG（一行一条）；大脑断开或发 shutdown 就退出"""
 import json
 import os
+import socket
 import sys
 import threading
 import time
 
-sys.stdin.reconfigure(encoding="utf-8")
-sys.stdout.reconfigure(encoding="utf-8")
 LOG = os.environ.get("CAP_LOG")
 lock = threading.Lock()
+host, port = os.environ["EDITH_ACCESS"].rsplit(":", 1)
+connection = socket.create_connection((host, int(port)))
+reader = connection.makefile("r", encoding="utf-8")
+writer = connection.makefile("w", encoding="utf-8")
 
 
 def send(message):
     with lock:
-        sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
+        writer.write(json.dumps(message, ensure_ascii=False) + "\n")
+        writer.flush()
+
+
+send({"jsonrpc": "2.0", "method": "auth", "params": {"token": os.environ["EDITH_ACCESS_TOKEN"]}})
 
 
 def log(message):
@@ -34,13 +40,14 @@ def script():
 
 
 receives = [kind for kind in os.environ.get("CAP_RECEIVES", "done,turn.started").split(",") if kind]
-for line in sys.stdin:
+for line in reader:
     message = json.loads(line)
     log(message)
     method = message.get("method")
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": message["id"], "result": {
             "protocolVersion": "1",
+            "name": os.environ.get("EDITH_CAPABILITY", "cap"),
             "capability": {"title": "测试能力", "version": "1"},
             "senses": [{"kind": "speech", "description": "假装听到的话"}],
             "actions": [{"name": "remember", "description": "记住一句话",

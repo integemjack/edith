@@ -12,10 +12,10 @@ use friday_core::quota::{self, Limit};
 use friday_core::{chat_request, tool_aliases};
 use serde_json::{Map, Value, json};
 
+use crate::capabilities;
 use crate::home::{self, Model};
 use crate::http::{self, Failure};
 use crate::tools::{self, Outcome};
-use crate::{capabilities, mcp};
 
 /// 一轮里最多请求几次模型（到了让模型把目前的结果交出来）
 const MAX_TOOL_ROUNDS: i64 = 200;
@@ -87,7 +87,7 @@ fn args(pairs: &[(&str, String)]) -> prompts::Args {
 
 /// 系统提示
 pub fn instructions(cwd: &Path) -> String {
-    let list = [capabilities::summary(), mcp::summary()].into_iter().filter(|text| !text.is_empty()).collect::<Vec<_>>().join("\n");
+    let list = capabilities::summary();
     let capabilities = if list.is_empty() { String::new() } else { prompts::text("edith.capabilities", &args(&[("list", list)]), None) };
     prompts::text(
         "edith.main",
@@ -105,11 +105,10 @@ pub fn instructions(cwd: &Path) -> String {
     )
 }
 
-/// 给模型的工具：自带的 + 能力的动作 + MCP 带来的
+/// 给模型的工具：自带的 + 能力的动作
 pub fn tool_specs() -> Vec<Value> {
     let mut specs = tools::specs();
     specs.extend(capabilities::specs());
-    specs.extend(mcp::specs());
     specs
 }
 
@@ -124,12 +123,9 @@ fn wait(seconds: f64, cancel: &AtomicBool) {
     }
 }
 
-/// 用一个工具：自带的、能力的动作、MCP 的；名字写走样的按 Friday 的别名表认回来
+/// 用一个工具：自带的、能力的动作；名字写走样的按 Friday 的别名表认回来
 fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, context: &Context) -> Outcome {
-    if let Some(outcome) = tools::run(name, arguments, cwd, cancel)
-        .or_else(|| capabilities::call(name, arguments, context, cancel))
-        .or_else(|| mcp::call(name, arguments))
-    {
+    if let Some(outcome) = tools::run(name, arguments, cwd, cancel).or_else(|| capabilities::call(name, arguments, context, cancel)) {
         return outcome;
     }
     let canonical = tool_aliases::canonical_name(name);

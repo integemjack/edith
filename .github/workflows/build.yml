@@ -106,11 +106,11 @@ jobs:
         run: |
           name="edith-${{ steps.version.outputs.tag }}-${{ matrix.key }}"
           mkdir -p "dist/$name"
-          cp "target/$TARGET/release/edith" "target/$TARGET/release/edith-websocket" "target/$TARGET/release/edith-connect" README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cp "target/$TARGET/release/edith" README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
           cp -R docs examples "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -rf "dist/$name"
-          file "target/$TARGET/release/edith" "target/$TARGET/release/edith-websocket" "target/$TARGET/release/edith-connect" || true
+          file "target/$TARGET/release/edith" || true
           if [ "${{ matrix.test }}" = "true" ]; then "target/$TARGET/release/edith" --version; fi
 
       - name: Package (Windows)
@@ -119,7 +119,7 @@ jobs:
         run: |
           $name = "edith-${{ steps.version.outputs.tag }}-${{ matrix.key }}"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item "target/$env:TARGET/release/edith.exe", "target/$env:TARGET/release/edith-websocket.exe", "target/$env:TARGET/release/edith-connect.exe", README.md, LICENSE-MIT, LICENSE-APACHE "dist/$name/"
+          Copy-Item "target/$env:TARGET/release/edith.exe", README.md, LICENSE-MIT, LICENSE-APACHE "dist/$name/"
           Copy-Item -Recurse docs, examples "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
           Remove-Item -Recurse "dist/$name"
@@ -157,7 +157,7 @@ jobs:
           (cd dist && sha256sum * > SHA256SUMS)
           notes="EDITH ${tag}（$(git log -1 --format=%s)）
 
-          解压得到 edith、edith-websocket、edith-connect（Windows 是 .exe），用法见 README.md；能力协议见 docs/CAPABILITY-PROTOCOL.md、共享设备见 docs/DEVICES.md。
+          解压得到 edith（Windows 是 edith.exe），用法见 README.md；能力协议见 docs/CAPABILITY-PROTOCOL.md；共用的工具 edith tools 自己下（integemjack/edith.tools）。
           - macOS：arm64、x64
           - Windows：x64、x86、arm64
           - Linux（musl 静态程序，任何发行版都能跑）：x64、x86、arm64、armv7、armv6、riscv64、loong64、ppc64le；s390x（glibc ≥ 2.17）"

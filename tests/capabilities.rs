@@ -1,4 +1,4 @@
-//! 能力协议端到端（docs/CAPABILITY-PROTOCOL.md）：假模型 + 假能力（tests/fake/cap.py）、WebSocket 能力（edith-websocket）
+//! 能力协议端到端（docs/CAPABILITY-PROTOCOL.md）：假模型 + 假能力（tests/fake/cap.py，大脑起它、它连进套接字）
 
 mod common;
 
@@ -185,68 +185,6 @@ fn interject_joins_the_running_turn() {
     assert_eq!(done[1]["data"]["answer"], "你好，我是 EDITH。");
     let requests = std::fs::read_to_string(home.join("requests.jsonl")).unwrap();
     assert!(requests.contains("在你工作时补充了下面这段"), "{requests}");
-}
-
-#[test]
-fn websocket_capability_bridges_remote_clients() {
-    let (work, home) = scratch("websocket");
-    let model = fake_model(&home.join("requests.jsonl"));
-    // 端口让它自己挑：地址在 ~/.edith/instances/ 的登记里（它握手时报的 endpoints）
-    let config = json!({ "capabilities": [{
-        "name": "ws",
-        "command": env!("CARGO_BIN_EXE_edith-websocket"),
-        "args": ["--token", "secret"],
-    }]});
-    std::fs::write(home.join("capabilities.json"), config.to_string()).unwrap();
-    let _edith = run(&home, model.port, &work);
-    let mut base = String::new();
-    assert!(wait_until(20, || {
-        let entries = std::fs::read_dir(home.join("instances")).into_iter().flatten().flatten();
-        for entry in entries {
-            let value: Value = serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap_or_default()).unwrap_or(Value::Null);
-            if let Some(url) = value["endpoints"][0]["url"].as_str() {
-                base = url.to_string();
-                return true;
-            }
-        }
-        false
-    }));
-    let url = format!("{base}/?token=secret&name=phone");
-    let mut socket = None;
-    assert!(wait_until(20, || {
-        socket = tungstenite::connect(&url).ok().map(|(socket, _)| socket);
-        socket.is_some()
-    }));
-    let mut socket = socket.unwrap();
-    // 令牌不对连不上
-    assert!(tungstenite::connect(format!("{base}/?token=wrong")).is_err());
-    let send =
-        |socket: &mut tungstenite::WebSocket<_>, message: Value| socket.send(tungstenite::Message::text(message.to_string())).unwrap();
-    send(&mut socket, request(1, "ask", json!({ "text": "只聊天" })));
-    let mut texts = String::new();
-    let answer = loop {
-        let message = socket.read().unwrap();
-        let Ok(value) = serde_json::from_str::<Value>(message.to_text().unwrap_or("")) else { continue };
-        if value["method"] == "event" && value["params"]["type"] == "text" {
-            texts.push_str(value["params"]["data"]["text"].as_str().unwrap_or(""));
-        }
-        if value["method"] == "event" && value["params"]["type"] == "turn.started" {
-            assert_eq!(value["params"]["data"]["origin"]["from"], "phone");
-        }
-        if value["id"] == 1 {
-            break value;
-        }
-    };
-    assert_eq!(answer["result"]["answer"], "你好，我是 EDITH。", "{answer}");
-    assert_eq!(texts, "你好，我是 EDITH。");
-    send(&mut socket, request(2, "nope", json!({})));
-    let reply = loop {
-        let value: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap_or("")).unwrap_or(Value::Null);
-        if value["id"] == 2 {
-            break value;
-        }
-    };
-    assert_eq!(reply["error"]["code"], -32601);
 }
 
 #[test]

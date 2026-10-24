@@ -5,19 +5,24 @@
 笔记存在 ~/.edith/notes.json（EDITH_HOME 换了就跟着换）。"""
 import json
 import os
+import socket
 import sys
 import time
 
-# 协议一律 UTF-8、一行一条；日志写标准错误（EDITH 收进 ~/.edith/logs/notes.log）
-sys.stdin.reconfigure(encoding="utf-8")
-sys.stdout.reconfigure(encoding="utf-8")
+# 协议一律 UTF-8、一行一条；日志写标准错误（EDITH 收进 .edith/logs/notes.log）
+# 大脑起它时给接入地址、令牌、名字：连进大脑的套接字，第一行报令牌（docs/CAPABILITY-PROTOCOL.md §1）
+host, port = os.environ["EDITH_ACCESS"].rsplit(":", 1)
+connection = socket.create_connection((host, int(port)))
+reader = connection.makefile("r", encoding="utf-8")
+writer = connection.makefile("w", encoding="utf-8")
+NAME = os.environ.get("EDITH_CAPABILITY", "notes")
 HOME = os.environ.get("EDITH_HOME") or os.path.join(os.path.expanduser("~"), ".edith")
 NOTES = os.path.join(HOME, "notes.json")
 
 
 def send(message):
-    sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    writer.write(json.dumps(message, ensure_ascii=False) + "\n")
+    writer.flush()
 
 
 def reply(request, result=None, error=None):
@@ -66,12 +71,14 @@ def act(action, arguments):
     raise KeyError(action)
 
 
-for line in sys.stdin:
+send({"jsonrpc": "2.0", "method": "auth", "params": {"token": os.environ["EDITH_ACCESS_TOKEN"]}})
+for line in reader:
     message = json.loads(line)
     method = message.get("method")
     if method == "initialize":
         reply(message, {
             "protocolVersion": "1",
+            "name": NAME,
             "capability": {"title": "笔记本", "version": "1.0", "description": "记笔记、查笔记"},
             "senses": [],
             "actions": ACTIONS,

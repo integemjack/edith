@@ -7,12 +7,17 @@ EDITH 干完，它把回答写到同名的 .answer.md。文件名以 urgent- 开
 然后 edith run（一直开着），往文件夹里丢文件试试。"""
 import json
 import os
+import socket
 import sys
 import threading
 import time
 
-sys.stdin.reconfigure(encoding="utf-8")
-sys.stdout.reconfigure(encoding="utf-8")
+# 大脑起它时给接入地址、令牌、名字：连进大脑的套接字，第一行报令牌（docs/CAPABILITY-PROTOCOL.md §1）
+host, port = os.environ["EDITH_ACCESS"].rsplit(":", 1)
+connection = socket.create_connection((host, int(port)))
+reader = connection.makefile("r", encoding="utf-8")
+writer = connection.makefile("w", encoding="utf-8")
+NAME = os.environ.get("EDITH_CAPABILITY", "inbox")
 FOLDER = os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else "~/edith-inbox")
 lock = threading.Lock()
 next_id = 0
@@ -24,8 +29,8 @@ turns = {}
 
 def send(message):
     with lock:
-        sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
+        writer.write(json.dumps(message, ensure_ascii=False) + "\n")
+        writer.flush()
 
 
 def log(text):
@@ -64,12 +69,14 @@ def watch():
             log(f"交上去了：{name}")
 
 
-for line in sys.stdin:
+send({"jsonrpc": "2.0", "method": "auth", "params": {"token": os.environ["EDITH_ACCESS_TOKEN"]}})
+for line in reader:
     message = json.loads(line)
     method = message.get("method")
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": message["id"], "result": {
             "protocolVersion": "1",
+            "name": NAME,
             "capability": {"title": "收件箱", "version": "1.0", "description": f"把 {FOLDER} 里新放的 .txt 交给 EDITH"},
             "senses": [{"kind": "file", "description": "文件夹里新放进来的文字"}],
             "actions": [],

@@ -1,37 +1,31 @@
 # EDITH 能力协议（第 1 版）
 
-EDITH 是大脑；**能力**是它的四肢：耳朵、嘴、手、聊天渠道、桌面客户端、WebSocket 桥、机器人硬件……
-能力和大脑之间是一条**双向、实时**的连接：
+EDITH 是大脑；**能力**是它的四肢：耳朵、嘴、手、聊天渠道、桌面客户端、远程设备、机器人硬件……
+大脑只有**一个接口：本机套接字**。所有能力都从它连进来、都是**一级能力**，和大脑之间是一条**双向、实时**的连接：
 
 - 能力可以**主动**把内容推给大脑（听到一句话、收到一条消息、看到一个画面、一个文件变了），也可以交给大脑一件事等它的回答；
 - 大脑让能力**做动作**，并把**干活的过程实时**推给关心的能力（边想边说的语音、边写边显示的界面）。
 
-这和 MCP 不同：MCP 只能由大脑去调用工具，服务端没法主动对大脑说话。只会被调用的 MCP 服务在 EDITH 里也能接，算一种「不会说话的能力」（[§9](#9-mcp-能力)）。
+这和 MCP 不同：MCP 只能由大脑去调用工具，服务端没法主动对大脑说话。MCP 服务经桥 `edith-mcp` 也能接，算一种「不会说话的能力」（[§9](#9-mcp-能力)）。
 
 本文档是开放的：任何语言、任何人都可以照着写一个能力。示例见 [`examples/`](../examples)（Python 标准库，几十行）、
-[`tests/fake/cap.py`](../tests/fake/cap.py)；WebSocket 能力 [`edith-websocket`](WEBSOCKET.md) 也是照这份协议写的、不用大脑的代码。
+[`tests/fake/cap.py`](../tests/fake/cap.py)。共用的工具——WebSocket 中转、共享设备、MCP 桥——在
+[edith.tools](https://github.com/integemjack/edith.tools)，也是照这份协议写的、不用大脑的代码，大脑要用时自己下载（[§8.4](#84-共用的工具edithtools)）。
 
 ---
 
-## 1. 传输
+## 1. 传输：大脑的套接字
 
-**大脑不碰网络**：WebSocket、HTTP、MQTT、串口、蓝牙……都由能力自己去接（比如 [WebSocket 能力](WEBSOCKET.md)）。
-协议本身和怎么连无关，EDITH 认两种本机的接法，消息一模一样：
+**大脑只有这一个接口**，网络（WebSocket、HTTP、MQTT、串口、蓝牙……）都由能力自己去接（比如 edith.tools 的 WebSocket 中转
+替每个远程客户端各开一条连接进来）。
 
-1. **stdio**（主要的）：EDITH 按 `capabilities.json`（[§8](#8-配置capabilitiesjson)）起能力的进程，经它的标准输入 / 输出讲；
-2. **本机接入**：自己打开的程序（终端 `edith attach`、桌面端……）连到在跑的大脑上。每个大脑在 `127.0.0.1` 的随机端口上等，
-   地址和令牌写在 `~/.edith/instances/<目录的键>-<进程号>.json`（只有本用户能读，[§8.2](#82-在跑的大脑instances)）。
-   连上后**第一行**先报令牌：`{"jsonrpc": "2.0", "method": "auth", "params": {"token": "…"}}`，不对就断开；
-   之后和 stdio 一样（EDITH 发 `initialize`……）。一条连接就是一个能力，断开就摘掉、不重启。
-
-下面说 stdio，本机接入只是把「标准输入 / 输出」换成这条 TCP 连接（日志用 `log` 通知）。
-
-- EDITH 按配置起能力的进程。
-- **标准输入 / 标准输出**：协议消息，**一行一条 JSON**（UTF-8，以 `\n` 结尾；JSON 里的换行要转义成 `\n`，不能有裸换行）。
-  空行忽略。不是 JSON 的行 EDITH 回 `-32700` 并记日志。
-- **标准错误**：日志，随便写；EDITH 逐行记进 `~/.edith/logs/<能力名>.log`（`edith -v` 时也打到终端）。
-- 编码一律 UTF-8。Windows 上的 Python 记得 `sys.stdin.reconfigure(encoding="utf-8")`、`sys.stdout.reconfigure(encoding="utf-8")`。
-- 进程起来时的环境变量：EDITH 自己的环境 + 配置里的 `env` + `EDITH_CAPABILITY=<能力名>`。
+- 每个在跑的大脑在 `127.0.0.1` 的随机端口上等。地址和令牌：
+  - 大脑起的能力程序（[§3](#3-生命周期)）从环境变量拿：`EDITH_ACCESS`（`127.0.0.1:端口`）、`EDITH_ACCESS_TOKEN`；
+  - 自己打开的程序（终端 `edith attach`、桌面端……）读 `~/.edith/instances/<目录的键>-<进程号>.json`（只有本用户能读，[§8.2](#82-在跑的大脑instances)）。
+- 连上后**第一行**先报令牌：`{"jsonrpc": "2.0", "method": "auth", "params": {"token": "…"}}`，不对就断开。之后 EDITH 发 `initialize`（[§3.1](#31-initializeedith--能力请求)）。
+- **一条连接就是一个能力**。一个程序可以开好几条（每条一个能力）：中转、设备服务就是这样替别人连进来的。
+- 消息**一行一条 JSON**（UTF-8，以 `\n` 结尾；JSON 里的换行要转义成 `\n`，不能有裸换行）。空行忽略；不是 JSON 的行 EDITH 回 `-32700` 并记日志。
+- 日志：大脑起的程序，标准输出、标准错误都记进 `<工作目录>/.edith/logs/<能力名>.log`（`edith -v` 时也打到终端）；也可以发 `log` 通知。
 
 ## 2. 消息格式：JSON-RPC 2.0
 
@@ -61,19 +55,24 @@ EDITH 是大脑；**能力**是它的四肢：耳朵、嘴、手、聊天渠道�
 | -32002 | 没有这个会话 |
 | -32003 | 大脑用哪个模型还没设（`~/.edith/config.json`） |
 | -32004 | 被停下了（动作被取消、等的那一轮被停下） |
-| -32005 | 设备忙：共享设备正被别的大脑占着，`error.data.holder` 是占着它的大脑 `{id, workspace}`（[共享设备](DEVICES.md)） |
+| -32005 | 设备忙：共享设备正被别的大脑占着，`error.data.holder` 是占着它的大脑 `{id, workspace}`（[共享设备](https://github.com/integemjack/edith.tools/blob/main/docs/DEVICES.md)） |
 
 ## 3. 生命周期
 
 ```
 EDITH                                  能力
-  │ ── 起进程 ───────────────────────────▶ │
+  │ ── 起程序（给 EDITH_ACCESS / _TOKEN / EDITH_CAPABILITY）▶ │   配置里的才有这一步
+  │ ◀──────────── 连进套接字、第一行 auth ── │
   │ ── initialize（请求）──────────────────▶ │
   │ ◀───────────── 回话：我能感知 / 能做什么 ── │
   │ ── initialized（通知）─────────────────▶ │
   │ ◀═══════════ 双向自由收发 ═══════════════▶ │
-  │ ── shutdown（通知）、关 stdin ──────────▶ │  3 秒内自己退出，否则被结束
+  │ ── shutdown（通知）、关连接 ─────────────▶ │  大脑起的程序 3 秒内自己退出，否则被结束
 ```
+
+**配置里的能力**（[§8](#8-配置capabilitiesjson)）：大脑起它的程序，环境变量里给 `EDITH_ACCESS`、`EDITH_ACCESS_TOKEN`、
+`EDITH_CAPABILITY`（它的名字）、`EDITH_WORKSPACE`（工作目录），等它**用这个名字**连进来（最多 30 秒；程序起不来、退出码不是 0 都算没接上）。
+程序可以一直开着（它就是那个能力），也可以让别人替它连进来后自己退出、退出码 0（比如共享设备的启动器）。
 
 ### 3.1 `initialize`（EDITH → 能力，请求）
 
@@ -87,7 +86,7 @@ EDITH                                  能力
 ```
 
 - `brain.id`：这个大脑的 id（工作目录的键，同一个目录重启后不变）；`brain.workspace`：它管的目录。连着几个大脑的能力（共享设备）靠它分清是谁。
-- `name`：EDITH 给这个能力起的名字（配置里的 `name`；本机接入连进来的是空字符串，用它回的 `name`）。它的动作在模型那里叫 `<name>__<动作名>`。
+- `name`：空字符串——能力在回话里报自己的名字（大脑起的用 `EDITH_CAPABILITY`）。它的动作在模型那里叫 `<名字>__<动作名>`。
 - `focus`：现在的焦点会话（[§5](#5-会话与焦点)）。
 
 能力回话（30 秒内，否则 EDITH 当它没起来）：
@@ -111,10 +110,10 @@ EDITH                                  能力
 | `protocolVersion` | 是 | `"1"` |
 | `capability.title` / `version` / `description` | 否 | 给人和模型看的名字、版本、一句话 |
 | `senses` | 否 | 会主动传来什么：`[{kind, description}]`。`kind` 是自己定的词（`speech`、`message`、`vision`、`file`、`sensor`……），写进模型看到的来源里 |
-| `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?, exclusive?, holds?, releases?}]`。`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600；后三个标记给[共享设备](DEVICES.md)的仲裁用 |
+| `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?, exclusive?, holds?, releases?}]`。`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600；后三个标记给[共享设备](https://github.com/integemjack/edith.tools/blob/main/docs/DEVICES.md)的仲裁用 |
 | `receives` | 否 | 要收哪些事件（[§7](#7-事件event)）；`["*"]` 是全部，不写是都不要 |
 | `sessions` | 否 | `"all"`（默认）：所有会话的事件；`"focus"`：只要焦点会话的 |
-| `name` | 否 | 只对本机接入连进来的：想叫什么（重名的 EDITH 加 `-2`、`-3`……） |
+| `name` | 否 | 叫什么（大脑起的程序用 `EDITH_CAPABILITY`；不写是 `client`；重名的 EDITH 加 `-2`、`-3`……） |
 | `endpoints` | 否 | 它对外开的入口：`[{kind, url}]`（比如 `{"kind": "websocket", "url": "ws://127.0.0.1:52731"}`），EDITH 登记进 `instances/`，`edith instances` 列得出来 |
 
 模型的系统提示里会列出每个能力：名字、标题、有哪些动作、会主动传来什么。
@@ -125,11 +124,10 @@ EDITH                                  能力
 
 ### 3.3 结束
 
-- EDITH 退出、或这个能力被 `edith capabilities remove`：先发 `shutdown` 通知，再关 stdin；3 秒内没退就结束进程。
-  **能力读到 stdin 结束（EOF）就该自己退出。**
-- 能力自己退出（崩了、出错退出）：EDITH 摘掉它的动作，等着它回话的请求立刻失败；配置里 `restart` 不是 `false` 时
-  过一会儿重启它（刚起来不到一分钟就退出的等 5 秒，跑了一分钟以上的等 1 秒；重启不成功等的时间每次翻倍，最多 60 秒）。
-  启动时就接不上的，2 秒后开始同样地重试。
+- EDITH 退出、或这个能力被 `edith capabilities remove`：先发 `shutdown` 通知，再关连接；大脑起的程序 3 秒内没退就结束它。
+  **连接断了就该自己退出。**
+- 连接断了（程序崩了、退出了、网络中转那头走了）：EDITH 摘掉它的动作，等着它回话的请求立刻失败；配置里有它、`restart` 不是 `false` 时，
+  1 秒后重起它的程序（还开着的先结束掉）；重起不成功等的时间每次翻倍，最多 60 秒。启动时就接不上的，2 秒后开始同样地重试。
 
 ## 4. 能力 → EDITH
 
@@ -298,12 +296,14 @@ EDITH 要它退出（[§3.3](#33-结束)）。
 两层，合起来用：**全局** `~/.edith/capabilities.json`（`EDITH_HOME` 换了就跟着换；所有目录都接）+ **目录**
 `<工作目录>/.edith/capabilities.json`（只有这个目录接）。同名的以目录为准；目录里只写 `{"name": "x", "disabled": true}` 就是在这个目录关掉全局的 x。
 
+每一项是「起哪个程序」，程序起来后自己连进大脑的套接字（[§3](#3-生命周期)）：
+
 ```json
 {"capabilities": [
   {"name": "ear", "command": "python3", "args": ["-u", "/opt/ear/ear.py"], "env": {"EAR_DEVICE": "0"}, "cwd": "/opt/ear"},
-  {"name": "ws", "command": "edith-websocket", "args": ["--listen", "0.0.0.0:7789", "--token", "…"], "restart": true},
-  {"name": "github", "protocol": "mcp", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_TOKEN": "…"}},
-  {"name": "search", "protocol": "mcp", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer …"}},
+  {"name": "ws", "command": "edith-websocket", "args": ["--listen", "0.0.0.0:7789", "--token", "…"]},
+  {"name": "mic", "command": "edith-connect", "args": ["mic"]},
+  {"name": "github", "command": "edith-mcp", "args": ["npx", "-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_TOKEN": "…"}},
   {"name": "old", "command": "…", "disabled": true}
 ]}
 ```
@@ -311,21 +311,17 @@ EDITH 要它退出（[§3.3](#33-结束)）。
 | 字段 | 说明 |
 |---|---|
 | `name` | 能力名：只留字母、数字、`-`、`_`，最长 24 个字符 |
-| `command` / `args` / `env` / `cwd` | 怎么起它（`command` 按 PATH 找） |
-| `protocol` | `"edith"`（默认，本协议）或 `"mcp"` |
-| `url` / `headers` | 只有 MCP：HTTP 的 MCP 服务（Streamable HTTP） |
-| `restart` | 崩了要不要重启，默认 `true`（只对本协议的能力） |
+| `command` / `args` / `env` / `cwd` | 怎么起它。`command` 是光秃秃的名字时先找装好的工具（`~/.edith/tools/`），再找 PATH，都没有而 edith.tools 里有就下载（[§8.4](#84-共用的工具edithtools)）。`cwd` 默认是工作目录 |
+| `restart` | 连接断了要不要重起，默认 `true` |
 | `disabled` | `true`：不接 |
-
-能力进程的工作目录默认是大脑的工作目录，环境变量里有 `EDITH_WORKSPACE`（工作目录）、`EDITH_CAPABILITY`（能力名）。
 
 命令行（默认改这个目录那层，加 `--global` 改全局那层）：
 
 ```
 edith capabilities                                  列出能力（全局的 + 这个目录的；会先接上它们，看得到动作、感知、订的事件）
-edith capabilities add <名字> <命令> [参数…]         接一个讲本协议的程序（接得上才记进配置）
-edith capabilities add-mcp <名字> <命令> [参数…]     接一个本机的 MCP 服务
-edith capabilities add-mcp-url <名字> <地址>          接一个 HTTP 的 MCP 服务
+edith capabilities add <名字> <命令> [参数…]         接一个能力（起它、它连得进来才记进配置）
+edith capabilities add-mcp <名字> <命令> [参数…]     接一个本机的 MCP 服务（= add <名字> edith-mcp <命令> [参数…]）
+edith capabilities add-mcp-url <名字> <地址>          接一个 HTTP 的 MCP 服务（= add <名字> edith-mcp --url <地址>）
 edith capabilities remove <名字>                     去掉
 edith run                                           一直开着，只听能力的（主会话是焦点）
 ```
@@ -342,39 +338,61 @@ edith run                                           一直开着，只听能力�
  "capabilities": ["ear", "ws"], "endpoints": [{"capability": "ws", "kind": "websocket", "url": "ws://127.0.0.1:52731"}]}
 ```
 
-`address` / `token` 是本机接入（[§1](#1-传输)）；`endpoints` 是能力报的入口。进程没了的登记在 `edith instances` 列出时清掉。
+`address` / `token` 是大脑的套接字（[§1](#1-传输大脑的套接字)）；`endpoints` 是能力报的入口。进程没了的登记在 `edith instances` 列出时清掉。
 想找某个目录的大脑、它的 WebSocket 地址，读这里。
 
-## 8.3 共享设备
+### 8.3 共享设备
 
 同一时间只能被一个进程打开的设备（麦克风、摄像头、串口……），几个目录的大脑经 `edith-connect` 共用一个设备服务：
-当前大脑、设备忙、动作带上是哪个大脑。见 [DEVICES.md](DEVICES.md)。
+设备服务连到每个大脑的套接字，当前大脑、设备忙（`-32005`）、动作带上是哪个大脑（`act.params.brain`）。
+见 edith.tools 的 [DEVICES.md](https://github.com/integemjack/edith.tools/blob/main/docs/DEVICES.md)。
+
+### 8.4 共用的工具（edith.tools）
+
+[integemjack/edith.tools](https://github.com/integemjack/edith.tools) 放大家共用的能力程序：`edith-websocket`（远程能力的中转）、
+`edith-connect`（共享设备）、`edith-mcp`（MCP 桥）。每次发布在 Release 里放每个工具每个平台一个包和一份 `index.json`：
+
+```
+edith tools                    可装的和装了的（版本、有没有新的）
+edith tools install <工具>…     下载、核对 SHA-256、装到 ~/.edith/tools/<工具>/
+edith tools remove <工具>
+```
+
+能力配置里写了 `edith-connect` 这样的名字、本机又没有时，大脑当场下载。`EDITH_TOOLS_INDEX` 可以换索引（网址或本地文件）。
 
 ## 9. MCP 能力
 
-`"protocol": "mcp"` 的能力是 [MCP](https://modelcontextprotocol.io) 服务：它的工具当成动作（`<能力名>__<工具名>`），
-大脑调、它回。它不会主动说话、不收事件——想要双向，就写本协议的能力（或者写一个小能力把 MCP 服务包起来）。
+[MCP](https://modelcontextprotocol.io) 服务只会被调用、不会主动说话。经桥 `edith-mcp`（edith.tools）接：它连进大脑的套接字当一个能力，
+把 MCP 服务的工具当成自己的动作（`<能力名>__<工具名>`），大脑调、它转给 MCP。想要双向，就直接写本协议的能力。
 
 ## 10. 安全
 
 能力是**受信的本机程序**：它能以用户的名义让大脑做任何事（大脑能读写文件、跑命令）。只接你信得过的能力。
-把大脑开到网络上的能力（比如 [WebSocket 能力](WEBSOCKET.md)）要自己管好认证：不是只听本机就必须设令牌。
+大脑的套接字只听 `127.0.0.1`，令牌只交给大脑起的程序、或者写在只有本用户能读的登记里。
+把大脑开到网络上的能力（比如 WebSocket 中转）要自己管好认证：不是只听本机就必须设令牌。
 
 ## 11. 最小的能力（Python）
 
 ```python
-import json, sys
-sys.stdin.reconfigure(encoding="utf-8"); sys.stdout.reconfigure(encoding="utf-8")
+import json, os, socket
+
+# 大脑起它时给地址、令牌、名字：连进大脑的套接字，第一行报令牌
+host, port = os.environ["EDITH_ACCESS"].rsplit(":", 1)
+connection = socket.create_connection((host, int(port)))
+reader, writer = connection.makefile("r", encoding="utf-8"), connection.makefile("w", encoding="utf-8")
 
 def send(message):
-    print(json.dumps(message, ensure_ascii=False), flush=True)
+    writer.write(json.dumps(message, ensure_ascii=False) + "\n")
+    writer.flush()
 
-for line in sys.stdin:
+send({"jsonrpc": "2.0", "method": "auth", "params": {"token": os.environ["EDITH_ACCESS_TOKEN"]}})
+for line in reader:
     message = json.loads(line)
     method = message.get("method")
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": message["id"], "result": {
             "protocolVersion": "1",
+            "name": os.environ.get("EDITH_CAPABILITY", "hello"),
             "capability": {"title": "问候"},
             "actions": [{"name": "greet", "description": "跟人打招呼",
                          "parameters": {"type": "object", "properties": {"who": {"type": "string"}}, "required": ["who"]}}],
@@ -386,7 +404,7 @@ for line in sys.stdin:
         who = message["params"]["arguments"]["who"]
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"text": f"已经跟 {who} 打过招呼"}})
     elif method == "event" and message["params"]["type"] == "done":
-        print("大脑说：", message["params"]["data"]["answer"], file=sys.stderr, flush=True)
+        print("大脑说：", message["params"]["data"]["answer"], flush=True)
     elif method == "shutdown":
         break
 ```

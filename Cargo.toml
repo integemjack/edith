@@ -11,15 +11,7 @@ repository = "https://github.com/integemjack/edith"
 name = "edith"
 path = "src/main.rs"
 
-# WebSocket 能力：EDITH 经 stdio 起它，它对外开 WebSocket（docs/WEBSOCKET.md）；只讲能力协议，不用大脑的代码
-[[bin]]
-name = "edith-websocket"
-path = "capabilities/websocket/main.rs"
 
-# 共享设备：中转 + 设备服务（docs/DEVICES.md）；只讲能力协议，不用大脑的代码
-[[bin]]
-name = "edith-connect"
-path = "capabilities/connect/main.rs"
 
 # 自己是一个工作区（core/ 是 friday.core 子模块，它有自己的工作区）
 [workspace]
@@ -33,7 +25,6 @@ serde_json = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 ureq = "3"
-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

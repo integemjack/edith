@@ -30,6 +30,11 @@ fn registry_path() -> PathBuf {
     registry_dir().join(format!("{}-{}.json", brain_id(), std::process::id()))
 }
 
+/// 大脑套接字的地址和令牌（开了之后才有）：起能力的程序时交给它（EDITH_ACCESS / EDITH_ACCESS_TOKEN）
+pub fn access() -> Option<(String, String)> {
+    SERVING.lock().unwrap().clone()
+}
+
 /// 开本机接入、写登记
 pub fn serve() -> Result<(), String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| format!("开不了本机接入：{error}"))?;

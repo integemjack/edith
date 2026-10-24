@@ -1,4 +1,4 @@
-//! 端到端：假模型（tests/fake/model.py，OpenAI 兼容的流式接口）+ 假 MCP 服务（tests/fake/limb.py）跑 edith 命令行
+//! 端到端：假模型（tests/fake/model.py，OpenAI 兼容的流式接口）+ 假能力（tests/fake/cap.py）跑 edith 命令行
 
 mod common;
 
@@ -22,15 +22,19 @@ fn writes_checks_and_delivers() {
 }
 
 #[test]
-fn mcp_capability_attach_and_answer() {
-    let (work, home) = scratch("limbs");
+fn capability_add_and_remove() {
+    let (work, home) = scratch("caps");
     let model = fake_model(&home.join("requests.jsonl"));
-    let limb = fake("limb.py");
-    let added = edith(&home, model.port, &work, &["capabilities", "add-mcp", "demo", python(), "-u", limb.to_str().unwrap()]);
-    assert!(added.status.success() && String::from_utf8_lossy(&added.stdout).contains("1 个动作"), "{}", text(&added));
-    let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), "用四肢打个招呼"]);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("四肢说：四肢回声：hi"), "{}", text(&output));
-    let removed = edith(&home, model.port, &work, &["capabilities", "remove", "demo"]);
+    let cap = fake("cap.py");
+    // 加：大脑起它、它连进套接字，连得上才记进配置
+    let added = edith(&home, model.port, &work, &["capabilities", "add", "cap", python(), "-u", cap.to_str().unwrap()]);
+    assert!(added.status.success() && String::from_utf8_lossy(&added.stdout).contains("接上了「cap」：1 个动作"), "{}", text(&added));
+    let listed = edith(&home, model.port, &work, &["capabilities"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（目录） 测试能力"), "{}", text(&listed));
+    // 起不来的不记
+    let broken = edith(&home, model.port, &work, &["capabilities", "add", "bad", python(), "-c", "import sys; sys.exit(3)"]);
+    assert!(!broken.status.success() && String::from_utf8_lossy(&broken.stderr).contains("退出了"), "{}", text(&broken));
+    let removed = edith(&home, model.port, &work, &["capabilities", "remove", "cap"]);
     assert!(removed.status.success(), "{}", text(&removed));
     let listed = edith(&home, model.port, &work, &["capabilities"]);
     assert!(String::from_utf8_lossy(&listed.stdout).contains("还没有能力"), "{}", text(&listed));

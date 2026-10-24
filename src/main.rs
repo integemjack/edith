@@ -1,15 +1,16 @@
 //! EDITH：下一代的大脑（docs/EDITH.md）。给它用户的话，它自己调模型、用工具把事做完；
 //! 能力（四肢）讲能力协议（docs/CAPABILITY-PROTOCOL.md），双向实时：没有能力也能干活，接上了更强。
+//! 大脑只有一个接口——本机套接字，所有能力都从它连进来、都是一级能力；共用的工具在 integemjack/edith.tools。
 //! 按目录工作（`edith .`）：数据在 <目录>/.edith；目录不加锁——这个目录已经有大脑在干活时，新起的大脑自动开一个
 //! git worktree 去那里干（worktree.rs，`--here` 不开）；想接到一个正在跑的大脑上用 `edith attach`。
 
 mod attach;
 mod brain;
 mod capabilities;
+mod downloads;
 mod home;
 mod http;
 mod instance;
-mod mcp;
 mod mind;
 mod protocol;
 mod sessions;
@@ -42,9 +43,12 @@ const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作�
   edith instances                  列出这台机器上在跑的大脑
   edith capabilities               列出能力（全局的 + 这个目录的）
   edith capabilities add <名字> <命令> [参数…]       接一个讲能力协议的程序（记进这个目录；--global 记进全局）
-  edith capabilities add-mcp <名字> <命令> [参数…]   接一个本机的 MCP 服务
-  edith capabilities add-mcp-url <名字> <地址>        接一个 HTTP 的 MCP 服务
+  edith capabilities add-mcp <名字> <命令> [参数…]   接一个本机的 MCP 服务（经 edith-mcp）
+  edith capabilities add-mcp-url <名字> <地址>        接一个 HTTP 的 MCP 服务（经 edith-mcp）
   edith capabilities remove <名字>                    去掉（--global 从全局去掉）
+  edith tools                      列出 edith.tools 里的工具（装了哪个版本、有没有新的）
+  edith tools install <工具>       下载、装上（edith-websocket、edith-connect、edith-mcp……；能力要用时也会自己下）
+  edith tools remove <工具>        去掉
 
 选项：
   -C, --cwd <目录>    工作目录（默认当前目录）
@@ -149,7 +153,7 @@ fn main() {
     }
     let mut workspace = if options.explicit { options.cwd.clone() } else { home::find_workspace(&options.cwd) };
     // 要起大脑的（干活、聊天、run）：这个目录已经有大脑在干活就开 worktree 去那里
-    let starts_brain = !matches!(command.as_str(), "sessions" | "instances" | "capabilities" | "caps" | "attach");
+    let starts_brain = !matches!(command.as_str(), "sessions" | "instances" | "capabilities" | "caps" | "attach" | "tools");
     if starts_brain && !options.here && !instance::running_in(&workspace).is_empty() {
         match worktree::create(&workspace) {
             Ok(tree) => {
@@ -177,8 +181,10 @@ fn main() {
             let rest: Vec<String> = options.words[1..].to_vec();
             let result = capabilities_command(&rest, options.global);
             capabilities::stop_all();
+            instance::release();
             exit_on(result);
         }
+        "tools" => exit_on(tools_command(&options.words[1..])),
         "run" if options.words.len() == 1 => exit_on(run(options)),
         "attach" => exit_on(attach_to(options)),
         _ => exit_on(work(options)),
@@ -206,6 +212,12 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     };
     let mut rest = arguments.iter();
     while let Some(argument) = rest.next() {
+        // edith capabilities add <名字> <命令> 之后的都是那个命令的参数（-c 之类不是 edith 的选项）
+        let literal = matches!(options.words.first().map(String::as_str), Some("capabilities" | "caps")) && options.words.len() >= 3;
+        if literal {
+            options.words.push(argument.clone());
+            continue;
+        }
         match argument.as_str() {
             "-C" | "--cwd" => {
                 options.cwd = PathBuf::from(rest.next().ok_or("-C 后面要跟目录")?);
@@ -408,6 +420,8 @@ fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String
     match arguments.first().map(String::as_str) {
         None | Some("list") => {
             if running.is_none() {
+                // 能力的程序起来后要连进套接字：先开
+                instance::serve()?;
                 capabilities::start_all(&mut |message| eprintln!("{message}"));
             }
             let configs = capabilities::configs();
@@ -420,10 +434,9 @@ fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String
             };
             for config in configs {
                 let name = capabilities::clean_name(config["name"].as_str().unwrap_or(""));
-                let protocol = config["protocol"].as_str().unwrap_or("edith");
                 let scope = if config["scope"] == "global" { "全局" } else { "目录" };
                 if config["disabled"].as_bool() == Some(true) {
-                    println!("{name}（{protocol}，{scope}）：关掉了");
+                    println!("{name}（{scope}）：关掉了");
                     continue;
                 }
                 match capabilities::describe(&name) {
@@ -436,15 +449,13 @@ fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String
                         };
                         let title = info["info"]["title"].as_str().map(|title| format!(" {title}")).unwrap_or_default();
                         let or_none = |text: String| if text.is_empty() { "（没有）".to_string() } else { text };
-                        println!("{name}（{protocol}，{scope}）{title}");
+                        println!("{name}（{scope}）{title}");
                         println!("  动作：{}", or_none(list("actions")));
-                        if protocol != "mcp" {
-                            println!("  感知：{}", or_none(list("senses")));
-                            println!("  订的事件：{}", or_none(list("receives")));
-                        }
+                        println!("  感知：{}", or_none(list("senses")));
+                        println!("  订的事件：{}", or_none(list("receives")));
                     }
-                    None if live.contains(&name) => println!("{name}（{protocol}，{scope}）：接着（在正在跑的大脑上）"),
-                    None => println!("{name}（{protocol}，{scope}）：没接上（日志在 .edith/logs/{name}.log）"),
+                    None if live.contains(&name) => println!("{name}（{scope}）：接着（在正在跑的大脑上）"),
+                    None => println!("{name}（{scope}）：没接上（日志在 .edith/logs/{name}.log）"),
                 }
             }
             Ok(())
@@ -452,8 +463,9 @@ fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String
         Some(verb @ ("add" | "add-mcp" | "add-mcp-url")) if arguments.len() >= 3 => {
             let mut config = match verb {
                 "add" => json!({ "name": arguments[1], "command": arguments[2], "args": arguments[3..] }),
-                "add-mcp" => json!({ "name": arguments[1], "protocol": "mcp", "command": arguments[2], "args": arguments[3..] }),
-                _ => json!({ "name": arguments[1], "protocol": "mcp", "url": arguments[2] }),
+                // MCP 服务经 edith-mcp（edith.tools）接进来
+                "add-mcp" => json!({ "name": arguments[1], "command": "edith-mcp", "args": arguments[2..] }),
+                _ => json!({ "name": arguments[1], "command": "edith-mcp", "args": ["--url", arguments[2]] }),
             };
             if running.is_some() {
                 // 不在这里起它（正在跑的大脑那边会起）：只记配置
@@ -462,6 +474,7 @@ fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String
                 println!("记进了{layer}的配置；这个目录的大脑在跑，重启它后生效");
                 return Ok(());
             }
+            instance::serve()?;
             added(capabilities::add(config, global)?);
             Ok(())
         }
@@ -476,5 +489,40 @@ fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String
             }
         }
         _ => Err("用法：edith capabilities [add <名字> <命令> [参数…] | add-mcp <名字> <命令> [参数…] | add-mcp-url <名字> <地址> | remove <名字>] [--global]".into()),
+    }
+}
+
+fn tools_command(arguments: &[String]) -> Result<(), String> {
+    match arguments.first().map(String::as_str) {
+        None | Some("list") => {
+            println!("edith.tools（这个平台：{}）", downloads::platform());
+            for (name, current, available, description) in downloads::list()? {
+                let state = match (current.is_empty(), available.is_empty() || current == available) {
+                    (true, _) => format!("没装，可装 {available}"),
+                    (false, true) => format!("装了 {current}"),
+                    (false, false) => format!("装了 {current}，有新的 {available}（edith tools install {name}）"),
+                };
+                println!("{name}  {state}");
+                if !description.is_empty() {
+                    println!("  {description}");
+                }
+            }
+            Ok(())
+        }
+        Some("install" | "update") if arguments.len() >= 2 => {
+            for name in &arguments[1..] {
+                let version = downloads::install(name)?;
+                println!("装好了 {name} {version}");
+            }
+            Ok(())
+        }
+        Some("remove") if arguments.len() == 2 => {
+            if downloads::remove(&arguments[1]) {
+                Ok(())
+            } else {
+                Err(format!("没装 {}", arguments[1]))
+            }
+        }
+        _ => Err("用法：edith tools [install <工具>… | remove <工具>]".into()),
     }
 }

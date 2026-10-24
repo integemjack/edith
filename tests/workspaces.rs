@@ -164,12 +164,12 @@ fn directory_layer_overrides_global_capabilities() {
     )
     .unwrap();
     let listed = edith(&home, model.port, &a, &["capabilities"]);
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（edith，目录）：关掉了"), "{}", text(&listed));
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（目录）：关掉了"), "{}", text(&listed));
     let listed = edith(&home, model.port, &b, &["capabilities"]);
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（edith，全局） 测试能力"), "{}", text(&listed));
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（全局） 测试能力"), "{}", text(&listed));
     // 加进目录那层的只在这个目录有
-    let limb = fake("limb.py");
-    let added = edith(&home, model.port, &b, &["capabilities", "add-mcp", "demo", python(), "-u", limb.to_str().unwrap()]);
+    let cap = fake("cap.py");
+    let added = edith(&home, model.port, &b, &["capabilities", "add", "demo", python(), "-u", cap.to_str().unwrap()]);
     assert!(added.status.success(), "{}", text(&added));
     assert!(std::fs::read_to_string(b.join(".edith").join("capabilities.json")).unwrap().contains("demo"));
     assert!(!std::fs::read_to_string(home.join("capabilities.json")).unwrap().contains("demo"));
