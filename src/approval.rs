@@ -604,7 +604,9 @@ mod tests {
         assert!(!mode_allows("run_shell", &remove, Some("auto"), false) && !mode_allows("write_file", &system, Some("auto"), false));
         assert!(!mode_allows("write_file", &write, Some("plan"), false) && !mode_allows("write_file", &write, None, false));
         // 能力说要停下来问的：自动模式也问、完全不问
-        assert!(!mode_allows("friday__browser_act", &list, Some("auto"), true) && mode_allows("friday__browser_act", &list, Some("full"), true));
+        assert!(
+            !mode_allows("friday__browser_act", &list, Some("auto"), true) && mode_allows("friday__browser_act", &list, Some("full"), true)
+        );
     }
 
     #[test]

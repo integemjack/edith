@@ -125,7 +125,11 @@ fn configure_openings(home: &Path, model_port: u16, mode: &str, approve: &str) {
 }
 
 fn requests(home: &Path) -> Vec<Value> {
-    std::fs::read_to_string(home.join("requests.jsonl")).unwrap_or_default().lines().filter_map(|line| serde_json::from_str(line).ok()).collect()
+    std::fs::read_to_string(home.join("requests.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
 }
 
 fn hooks<'a>(messages: &'a [Value], event: &str) -> Vec<&'a Value> {

@@ -126,6 +126,7 @@ EDITH                                  能力
 | `endpoints` | 否 | 它对外开的入口：`[{kind, url}]`（比如 `{"kind": "websocket", "url": "ws://127.0.0.1:52731"}`），EDITH 登记进 `instances/`，`edith instances` 列得出来 |
 | `models` | 否 | 它能给出真地址的模型网址前缀（如 `["power://"]`）：`config.json` 里 `baseURL` 是这个开头的模型，每段请求前问它 `model.endpoint`（[§6.6](#66-modelendpoint请求)）。只认全权的连接 |
 | `hooks` | 否 | 要它管的钩子时机：`PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop`，到时候问它 `hook`（[§6.7](#67-hook请求)）。只认全权的连接 |
+| `resident` | 否 | `true`：常驻、一直连着的（edith-friday 常驻的那份）：不算有人连着，`edith run --linger` 照样闲够了就退 |
 
 模型的系统提示里会列出每个能力：名字、标题、有哪些动作、会主动传来什么。
 

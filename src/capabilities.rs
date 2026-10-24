@@ -68,6 +68,8 @@ pub struct Capability {
     models: Vec<String>,
     /// 要它管的钩子时机（initialize 回的 hooks：PreToolUse / PostToolUse / Stop / UserPromptSubmit；只认全权的）
     hooks: Vec<String>,
+    /// 常驻、一直连着的（initialize 回 resident: true，如 edith-friday 常驻的那份）：不算有人连着，run --linger 照样按时退
+    resident: bool,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, Value>>>>,
     next_id: AtomicU64,
@@ -493,6 +495,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
         endpoints: Vec::new(),
         models: Vec::new(),
         hooks: Vec::new(),
+        resident: false,
         writer: Mutex::new(Some(writer)),
         pending: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1),
@@ -565,6 +568,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
         endpoints: reply.get("endpoints").and_then(Value::as_array).cloned().unwrap_or_default(),
         models: strings(reply.get("models")),
         hooks: strings(reply.get("hooks")),
+        resident: reply.get("resident").and_then(Value::as_bool).unwrap_or(false),
         writer: Mutex::new(shell.writer.lock().unwrap().take()),
         pending: Mutex::new(std::mem::take(&mut *shell.pending.lock().unwrap())),
         next_id: AtomicU64::new(shell.next_id.load(Ordering::Relaxed)),
@@ -1505,7 +1509,7 @@ pub fn endpoints() -> Vec<Value> {
 /// 连着的、不是按配置起的连接有几条（Friday 客户端、attach、中转进来的远程设备……）：run --linger 按它算闲着没有
 pub fn visitors() -> usize {
     let launched = LAUNCHED.lock().unwrap();
-    native().iter().filter(|capability| !launched.contains_key(&capability.name)).count()
+    native().iter().filter(|capability| !launched.contains_key(&capability.name) && !capability.resident).count()
 }
 
 pub fn names() -> Vec<String> {
