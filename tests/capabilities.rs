@@ -508,3 +508,44 @@ fn every_approver_is_asked_and_the_rest_are_told() {
     assert_eq!(cancel["params"]["call"], asked["params"]["call"]);
     assert!(wait_until(30, || work.join("w.txt").exists()), "批准了没写");
 }
+
+#[test]
+fn sessions_fork_truncate_and_copy() {
+    let (work, home) = scratch("fork");
+    let model = fake_model(&home.join("requests.jsonl"));
+    assert!(edith(&home, model.port, &work, &["第一句"]).status.success());
+    assert!(edith(&home, model.port, &work, &["-c", "第二句"]).status.success());
+    let session = common::read_sessions(&home, &work)[0]["id"].as_str().unwrap().to_string();
+    let branch = "7f0c2f4e-2b0a-4c7e-9d5e-1a2b3c4d5e6f";
+    configure_cap(
+        &home,
+        json!([
+            // 前两条另存一份；整段藏起来存一份（分出去的另一支）
+            { "delay": 0.3, "send": request(1, "sessions.fork", json!({ "id": session, "keep": 2 })) },
+            { "delay": 0.1, "send": request(2, "sessions.fork", json!({ "id": session, "newID": branch, "hidden": true })) },
+            // 截到前两条，再换回整段
+            { "delay": 0.1, "send": request(3, "sessions.truncate", json!({ "id": session, "keep": 2 })) },
+            { "delay": 0.1, "send": request(4, "sessions.list", json!({})) },
+            { "delay": 0.1, "send": request(5, "sessions.copy", json!({ "id": session, "from": branch })) },
+            // 用过的 id 不能再用
+            { "delay": 0.1, "send": request(6, "sessions.fork", json!({ "id": session, "newID": branch })) },
+        ]),
+        "done",
+    );
+    let _edith = run(&home, model.port, &work);
+    assert!(wait_until(30, || response(&received(&home), 6).is_some()), "{:?}", received(&home));
+    let messages = received(&home);
+    let fork = response(&messages, 1).unwrap()["result"]["id"].as_str().unwrap().to_string();
+    assert_eq!(response(&messages, 2).unwrap()["result"]["owner"], "#branch");
+    // 藏起来的那份不在列表里
+    let listed: Vec<&str> =
+        response(&messages, 4).unwrap()["result"].as_array().unwrap().iter().filter_map(|item| item["id"].as_str()).collect();
+    assert!(listed.contains(&fork.as_str()) && !listed.contains(&branch), "{listed:?}");
+    assert!(response(&messages, 6).unwrap().get("error").is_some());
+    let sessions = common::read_sessions(&home, &work);
+    let history = |id: &str| sessions.iter().find(|item| item["id"] == id).unwrap()["history"].as_array().unwrap().len();
+    // 两轮的全部（截短后又换回来了）
+    let full = history(branch);
+    assert!(full > 2);
+    assert_eq!((history(&fork), history(&session)), (2, full));
+}

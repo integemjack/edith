@@ -1,6 +1,7 @@
 """假的 OpenAI 兼容流式模型：按历史里已有几条工具结果决定下一步（写文件 → 跑命令核对 → 交付），把收到的请求记到 requests.jsonl。
 GET 是假的网页：/bing、/ddg、/baidu 是三家搜索的结果页（web_search 的测试），/page 是一个 GBK 编码的中文网页（fetch_url）"""
 import json
+import os
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,6 +49,13 @@ class Handler(BaseHTTPRequestHandler):
         messages = body["messages"]
         tools = [m for m in messages if m["role"] == "tool"]
         last_user = [m for m in messages if m["role"] == "user"][-1]["content"]
+        # 「出错测试」：第一次回 400（不会自动重试的那种），之后照常（测重试）
+        if "出错测试" in last_user and not os.path.exists(LOG + ".failed"):
+            open(LOG + ".failed", "w").close()
+            payload = json.dumps({"error": {"message": "假模型：这次故意出错"}}, ensure_ascii=False).encode()
+            self.send_response(400); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
+            return
         events = []
         called = re.search(r"调用工具 (\S+)(?: 参数 (\{.*\}))?", last_user)
         last_user_index = max(index for index, m in enumerate(messages) if m["role"] == "user")

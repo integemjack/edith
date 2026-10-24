@@ -547,7 +547,7 @@ fn stdin_ready() -> bool {
 }
 
 fn list_sessions() {
-    let all = sessions::list();
+    let all: Vec<Session> = sessions::list().into_iter().filter(|session| session.owner != sessions::ARCHIVED).collect();
     if all.is_empty() {
         println!("{} 还没有会话", home::workspace().display());
     }

@@ -38,6 +38,9 @@ struct Saved {
     owner: String,
 }
 
+/// 分出去的另一支（Friday 改一条重发、切分支时存着的那份历史）记在这个名下：列表里不出现，-c 不接它
+pub const ARCHIVED: &str = "#branch";
+
 /// 会话 → 主人（事件按它分给能力，不每次读文件）
 static OWNERS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 

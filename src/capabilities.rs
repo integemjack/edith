@@ -729,8 +729,10 @@ impl Capability {
             "sense" => self.grant.sense,
             "ask" => self.grant.ask,
             "sessions.list" | "sessions.get" | "agents.list" | "changes.list" | "changes.diff" => self.grant.sessions >= Sessions::Read,
-            "sessions.create" | "sessions.focus" | "sessions.stop" | "sessions.remove" | "sessions.dequeue" | "agents.stop"
-            | "agents.send" | "agents.dequeue" | "changes.revert" => self.grant.sessions == Sessions::All,
+            "sessions.create" | "sessions.focus" | "sessions.stop" | "sessions.remove" | "sessions.dequeue" | "sessions.fork"
+            | "sessions.truncate" | "sessions.copy" | "agents.stop" | "agents.send" | "agents.dequeue" | "changes.revert" => {
+                self.grant.sessions == Sessions::All
+            }
             _ => true,
         };
         if allowed {
@@ -752,7 +754,7 @@ impl Capability {
             "sessions.list" => Ok(Value::Array(
                 sessions::list()
                     .iter()
-                    .filter(|session| self.full() || session.owner == self.name)
+                    .filter(|session| (self.full() && session.owner != sessions::ARCHIVED) || session.owner == self.name)
                     .map(|session| {
                         let mut summary = session.summary();
                         let current = mind::current(&session.id);
@@ -823,6 +825,53 @@ impl Capability {
                     return Err((protocol::NOT_PERMITTED, "没有权限：只能停下自己名下的会话".into()));
                 }
                 Ok(json!({ "stopping": mind::stop(&id) }))
+            }
+            // 分叉、截短、换历史（Friday 的分叉、改一条重发、切分支、重试）：在干活的会话不动
+            "sessions.fork" | "sessions.truncate" | "sessions.copy" => {
+                let id = params.get("id").and_then(Value::as_str).ok_or_else(|| invalid("要给 id"))?;
+                let mut session =
+                    Session::find(id).filter(|session| self.owns(&session.id)).ok_or((protocol::NO_SESSION, format!("没有会话 {id}")))?;
+                let keep = params.get("keep").and_then(Value::as_u64).map(|keep| keep as usize);
+                if method != "sessions.fork" && mind::working(&session.id).is_some() {
+                    return Err((protocol::INVALID_REQUEST, "这段会话在干活：先停下".into()));
+                }
+                match method {
+                    "sessions.fork" => {
+                        // 复制一段（keep：只要前这么多条）；hidden：记在 branch 名下（列表里不出现，存放分出去的另一支）
+                        let mut fork = Session::new(&session.cwd);
+                        if let Some(new) = params.get("newID").and_then(Value::as_str) {
+                            let new = new.to_lowercase();
+                            if uuid::Uuid::parse_str(&new).is_err() || Session::load(&new).is_some() {
+                                return Err(invalid(format!("newID 要是没用过的 UUID：{new}")));
+                            }
+                            fork.id = new;
+                        }
+                        fork.history = session.history[..keep.unwrap_or(session.history.len()).min(session.history.len())].to_vec();
+                        fork.title = session.title.clone();
+                        if params.get("hidden").and_then(Value::as_bool) == Some(true) {
+                            fork.owner = sessions::ARCHIVED.into();
+                        } else if !self.full() {
+                            fork.owner = self.name.clone();
+                        }
+                        fork.save().map_err(|message| (protocol::INTERNAL_ERROR, message))?;
+                        Ok(fork.summary())
+                    }
+                    "sessions.truncate" => {
+                        let keep = keep.ok_or_else(|| invalid("要给 keep"))?;
+                        session.history.truncate(keep);
+                        session.save().map_err(|message| (protocol::INTERNAL_ERROR, message))?;
+                        Ok(session.summary())
+                    }
+                    _ => {
+                        let from = params.get("from").and_then(Value::as_str).ok_or_else(|| invalid("要给 from"))?;
+                        let source = Session::find(from)
+                            .filter(|source| self.owns(&source.id))
+                            .ok_or((protocol::NO_SESSION, format!("没有会话 {from}")))?;
+                        session.history = source.history.clone();
+                        session.save().map_err(|message| (protocol::INTERNAL_ERROR, message))?;
+                        Ok(session.summary())
+                    }
+                }
             }
             "sessions.dequeue" => {
                 // 拿掉一段排着的（sense 排队时回的 turn）
