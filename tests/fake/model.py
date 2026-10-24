@@ -124,6 +124,9 @@ class Handler(BaseHTTPRequestHandler):
                 events.append(say("写好了 s.py"))
             else:
                 events.append(call("write_file", {"path": "s.py", "content": "print(1)\n"}))
+        elif "原样回答：" in last_user and not called:
+            # 「原样回答：X」：把 X 原样答出来（定时任务的 /loop next、/loop done 这类单独一行的指令）
+            events.append(say(last_user.split("原样回答：", 1)[1]))
         elif called and not tools_since:
             # 「调用工具 X」：调 X（没参数），再把结果原样答出来
             events.append(chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_t", "type": "function", "function": {"name": called.group(1), "arguments": called.group(2) or "{}"}}]}, "tool_calls"))

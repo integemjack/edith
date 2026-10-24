@@ -1109,7 +1109,9 @@ impl Capability {
         let timeout = action.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(DEFAULT_ACTION_TIMEOUT);
         let call = format!("c{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         self.acting.lock().unwrap().insert(call.clone(), (context.session.clone(), context.turn.clone()));
-        let params = json!({ "call": call, "action": name, "arguments": arguments, "session": context.session, "turn": context.turn });
+        // agent：子 Agent 调的（它的 id；主智能体的是 null）
+        let agent = context.me.as_ref().map(|me| me.id.clone());
+        let params = json!({ "call": call, "action": name, "arguments": arguments, "session": context.session, "turn": context.turn, "agent": agent });
         let outcome = self.request("act", params, Duration::from_secs(timeout), Some(cancel));
         self.acting.lock().unwrap().remove(&call);
         match outcome {

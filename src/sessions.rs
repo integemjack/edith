@@ -265,12 +265,23 @@ fn ends_with_newline(path: &Path) -> bool {
 }
 
 fn first_user_text(history: &[Value]) -> String {
-    history
+    let text = history
         .iter()
         .find(|entry| entry.get("role").and_then(Value::as_str) == Some("user"))
         .and_then(|entry| entry.get("content").and_then(Value::as_str))
-        .unwrap_or("")
-        .replace('\n', " ")
+        .unwrap_or("");
+    // 能力交来、记下、补充的：去掉给模型标来源的那一行（edith.input / note / interjection）
+    let text = match text.split_once('\n') {
+        Some((first, rest))
+            if first.starts_with('（')
+                && first.ends_with('）')
+                && ["传来", "记下了下面这段", "补充了下面这段"].iter().any(|mark| first.contains(mark)) =>
+        {
+            rest
+        }
+        _ => text,
+    };
+    text.replace('\n', " ")
 }
 
 /// 所有会话（新的在前），只有元数据
@@ -325,6 +336,10 @@ mod tests {
         let both = Session::load(&session.id).unwrap();
         assert_eq!(both.history.len(), 3, "两边写的都留着：{:?}", both.history);
         assert_eq!(both.title, "一");
+        // 标来源的那一行不算进标题
+        let noted =
+            vec![json!({ "role": "user", "content": "（能力「friday」记下了下面这段，不用回复，之后用得着时参考）\n/loop 10m 看 CI" })];
+        assert_eq!(first_user_text(&noted), "/loop 10m 看 CI");
         // 压缩：历史整个换了
         let mut compacted = Session::load(&session.id).unwrap();
         compacted.history = vec![json!({ "role": "user", "content": "摘要" })];

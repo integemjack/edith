@@ -283,7 +283,7 @@ run_shell 执行前后各看一遍工作目录和命令里写到的路径，新�
 
 ```json
 {"jsonrpc": "2.0", "id": 12, "method": "act", "params": {
-  "call": "c12", "action": "listen", "arguments": {"on": true}, "session": "5d0c…", "turn": "a1b2c3d4e5f6"
+  "call": "c12", "action": "listen", "arguments": {"on": true}, "session": "5d0c…", "turn": "a1b2c3d4e5f6", "agent": null
 }}
 ```
 
@@ -292,6 +292,10 @@ run_shell 执行前后各看一遍工作目录和命令里写到的路径，新�
 ```json
 {"text": "开始听了", "ok": true, "media": [{"path": "/tmp/shot.png", "mime": "image/png"}]}
 ```
+
+- `agent`：子 Agent 调的是它的 id，主智能体调的是 `null`（能力可以只给主智能体做的动作，比如建定时任务）。
+
+回话里：
 
 - `text`：给模型看的结果（不是字符串的会转成 JSON 文字；太长的留头尾截掉）。
 - `ok`：默认 `true`；`false` 表示没做成（模型会看到失败）。
