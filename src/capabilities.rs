@@ -190,7 +190,7 @@ pub fn log_file(name: &str) -> PathBuf {
     home::project_dir().join("logs").join(format!("{name}.log"))
 }
 
-fn log_line(name: &str, text: &str) {
+pub fn log_line(name: &str, text: &str) {
     let path = log_file(name);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -311,6 +311,7 @@ pub fn stop_all() {
     finish(children);
     crate::mcp::stop_all();
     crate::pty::close_all();
+    crate::browser::stop();
 }
 
 fn restarts(config: &Value) -> bool {
@@ -983,6 +984,21 @@ impl Capability {
                 };
                 outcome.map_err(|message| (protocol::NO_SESSION, message))
             }
+            // 内置浏览器（Friday 的 browser.*）：大脑起的无头 Chrome，断了标签照常在；同终端只给全权的连接
+            method if method.starts_with("browser.") => {
+                if !self.full() {
+                    return Err((protocol::INVALID_REQUEST, "只有全权的连接能用浏览器".into()));
+                }
+                let outcome = match method {
+                    "browser.state" => Ok(crate::browser::state()),
+                    "browser.open" => crate::browser::open(
+                        params.get("session").and_then(Value::as_str).unwrap_or(""),
+                        params.get("url").and_then(Value::as_str).unwrap_or(""),
+                    ),
+                    _ => crate::browser::request(method, params, &self.name),
+                };
+                outcome.map_err(|message| (protocol::NO_SESSION, message))
+            }
             "changes.list" | "changes.diff" | "changes.revert" => {
                 let id = params.get("session").and_then(Value::as_str).ok_or_else(|| invalid("要给 session"))?;
                 let session =
@@ -1188,6 +1204,7 @@ impl Capability {
         }
         drop(all);
         crate::pty::forget(&self.name);
+        crate::browser::forget(&self.name);
         crate::instance::refresh();
         if !was_alive || STOPPING.load(Ordering::Relaxed) {
             return;

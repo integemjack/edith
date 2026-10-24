@@ -62,7 +62,7 @@ fn in_path(command: &str) -> bool {
 }
 
 /// PATH 里这个程序的完整路径
-fn find_in_path(command: &str) -> Option<PathBuf> {
+pub fn find_in_path(command: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
     let names: Vec<String> = if cfg!(windows) {
         let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into());
