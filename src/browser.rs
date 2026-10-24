@@ -4,7 +4,7 @@
 //! Linux / macOS 走 `--remote-debugging-pipe`（fd 3 进、fd 4 出，一条一条以 \0 分隔，不开端口）；Windows 走本机随机端口 + WebSocket。
 //! 看着一个标签的连接（browser.watch）收它的 `browser.frame`；标签开了、关了、标题网址加载状态、对话框变了推 `browser`（全部标签）给全权的连接。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -39,6 +39,16 @@ struct Tab {
     dialog: Option<Value>,
     /// 看着它的连接 → 画面最大多大
     watchers: HashMap<String, (u32, u32)>,
+    /// 智能体用的隔离世界（edith）的执行上下文：0 = 还没有 / 换页了
+    world: u64,
+    /// 智能体请用户在这里做的事（browser_hand_over）
+    hand_over: Option<String>,
+    /// 下载完、还没告诉智能体的文件
+    downloads: Vec<String>,
+    /// 用户最近一次在卡片里动（智能体让开）
+    user_input: Option<std::time::Instant>,
+    /// 哪个标签开出来的（网页开的新窗口）
+    opener: String,
 }
 
 impl Tab {
@@ -433,6 +443,7 @@ fn on_event(method: &str, params: &Value, cdp: &str) {
                 target,
                 url: text(&info["url"]),
                 container: parent.container,
+                opener: parent.id.clone(),
                 ..Default::default()
             };
             let id = tab.id.clone();
@@ -502,6 +513,11 @@ fn on_event(method: &str, params: &Value, cdp: &str) {
             if state != "progress" {
                 inner.downloads.remove(&guid);
             }
+            if state == "done"
+                && let Some(owner) = inner.tabs.iter_mut().find(|item| item.id == tab)
+            {
+                owner.downloads.push(downloads_dir().join(&name).to_string_lossy().into_owned());
+            }
             let total = params["totalBytes"].as_f64().unwrap_or(0.0);
             let fraction = if total > 0.0 { params["receivedBytes"].as_f64().unwrap_or(0.0) / total } else { 0.0 };
             let path = downloads_dir().join(&name);
@@ -540,6 +556,13 @@ fn on_event(method: &str, params: &Value, cdp: &str) {
             drop(inner);
             refresh_title(&cdp);
         }
+        "Runtime.executionContextCreated" => {
+            let context = &params["context"];
+            if context["name"] == "edith" && context["auxData"]["frameId"].as_str() == Some(tab.frame.as_str()) {
+                tab.world = context["id"].as_u64().unwrap_or(0);
+            }
+        }
+        "Runtime.executionContextsCleared" => tab.world = 0,
         "Runtime.bindingCalled" => {
             if params["name"] == "__edithTitle" {
                 let title = display_title(params["payload"].as_str().unwrap_or(""), &tab.url);
@@ -621,7 +644,29 @@ fn with_tab<T>(id: &str, change: impl FnOnce(&mut Tab) -> T) -> Result<T, String
 }
 
 /// 接上一个标签（没开的先开；接上了打开等着的网址、要画面的开始推）
+/// 正在接上的标签：别的线程同时要接同一个的等它接完（不然建出两个页面）
+static ATTACHING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
 fn attach(id: &str) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + CALL_TIMEOUT;
+    loop {
+        if with_tab(id, |tab| !tab.cdp.is_empty())? {
+            return Ok(());
+        }
+        if ATTACHING.lock().unwrap().insert(id.to_string()) {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("接不上这个标签".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let outcome = attach_once(id);
+    ATTACHING.lock().unwrap().remove(id);
+    outcome
+}
+
+fn attach_once(id: &str) -> Result<(), String> {
     ensure_started()?;
     let (target, cdp) = with_tab(id, |tab| (tab.target.clone(), tab.cdp.clone()))?;
     if !cdp.is_empty() {
@@ -699,7 +744,7 @@ fn navigate_to(id: &str, url: &str) {
 }
 
 /// 地址栏风格的输入 → 网址（像网址的补协议，别的用必应搜；同 Friday 的 normalize）
-fn normalize(input: &str) -> String {
+pub fn normalize(input: &str) -> String {
     let text = input.trim();
     if text.is_empty() {
         return String::new();
@@ -827,6 +872,9 @@ pub fn state() -> Value {
             if let Some(dialog) = &tab.dialog {
                 item["dialog"] = dialog.clone();
             }
+            if let Some(reason) = &tab.hand_over {
+                item["handOver"] = json!(reason);
+            }
             item
         })
         .collect();
@@ -859,7 +907,8 @@ pub fn open(session: &str, url: &str) -> Result<Value, String> {
     let tab = Tab {
         id: uuid::Uuid::new_v4().to_string(),
         session: session.to_string(),
-        pending: Some(if target.is_empty() { "about:blank".into() } else { target.clone() }),
+        // 空白的不用另外打开（新页面本来就是 about:blank）：设了的话接上后才去打开，会盖掉紧接着打开的网址
+        pending: (!target.is_empty()).then(|| target.clone()),
         url: target,
         ..Default::default()
     };
@@ -968,22 +1017,7 @@ pub fn request(method: &str, params: &Value, watcher: &str) -> Result<Value, Str
             changed();
             save();
         }
-        "browser.close" => {
-            let tab = {
-                let mut inner = BROWSER.inner.lock().unwrap();
-                let index = inner.tabs.iter().position(|tab| tab.id == id).ok_or_else(|| format!("没有标签 {id}"))?;
-                let tab = inner.tabs.remove(index);
-                if inner.current.get(&tab.session) == Some(&tab.id) {
-                    inner.current.remove(&tab.session);
-                }
-                tab
-            };
-            if !tab.target.is_empty() {
-                post("Target.closeTarget", json!({ "targetId": tab.target }), "");
-            }
-            changed();
-            save();
-        }
+        "browser.close" => close_tab(&id)?,
         "browser.navigate" => {
             let (cdp, attached) = with_tab(&id, |tab| (tab.cdp.clone(), !tab.cdp.is_empty()))?;
             if let Some(url) = params["url"].as_str().map(normalize).filter(|url| !url.is_empty()) {
@@ -1064,9 +1098,20 @@ pub fn request(method: &str, params: &Value, watcher: &str) -> Result<Value, Str
             changed();
         }
         // 智能体请用户做事（交给用户）：EDITH 的智能体还不会，点了「好了」照常
-        "browser.handOverDone" => {}
+        // 用户在卡片上点了「好了」：替用户往这段会话说一句，智能体接着做
+        "browser.handOverDone" => {
+            let (session, reason) = with_tab(&id, |tab| (tab.session.clone(), tab.hand_over.take()))?;
+            if let Some(reason) = reason {
+                changed();
+                let text = format!("浏览器里弄好了（{reason}）");
+                let _ = crate::mind::submit(&session, &text, crate::mind::Origin::terminal(), crate::mind::Urgency::Queue, None);
+            }
+        }
         "browser.input" => {
-            let cdp = with_tab(&id, |tab| tab.cdp.clone())?;
+            let cdp = with_tab(&id, |tab| {
+                tab.user_input = Some(std::time::Instant::now());
+                tab.cdp.clone()
+            })?;
             if cdp.is_empty() {
                 wake(&id);
                 return Ok(json!({}));
@@ -1130,6 +1175,383 @@ pub fn forget(watcher: &str) {
     for id in ids {
         screencast(&id);
     }
+}
+
+/// 关掉一个标签
+pub fn close_tab(id: &str) -> Result<(), String> {
+    let tab = {
+        let mut inner = BROWSER.inner.lock().unwrap();
+        let index = inner.tabs.iter().position(|tab| tab.id == id).ok_or_else(|| format!("没有标签 {id}"))?;
+        let tab = inner.tabs.remove(index);
+        if inner.current.get(&tab.session) == Some(&tab.id) {
+            inner.current.remove(&tab.session);
+        }
+        tab
+    };
+    if !tab.target.is_empty() {
+        post("Target.closeTarget", json!({ "targetId": tab.target }), "");
+    }
+    changed();
+    save();
+    Ok(())
+}
+
+// MARK: - 智能体用的（browser_tools.rs 的工具）
+
+/// 这台有没有浏览器（智能体才有浏览器工具）
+pub fn available() -> bool {
+    executable().is_some()
+}
+
+/// 一个标签给智能体看的样子
+pub struct TabInfo {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub loading: bool,
+    pub current: bool,
+    pub opener: String,
+    pub hand_over: bool,
+}
+
+fn tab_info(inner: &Inner, tab: &Tab) -> TabInfo {
+    TabInfo {
+        id: tab.id.clone(),
+        title: tab.title.clone(),
+        url: if tab.url == "about:blank" { String::new() } else { tab.url.clone() },
+        loading: tab.loading || tab.navigating || (tab.cdp.is_empty() && tab.pending.is_some()),
+        current: current_of(inner, &tab.session) == tab.id,
+        opener: tab.opener.clone(),
+        hand_over: tab.hand_over.is_some(),
+    }
+}
+
+/// 这段会话的标签（开的先后）
+pub fn tabs_of(session: &str) -> Vec<TabInfo> {
+    let mut inner = BROWSER.inner.lock().unwrap();
+    load_tabs(&mut inner);
+    inner.tabs.iter().filter(|tab| tab.session == session).map(|tab| tab_info(&inner, tab)).collect()
+}
+
+pub fn info(id: &str) -> Option<TabInfo> {
+    let inner = BROWSER.inner.lock().unwrap();
+    inner.tabs.iter().find(|tab| tab.id == id).map(|tab| tab_info(&inner, tab))
+}
+
+/// 这段会话选中的标签
+pub fn current_tab(session: &str) -> Option<String> {
+    let mut inner = BROWSER.inner.lock().unwrap();
+    load_tabs(&mut inner);
+    Some(current_of(&inner, session)).filter(|id| !id.is_empty())
+}
+
+/// 智能体开的标签（这一轮结束时关掉）、留给用户的
+static AGENT_TABS: LazyLock<Mutex<HashMap<String, HashSet<String>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static KEPT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// 给这段会话开一个标签、等它接上（智能体开的：这一轮结束时关掉）
+pub fn open_for_agent(session: &str, url: &str) -> Result<String, String> {
+    let id = open(session, "")?["tab"].as_str().unwrap_or("").to_string();
+    AGENT_TABS.lock().unwrap().entry(session.to_string()).or_default().insert(id.clone());
+    attach(&id)?;
+    if !url.trim().is_empty() {
+        load(&id, url);
+    }
+    Ok(id)
+}
+
+/// 接上（大脑重起后第一次用、浏览器退出过）
+pub fn wake_now(id: &str) -> Result<(), String> {
+    attach(id)
+}
+
+pub fn keep(id: &str) {
+    KEPT.lock().unwrap().insert(id.to_string());
+}
+
+/// 这一轮结束时会关掉：智能体开的、没留给用户的
+pub fn closes_at_turn_end(session: &str, id: &str) -> bool {
+    AGENT_TABS.lock().unwrap().get(session).is_some_and(|tabs| tabs.contains(id)) && !KEPT.lock().unwrap().contains(id)
+}
+
+/// 一轮结束：关掉智能体开的标签（连同它们开出来的新窗口）；正交给用户操作的下一轮结束再关
+pub fn close_agent_tabs(session: &str) {
+    let Some(agent) = AGENT_TABS.lock().unwrap().remove(session) else { return };
+    let kept = KEPT.lock().unwrap().clone();
+    let list = tabs_of(session);
+    let mut waiting = HashSet::new();
+    let mut closing = HashSet::new();
+    for tab in list.iter().filter(|tab| agent.contains(&tab.id) && !kept.contains(&tab.id)) {
+        if tab.hand_over {
+            waiting.insert(tab.id.clone());
+        } else {
+            closing.insert(tab.id.clone());
+        }
+    }
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for tab in &list {
+            if !closing.contains(&tab.id) && !waiting.contains(&tab.id) && !kept.contains(&tab.id) && closing.contains(&tab.opener) {
+                closing.insert(tab.id.clone());
+                grew = true;
+            }
+        }
+    }
+    for id in &closing {
+        let _ = close_tab(id);
+    }
+    if !waiting.is_empty() {
+        AGENT_TABS.lock().unwrap().entry(session.to_string()).or_default().extend(waiting);
+    }
+}
+
+/// 打开网址（地址栏风格的输入）
+pub fn load(id: &str, url: &str) {
+    let url = normalize(url);
+    if url.is_empty() {
+        return;
+    }
+    let attached = with_tab(id, |tab| !tab.cdp.is_empty()).unwrap_or(false);
+    if attached {
+        navigate_to(id, &url);
+    } else if with_tab(id, |tab| tab.pending = Some(url)).is_ok() {
+        let _ = attach(id);
+    }
+}
+
+/// 后退 / 前进 / 刷新 / 停下
+pub fn navigate_action(id: &str, action: &str) -> Result<(), String> {
+    request("browser.navigate", &json!({ "tab": id, "action": action }), "").map(|_| ())
+}
+
+pub fn select(id: &str) -> Result<(), String> {
+    request("browser.select", &json!({ "tab": id }), "").map(|_| ())
+}
+
+/// 在页面里跑一段脚本（isolated：在 edith 这个隔离世界里跑，不和网页自己的变量打架；元素编号表也存在那里）
+pub fn evaluate(id: &str, script: &str, isolated: bool) -> Result<Value, String> {
+    attach(id)?;
+    for attempt in 0..2 {
+        let (cdp, frame, world) = with_tab(id, |tab| (tab.cdp.clone(), tab.frame.clone(), tab.world))?;
+        let mut params = json!({ "expression": script, "returnByValue": true, "awaitPromise": true });
+        if isolated {
+            let context = if world != 0 {
+                world
+            } else {
+                let created = call("Page.createIsolatedWorld", json!({ "frameId": frame, "worldName": "edith" }), &cdp)?;
+                let context = created["executionContextId"].as_u64().unwrap_or(0);
+                with_tab(id, |tab| tab.world = context)?;
+                context
+            };
+            params["contextId"] = json!(context);
+        }
+        match call("Runtime.evaluate", params, &cdp) {
+            Ok(result) => {
+                if let Some(exception) = result.get("exceptionDetails") {
+                    let text = exception["exception"]["description"].as_str().or(exception["text"].as_str()).unwrap_or("脚本出错了");
+                    return Err(text.to_string());
+                }
+                return Ok(result["result"]["value"].clone());
+            }
+            // 隔离世界过期了（换了页面）：重建一次再跑
+            Err(_) if isolated && attempt == 0 => {
+                with_tab(id, |tab| tab.world = 0)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err("脚本没跑成".into())
+}
+
+fn cdp_of(id: &str) -> Result<String, String> {
+    let cdp = with_tab(id, |tab| tab.cdp.clone())?;
+    if cdp.is_empty() { Err("网页还没准备好，稍后再试".into()) } else { Ok(cdp) }
+}
+
+/// 鼠标：type 是 mouseMoved / mousePressed / mouseReleased / mouseWheel
+pub fn mouse(id: &str, kind: &str, x: f64, y: f64, button: &str, clicks: u64, delta: (f64, f64)) -> Result<(), String> {
+    let cdp = cdp_of(id)?;
+    let mut event = json!({ "type": kind, "x": x, "y": y, "button": button, "clickCount": clicks, "modifiers": 0 });
+    if kind == "mouseWheel" {
+        event["deltaX"] = json!(delta.0);
+        event["deltaY"] = json!(delta.1);
+    }
+    call("Input.dispatchMouseEvent", event, &cdp).map(|_| ())
+}
+
+/// 点一下（clicks 次）
+pub fn click(id: &str, x: f64, y: f64, button: &str, clicks: u64) -> Result<(), String> {
+    mouse(id, "mouseMoved", x, y, "none", 0, (0.0, 0.0))?;
+    for count in 1..=clicks.max(1) {
+        mouse(id, "mousePressed", x, y, button, count, (0.0, 0.0))?;
+        mouse(id, "mouseReleased", x, y, button, count, (0.0, 0.0))?;
+    }
+    Ok(())
+}
+
+/// 智能体按的键（Enter、Tab、Ctrl+A…）→ CDP 的 key / code / 文字 / 修饰键 / 编辑命令（无头浏览器不认系统快捷键）
+fn parse_combo(combo: &str) -> Option<(String, String, String, u64, Vec<&'static str>)> {
+    let parts: Vec<&str> = combo.split('+').map(str::trim).filter(|part| !part.is_empty()).collect();
+    let (name, modifiers_part) = parts.split_last()?;
+    let mut modifiers = 0;
+    for modifier in modifiers_part {
+        modifiers |= match modifier.to_lowercase().as_str() {
+            "ctrl" | "control" | "cmd" | "command" => 2,
+            "shift" => 8,
+            "alt" | "option" => 1,
+            "meta" | "win" => 4,
+            _ => return None,
+        };
+    }
+    let lower = name.to_lowercase();
+    let named: &[(&str, &str, &str)] = &[
+        ("enter", "Enter", "\r"),
+        ("return", "Enter", "\r"),
+        ("tab", "Tab", ""),
+        ("escape", "Escape", ""),
+        ("esc", "Escape", ""),
+        ("backspace", "Backspace", ""),
+        ("delete", "Delete", ""),
+        ("space", " ", " "),
+        ("arrowup", "ArrowUp", ""),
+        ("up", "ArrowUp", ""),
+        ("arrowdown", "ArrowDown", ""),
+        ("down", "ArrowDown", ""),
+        ("arrowleft", "ArrowLeft", ""),
+        ("left", "ArrowLeft", ""),
+        ("arrowright", "ArrowRight", ""),
+        ("right", "ArrowRight", ""),
+        ("home", "Home", ""),
+        ("end", "End", ""),
+        ("pageup", "PageUp", ""),
+        ("pagedown", "PageDown", ""),
+    ];
+    if let Some((_, key, text)) = named.iter().find(|(alias, _, _)| *alias == lower) {
+        let code = if *key == " " { "Space".to_string() } else { key.to_string() };
+        let text = if modifiers & 2 != 0 { String::new() } else { text.to_string() };
+        return Some((key.to_string(), code, text, modifiers, Vec::new()));
+    }
+    let mut chars = name.chars();
+    if let (Some(character), None) = (chars.next(), chars.next()) {
+        let key = if modifiers & 8 != 0 { character.to_uppercase().to_string() } else { character.to_lowercase().to_string() };
+        let code = if character.is_ascii_digit() { format!("Digit{character}") } else { format!("Key{}", character.to_ascii_uppercase()) };
+        let text = if modifiers & (1 | 2 | 4) == 0 { key.clone() } else { String::new() };
+        let commands = if modifiers & 2 != 0 {
+            match lower.as_str() {
+                "a" => vec!["selectAll"],
+                "c" => vec!["copy"],
+                "v" => vec!["paste"],
+                "x" => vec!["cut"],
+                "z" => vec!["undo"],
+                _ => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        return Some((key, code, text, modifiers, commands));
+    }
+    let number = lower.strip_prefix('f').and_then(|rest| rest.parse::<u32>().ok()).filter(|number| (1..=12).contains(number))?;
+    let key = format!("F{number}");
+    Some((key.clone(), key, String::new(), modifiers, Vec::new()))
+}
+
+/// 按一个键（组合键）；认不出回 false
+pub fn press_key(id: &str, combo: &str) -> Result<bool, String> {
+    let Some((key, code, text, modifiers, commands)) = parse_combo(combo) else { return Ok(false) };
+    let cdp = cdp_of(id)?;
+    let mut down = json!({
+        "type": if text.is_empty() { "rawKeyDown" } else { "keyDown" }, "key": key, "code": code,
+        "windowsVirtualKeyCode": virtual_key(&code, &key), "modifiers": modifiers,
+    });
+    if !text.is_empty() {
+        down["text"] = json!(text);
+    }
+    if !commands.is_empty() {
+        down["commands"] = json!(commands);
+    }
+    call("Input.dispatchKeyEvent", down.clone(), &cdp)?;
+    let mut up = down;
+    up["type"] = json!("keyUp");
+    if let Some(object) = up.as_object_mut() {
+        object.remove("text");
+        object.remove("commands");
+    }
+    call("Input.dispatchKeyEvent", up, &cdp).map(|_| Ok(true))?
+}
+
+pub fn insert_text(id: &str, text: &str) -> Result<(), String> {
+    let cdp = cdp_of(id)?;
+    call("Input.insertText", json!({ "text": text }), &cdp).map(|_| ())
+}
+
+/// 视口截图（JPEG，按视口的 CSS 像素）
+pub fn screenshot(id: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    attach(id)?;
+    let cdp = cdp_of(id)?;
+    let shot = call("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 85 }), &cdp)?;
+    base64::engine::general_purpose::STANDARD.decode(shot["data"].as_str().unwrap_or("")).map_err(|error| format!("截图读不了：{error}"))
+}
+
+pub fn viewport_of(id: &str) -> (u32, u32) {
+    with_tab(id, |tab| tab.viewport()).unwrap_or(DEFAULT_VIEWPORT)
+}
+
+/// 智能体定的固定视口（None：回到跟着卡片）
+pub fn set_fixed(id: &str, size: Option<(u32, u32)>) -> Result<(), String> {
+    with_tab(id, |tab| tab.fixed = size)?;
+    apply_viewport(id);
+    changed();
+    save();
+    Ok(())
+}
+
+/// 没回答的对话框：「确认框「…」」这样的一句
+pub fn pending_dialog(id: &str) -> String {
+    with_tab(id, |tab| {
+        tab.dialog.as_ref().map(|dialog| {
+            let kind = match dialog["type"].as_str().unwrap_or("") {
+                "confirm" => "确认框",
+                "prompt" => "输入框",
+                "beforeunload" => "离开确认",
+                _ => "提示框",
+            };
+            format!("{kind}「{}」", dialog["message"].as_str().unwrap_or(""))
+        })
+    })
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
+pub fn answer_dialog(id: &str, accept: bool, text: &str) -> Result<bool, String> {
+    if with_tab(id, |tab| tab.dialog.is_none())? {
+        return Ok(false);
+    }
+    request("browser.dialog", &json!({ "tab": id, "accept": accept, "text": text }), "")?;
+    Ok(true)
+}
+
+pub fn take_downloads(id: &str) -> Vec<String> {
+    with_tab(id, |tab| std::mem::take(&mut tab.downloads)).unwrap_or_default()
+}
+
+/// 请用户在这个标签里做件事（登录、人机验证……）：卡片上显示、推 browser.handOver 给客户端；用户点「好了」后替用户说一句
+pub fn hand_over(id: &str, reason: &str) -> Result<(), String> {
+    let session = with_tab(id, |tab| {
+        tab.hand_over = Some(reason.to_string());
+        tab.session.clone()
+    })?;
+    BROWSER.inner.lock().unwrap().current.insert(session.clone(), id.to_string());
+    crate::capabilities::notify_full("browser.handOver", json!({ "conversationID": session, "tab": id, "reason": reason }));
+    changed();
+    Ok(())
+}
+
+/// 用户这 3 秒里在卡片里动过（智能体让开）
+pub fn user_active(id: &str) -> bool {
+    with_tab(id, |tab| tab.user_input.is_some_and(|at| at.elapsed() < Duration::from_secs(3))).unwrap_or(false)
 }
 
 /// Windows：DevTools 的 WebSocket（只连本机，不用 TLS；够 CDP 用的那一点：文本帧、分片、ping）
@@ -1255,5 +1677,12 @@ mod tests {
         assert_eq!((virtual_key("Enter", "Enter"), virtual_key("KeyA", "a"), virtual_key("F5", "F5")), (13, 65, 116));
         assert_eq!(modifiers(0x0400_0000 | 0x0200_0000), 2 | 8);
         assert_eq!(display_title("example.com/", "https://example.com/"), "");
+        // 智能体按的键
+        let (key, code, text, modifiers, commands) = parse_combo("Ctrl+A").unwrap();
+        assert_eq!((key.as_str(), code.as_str(), text.as_str(), modifiers, commands), ("a", "KeyA", "", 2, vec!["selectAll"]));
+        let (key, _, text, _, _) = parse_combo("Enter").unwrap();
+        assert_eq!((key.as_str(), text.as_str()), ("Enter", "\r"));
+        assert_eq!(parse_combo("Shift+F5").map(|stroke| (stroke.0, stroke.3)), Some(("F5".into(), 8)));
+        assert!(parse_combo("Hyper+X").is_none());
     }
 }

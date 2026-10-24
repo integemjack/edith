@@ -8,6 +8,7 @@ mod approval;
 mod attach;
 mod brain;
 mod browser;
+mod browser_tools;
 mod capabilities;
 mod changes;
 mod checks;

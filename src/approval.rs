@@ -309,6 +309,36 @@ pub fn classify(name: &str, arguments: &Map<String, Value>, cwd: &Path) -> Optio
             }
             Some(need)
         }
+        // 浏览器：打开新网站同 fetch_url（按网站问）；点、输入、跑脚本问一声（答「都行」这个会话里就不再问）；看、截图、滚动不问
+        "browser_navigate" => {
+            let url = crate::browser::normalize(&text(arguments, "url"));
+            if url.is_empty() {
+                return None;
+            }
+            let host = host_of(&url).map(|(host, _)| host).unwrap_or_else(|| url.clone());
+            let mut need = need(host.clone(), format!("在浏览器里打开：{}", clip(&url, 300)), format!("browser_navigate({host})"));
+            if private_url(&url) {
+                need.private_network = true;
+                need.summary = format!("在浏览器里打开本机 / 内网地址：{}", clip(&url, 300));
+            }
+            Some(need)
+        }
+        "browser_act" => {
+            let action = text(arguments, "action").to_lowercase();
+            if matches!(action.as_str(), "" | "hover" | "scroll" | "dialog") {
+                return None;
+            }
+            let what = [text(arguments, "ref"), text(arguments, "text"), text(arguments, "key")]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(need(what.clone(), format!("在网页里 {action}：{}", clip(&what, 200)), "browser_act".into()))
+        }
+        "browser_run_js" => {
+            let script = text(arguments, "script");
+            Some(need(clip(&script, 200), format!("在网页里跑脚本：{}", clip(&script, 300)), "browser_run_js".into()))
+        }
         _ => {
             let shown = clip(&Value::Object(arguments.clone()).to_string(), 300);
             if crate::capabilities::is_action(name) && !crate::capabilities::is_read_only(name) {
@@ -324,7 +354,8 @@ pub fn classify(name: &str, arguments: &Map<String, Value>, cwd: &Path) -> Optio
 
 /// Friday 选的权限模式（只有全权的连接带得来）放不放行：完全 = 都不问；自动 = 删除类、改系统的才问（同 Friday 的 approvalFor）；
 /// 计划、没选照 EDITH 的规则问
-fn mode_allows(name: &str, arguments: &Map<String, Value>, mode: Option<&str>) -> bool {
+/// 浏览器里点付款 / 登录、往密码框和卡号输入（同 Friday 的 stopFor）自动模式下也问
+fn mode_allows(name: &str, arguments: &Map<String, Value>, mode: Option<&str>, session: &str) -> bool {
     let command = arguments.get("command").and_then(Value::as_str);
     let path = arguments.get("path").and_then(Value::as_str);
     match mode {
@@ -332,6 +363,7 @@ fn mode_allows(name: &str, arguments: &Map<String, Value>, mode: Option<&str>) -
         Some("auto") => {
             !friday_core::approval::is_destructive(name, command, cfg!(windows))
                 && !friday_core::approval::is_system_change(name, command, path)
+                && !(name == "browser_act" && crate::browser_tools::needs_stop(arguments, session).is_some())
         }
         _ => false,
     }
@@ -358,7 +390,7 @@ pub fn check(
     if auto() {
         return Ok(!guest);
     }
-    if !guest && !need.private_network && !need.sensitive && mode_allows(name, arguments, context.prefs.mode.as_deref()) {
+    if !guest && !need.private_network && !need.sensitive && mode_allows(name, arguments, context.prefs.mode.as_deref(), &context.session) {
         return Ok(false);
     }
     let session_rules = SESSION_RULES.lock().unwrap().get(&context.session).cloned().unwrap_or_default();
@@ -531,9 +563,16 @@ mod tests {
         let list = arguments(json!({ "command": "ls" }));
         let system = arguments(json!({ "path": "/etc/hosts", "content": "x" }));
         // 完全：都不问；自动：删除类、往系统目录写的才问；计划、没选：照 EDITH 的规则
-        assert!(mode_allows("run_shell", &remove, Some("full")));
-        assert!(mode_allows("write_file", &write, Some("auto")) && mode_allows("run_shell", &list, Some("auto")));
-        assert!(!mode_allows("run_shell", &remove, Some("auto")) && !mode_allows("write_file", &system, Some("auto")));
-        assert!(!mode_allows("write_file", &write, Some("plan")) && !mode_allows("write_file", &write, None));
+        assert!(mode_allows("run_shell", &remove, Some("full"), "s"));
+        assert!(mode_allows("write_file", &write, Some("auto"), "s") && mode_allows("run_shell", &list, Some("auto"), "s"));
+        assert!(!mode_allows("run_shell", &remove, Some("auto"), "s") && !mode_allows("write_file", &system, Some("auto"), "s"));
+        assert!(!mode_allows("write_file", &write, Some("plan"), "s") && !mode_allows("write_file", &write, None, "s"));
+        // 浏览器：打开新网站按网站问、看和滚动不问
+        let open = arguments(json!({ "url": "example.com" }));
+        let need = classify("browser_navigate", &open, Path::new("/w")).unwrap();
+        assert_eq!((need.target.as_str(), need.always.as_str()), ("example.com", "browser_navigate(example.com)"));
+        assert!(classify("browser_act", &arguments(json!({ "action": "scroll" })), Path::new("/w")).is_none());
+        assert!(classify("browser_read", &arguments(json!({})), Path::new("/w")).is_none());
+        assert!(classify("browser_navigate", &arguments(json!({ "url": "localhost:3000" })), Path::new("/w")).unwrap().private_network);
     }
 }

@@ -211,6 +211,9 @@ fn execute(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, c
     if name == crate::skills::USE {
         return crate::skills::use_skill(arguments);
     }
+    if let Some(outcome) = crate::browser_tools::run(name, arguments, &context.session) {
+        return outcome;
+    }
     if let Some(outcome) = crate::memory::run(name, arguments) {
         return outcome;
     }
@@ -501,6 +504,8 @@ pub fn run(
             _ => return finish(&brain, answer, None, cancel.load(Ordering::Relaxed)),
         }
         let mut results = Vec::new();
+        crate::tools::take_images();
+        let mut images: Vec<String> = Vec::new();
         for call in decision["calls"].as_array().into_iter().flatten() {
             let id = call["id"].as_str().unwrap_or("").to_string();
             let name = call["name"].as_str().unwrap_or("").to_string();
@@ -515,6 +520,7 @@ pub fn run(
                 execute(&id, &name, &arguments, cwd, cancel, context)
             };
             let lines = crate::tools::take_lines();
+            images.extend(crate::tools::take_images());
             on(Event::Result { id: id.clone(), name: name.clone(), ok: outcome.ok, text: outcome.text.clone(), lines });
             results.push((id, name, outcome.text));
         }
@@ -522,7 +528,14 @@ pub fn run(
         if !added.is_empty() {
             on(Event::Notice(format!("收到 {} 段补充，接着做时一起考虑", added.len())));
         }
-        brain.tool_results(results, 0, None, added, None);
+        // 截图：跟在工具结果后面一条用户消息（图片记路径、发请求时才读成 base64；较早的截图 friday-core 换成一句话）
+        let image_message = (!images.is_empty()).then(|| {
+            let mut parts: Vec<Value> =
+                images.iter().map(|path| json!({ "type": "image_url", "image_url": { "url": format!("{IMAGE_PREFIX}{path}") } })).collect();
+            parts.push(json!({ "type": "text", "text": format!("{}上面是工具截的图", friday_core::engine_loop::IMAGE_MARKER) }));
+            json!({ "role": "user", "content": parts })
+        });
+        brain.tool_results(results, images.len(), image_message, added, None);
         // 这一步取回了工具（load_tools）、或者调了还没给的按需工具：下一段请求就给它们
         let tools_next = tool_specs(context, brain.history());
         if tools_next.len() != settings.tools.len() {

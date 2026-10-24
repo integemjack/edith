@@ -48,6 +48,21 @@ thread_local! {
     static LINES: std::cell::Cell<Option<[usize; 2]>> = const { std::cell::Cell::new(None) };
 }
 
+thread_local! {
+    /// 这一步交给模型看的图片（browser_screenshot）：brain 跟在工具结果后面发给能看图的模型
+    static IMAGES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 这一步有张图要给模型看（这台上的路径）
+pub fn note_image(path: &str) {
+    IMAGES.with(|images| images.borrow_mut().push(path.to_string()));
+}
+
+/// 取走这个线程上记下的图片
+pub fn take_images() -> Vec<String> {
+    IMAGES.with(|images| std::mem::take(&mut *images.borrow_mut()))
+}
+
 /// 取走这个线程上一步记下的增删行数
 pub fn take_lines() -> Option<[usize; 2]> {
     LINES.with(|lines| lines.take())

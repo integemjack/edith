@@ -35,6 +35,7 @@ pub fn available(context: &Context) -> Vec<Value> {
         .collect();
     specs.extend(crate::capabilities::specs(allowed));
     specs.extend(crate::mcp::specs(allowed));
+    specs.extend(crate::browser_tools::specs().into_iter().filter(|spec| allowed.allows(name_of(spec), false)));
     specs
 }
 
@@ -54,6 +55,9 @@ fn summary(spec: &Value) -> String {
 fn group(name: &str) -> String {
     if crate::team::TOOLS.contains(&name) {
         return "派子智能体".into();
+    }
+    if crate::browser_tools::is_tool(name) {
+        return "浏览器（这段会话在 Friday 里的浏览器卡片，用户看得见、能一起操作）".into();
     }
     let owner = name.split_once(crate::capabilities::SEPARATOR).map_or(name, |(owner, _)| owner);
     if crate::capabilities::is_action(name) { format!("能力「{owner}」") } else { format!("MCP 服务「{owner}」") }

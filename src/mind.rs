@@ -349,6 +349,8 @@ fn work(session_id: String, first: Input) {
         let turn = input.turn.clone();
         emit(&session_id, &turn, "turn.started", json!({ "text": input.text, "origin": input.origin.to_json() }));
         let done = run_turn(&session_id, &input, &cancel);
+        // 智能体这一轮开的网页：关掉（带 keep 的、正交给用户的留着）
+        crate::browser::close_agent_tabs(&session_id);
         emit(&session_id, &turn, "done", done);
         // 下一轮：没塞进去的补充（这一轮直接答完了）先，再是排着的
         let mut sessions = SESSIONS.lock().unwrap();
