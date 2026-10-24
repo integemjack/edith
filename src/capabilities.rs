@@ -451,6 +451,9 @@ pub fn accept(reader: Box<dyn Read + Send>, mut writer: Box<dyn Write + Send>, a
     handshake(writer, reader, authority)
 }
 
+/// 取名到登记那一段一次只走一条连接（handshake）
+static NAMING: Mutex<()> = Mutex::new(());
+
 /// 用一个不重名的名字：想要的已经被占了（连着的、主令牌的连接还不能用配置里的名字）就加 -2、-3……
 fn unique_name(wanted: &str, reserve_configured: bool) -> String {
     let base = {
@@ -513,6 +516,8 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
             return Err(format!("握手没成功：{}", error_text(&error)));
         }
     };
+    // 取不重名的名字到登记进表是一段：两条连接同时握手（两个 Friday 客户端一起连上）时不会都叫同一个名字、后登记的把前一条挤掉
+    let naming = NAMING.lock().unwrap();
     let name = match &authority.name {
         // 中转的子连接可能重名（同一台设备连了两次）：加编号
         Some(fixed) if authority.relayed => unique_name(fixed, false),
@@ -564,6 +569,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
     });
     *capability.listener.lock().unwrap() = Some(listener);
     CAPABILITIES.write().unwrap().insert(name.to_string(), capability.clone());
+    drop(naming);
     capability.notify("initialized", json!({}));
     crate::instance::refresh();
     log_line(
