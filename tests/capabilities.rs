@@ -106,6 +106,100 @@ fn action_called_with_progress() {
     assert_eq!(messages[1]["method"], "initialized");
 }
 
+/// 假能力带上两个口子的设置（模型地址、钩子）
+fn configure_openings(home: &Path, model_port: u16, mode: &str, approve: &str) {
+    let config = json!({ "capabilities": [{
+        "name": "cap",
+        "command": python(),
+        "args": ["-u", fake("cap.py").to_str().unwrap()],
+        "env": {
+            "CAP_LOG": home.join("cap.jsonl").to_str().unwrap(),
+            "CAP_RECEIVES": "done",
+            "CAP_MODEL_URL": format!("http://127.0.0.1:{model_port}/v1"),
+            "CAP_HOOKS": "PreToolUse,PostToolUse,UserPromptSubmit,Stop",
+            "CAP_HOOK_MODE": mode,
+            "CAP_APPROVE": approve,
+        },
+    }]});
+    std::fs::write(home.join("capabilities.json"), config.to_string()).unwrap();
+}
+
+fn requests(home: &Path) -> Vec<Value> {
+    std::fs::read_to_string(home.join("requests.jsonl")).unwrap_or_default().lines().filter_map(|line| serde_json::from_str(line).ok()).collect()
+}
+
+fn hooks<'a>(messages: &'a [Value], event: &str) -> Vec<&'a Value> {
+    messages
+        .iter()
+        .filter(|message| message["method"] == "hook" && message["params"]["hook_event_name"] == event)
+        .map(|message| &message["params"])
+        .collect()
+}
+
+#[test]
+fn model_endpoint_and_hooks() {
+    let (work, home) = scratch("openings");
+    let model = fake_model(&home.join("requests.jsonl"));
+    configure_openings(&home, model.port, "change", "");
+    // 模型地址不是 http 的：问能力要真地址（它回假模型的），body 并进请求
+    let output = command(&home, model.port, &work, &["-C", work.to_str().unwrap(), "用能力记一下"])
+        .env("EDITH_BASE_URL", "power://llm")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // 调用前的钩子改了参数；一轮结束的钩子让它接着做了一次
+    assert!(stdout.contains("能力说：记住了：改过"), "{}", text(&output));
+    assert!(stdout.contains("我是 EDITH"), "{}", text(&output));
+    let sent = requests(&home);
+    assert!(sent.len() >= 3 && sent.iter().all(|body| body["x_friday"]["test"] == 1), "{sent:?}");
+    let all = Value::Array(sent).to_string();
+    assert!(all.contains("[用户配的钩子补充的信息]\\n钩子补的"), "用户消息后面没补上：{all}");
+    assert!(all.contains("（调用后用户配的钩子说：钩子看过了）"), "工具结果后面没补上：{all}");
+    assert!(all.contains("一轮结束时用户配的钩子没让你停下"), "没接着做：{all}");
+    let messages = received(&home);
+    let endpoint = messages.iter().find(|message| message["method"] == "model.endpoint").expect("没问模型地址");
+    assert_eq!(endpoint["params"]["baseURL"], "power://llm");
+    let before = hooks(&messages, "PreToolUse");
+    assert_eq!(before[0]["tool_name"], "cap__remember");
+    assert_eq!(before[0]["tool_input"]["text"], "hi");
+    assert!(before[0]["session_id"].as_str().is_some_and(|session| !session.is_empty()) && before[0]["cwd"].is_string());
+    let after = hooks(&messages, "PostToolUse");
+    assert_eq!(after[0]["tool_input"]["text"], "改过", "PostToolUse 交的是改过的参数");
+    assert_eq!(after[0]["tool_response"]["success"], true);
+    assert_eq!(hooks(&messages, "UserPromptSubmit")[0]["prompt"], "用能力记一下");
+    let stops = hooks(&messages, "Stop");
+    assert_eq!(stops.len(), 2, "{stops:?}");
+    assert_eq!((stops[0]["stop_hook_active"].as_bool(), stops[1]["stop_hook_active"].as_bool()), (Some(false), Some(true)));
+    let act = messages.iter().find(|message| message["method"] == "act").expect("没收到 act");
+    assert_eq!(act["params"]["arguments"]["text"], "改过");
+}
+
+#[test]
+fn hook_denies_and_describes_approval() {
+    // 拦下：动作不做，原因交给模型
+    let (work, home) = scratch("hook-deny");
+    let model = fake_model(&home.join("requests.jsonl"));
+    configure_openings(&home, model.port, "deny", "");
+    let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), "用能力记一下"]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("用户配的钩子拦下了这次调用，它说：不许记"), "{}", text(&output));
+    assert!(!received(&home).iter().any(|message| message["method"] == "act"), "拦下了还做了");
+    // 能力替自己的动作说怎么批准：问的是它说的那句
+    let (work, home) = scratch("hook-need");
+    let model = fake_model(&home.join("requests.jsonl"));
+    configure_openings(&home, model.port, "need", "deny");
+    let output = command(&home, model.port, &work, &["-C", work.to_str().unwrap(), "用能力记一下"])
+        .env_remove("EDITH_PERMISSION_MODE")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    let messages = received(&home);
+    let approve = messages.iter().find(|message| message["method"] == "approve").expect("没问批准");
+    assert_eq!(approve["params"]["summary"], "要记东西", "{approve}");
+    assert!(!messages.iter().any(|message| message["method"] == "act"), "没批准还做了");
+}
+
 #[test]
 fn sense_starts_a_turn_and_notes() {
     let (work, home) = scratch("sense");

@@ -138,12 +138,16 @@ MCP 服务每次请求再多 2.1k，而大多数用不上（改完实测：「�
 - **设置**：`config.json` 的 `systemPrompt` 接在 EDITH 自己的系统提示后面；`disabledTools` 里的工具不给模型、硬调也拒绝；`defaultPermissionMode`
   是 Friday 新对话的默认权限模式（edith-friday 用）。`tools.list`（协议 §4.4）给设置页看有哪些工具、技能、MCP 服务。
 
-## 终端与浏览器
+## 给能力开的两个口子
 
-Friday 客户端的内置终端、浏览器开在大脑里（`src/pty.rs`、`src/browser.rs`，协议 §4.4）：客户端断了 shell、网页照常在，
-换一台设备连上来接着看。终端用伪终端（macOS / Linux 的 posix_openpt，Windows 的 ConPTY），重放最近 512 KB 的输出；浏览器起这台装着的
-Chrome / Chromium / Edge 的无头模式（`EDITH_BROWSER` 指定别的），画面用 DevTools 的 screencast 推 JPEG，鼠标键盘照转，标签按会话记、大脑重起后重新打开。
-只给全权的连接；大脑退出时一起结束。
+大脑只管干活；客户端专有的（Friday 的终端、浏览器、本地模型、定时任务、钩子、插件……）在挂上来的能力里——Friday 的在 edith-friday 常驻的那份
+（[edith.tools/docs/FRIDAY.md](https://github.com/integemjack/edith.tools/blob/main/docs/FRIDAY.md)）。大脑给能力开两个口子（协议 §6.6、§6.7）：
+
+- **模型地址**：`baseURL` 不是 http 的模型（Friday 本地模型的 `power://llm`）每段请求前问报了 `models` 的能力要真地址（它先拉起模型服务）。
+- **钩子**：用工具前后、交来的话交给模型前、一轮做完时问报了 `hooks` 的能力（同 Claude Code 的钩子）：拦下、要确认、免确认、改参数、补话、不让停；
+  能力也用它替自己的动作说怎么批准（浏览器按网站问、本机地址、点付款自动模式也问）。
+
+能力的动作回的图片（`media` 里 `image/*` 的本机文件）同自带工具的截图：跟在工具结果后面交给能看图的模型。
 
 ## 升级
 
@@ -185,7 +189,7 @@ edith friday [install | uninstall | status]   装成这台的 Friday 服务端�
 | `friday.json` | edith-friday 网关自己记的：置顶、草稿、每段会话选的档位、分出去的各支、最近一轮怎么结束的（edith.tools 的 docs/FRIDAY.md） |
 | `trust.json` | 信任了哪些目录的项目 / 本地配置（按内容哈希） |
 | `capabilities.json`、`mcp.json` | 全局那层的能力、MCP 服务（[协议 §8](CAPABILITY-PROTOCOL.md#8-配置capabilitiesjson)、[§9](CAPABILITY-PROTOCOL.md#9-mcp-服务)） |
-| `projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希前 8 位>/` | 这个目录的数据：`sessions/<id>.jsonl` 会话（只追加，一行一条；同一个会话几个大脑接着写也不互相盖掉；记在 `#branch` 名下的是分出去的另一支）、`reads/<id>.json` 会话读过的文件（先读后改用）、`changes/<id>/` 会话改动的基线、`agents/<会话>/<id>.json` 子 Agent 的运行记录、`browser/` 无头浏览器的用户数据和标签、`logs/<能力名>.log` 能力的日志 |
+| `projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希前 8 位>/` | 这个目录的数据：`sessions/<id>.jsonl` 会话（只追加，一行一条；同一个会话几个大脑接着写也不互相盖掉；记在 `#branch` 名下的是分出去的另一支）、`reads/<id>.json` 会话读过的文件（先读后改用）、`changes/<id>/` 会话改动的基线、`agents/<会话>/<id>.json` 子 Agent 的运行记录、`logs/<能力名>.log` 能力的日志 |
 | `Prompts/` | 提示词（`edith.md` 是 EDITH 自己的；改了下一轮生效，改坏的段自动用自带的；friday-core 的 prompts 管合并） |
 | `instances/<目录的键>-<进程号>.json` | 在跑的大脑：目录、进程、套接字的地址和主令牌、能力、入口（[协议 §8.2](CAPABILITY-PROTOCOL.md#82-在跑的大脑instances)） |
 | `tools/<工具>/` | 从 edith.tools 下的工具；`tools/installed.json` 记版本 |

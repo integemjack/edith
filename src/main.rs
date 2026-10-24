@@ -7,8 +7,6 @@
 mod approval;
 mod attach;
 mod brain;
-mod browser;
-mod browser_tools;
 mod capabilities;
 mod changes;
 mod checks;
@@ -23,7 +21,6 @@ mod migrate;
 mod mind;
 mod permissions;
 mod protocol;
-mod pty;
 mod sessions;
 mod skills;
 mod team;

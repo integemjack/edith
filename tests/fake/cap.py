@@ -4,6 +4,10 @@
 - 握手后按 CAP_SCRIPT（JSON 数组：[{"delay": 秒, "send": 一条消息}]）按时发消息给 EDITH
 - CAP_APPROVE=allow|always|deny：声明能批准（approves），大脑问 approve 时这样答（deny 带原因「先别动」）
 - CAP_RELAY=<名字>：握手后再开一条中转连接（auth 带 as），它收到的记进 CAP_LOG 时包在 {"relay": …} 里
+- CAP_MODEL_URL：报 models ["power://"]，model.endpoint 回这个地址、body 带 {"x_friday": {"test": 1}}
+- CAP_HOOKS（逗号分开的时机）：报 hooks；CAP_HOOK_MODE 是 PreToolUse 怎么回——change（默认：参数改成「改过」）、deny（拦下：不许记）、
+  need（替动作说批准要求：summary「要记东西」）；PostToolUse 补「钩子看过了」、UserPromptSubmit 补「钩子补的」、
+  Stop 第一次不让停（让它「只聊天：再看一遍」）
 - 收到的每一条都记进 CAP_LOG（一行一条）；大脑断开或发 shutdown 就退出"""
 import json
 import os
@@ -75,6 +79,8 @@ for line in reader:
                          "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}],
             "receives": receives,
             "approves": bool(os.environ.get("CAP_APPROVE")),
+            "models": ["power://"] if os.environ.get("CAP_MODEL_URL") else [],
+            "hooks": [event for event in os.environ.get("CAP_HOOKS", "").split(",") if event],
         }})
     elif method == "initialized":
         threading.Thread(target=script, daemon=True).start()
@@ -87,6 +93,27 @@ for line in reader:
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"text": "记住了：" + params["arguments"].get("text", "")}})
     elif method == "approve":
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"decision": os.environ["CAP_APPROVE"], "reason": "先别动"}})
+    elif method == "model.endpoint":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"baseURL": os.environ["CAP_MODEL_URL"], "body": {"x_friday": {"test": 1}}}})
+    elif method == "hook":
+        params = message["params"]
+        event = params["hook_event_name"]
+        mode = os.environ.get("CAP_HOOK_MODE", "change")
+        result = {}
+        if event == "PreToolUse" and params.get("tool_name") == "cap__remember":
+            if mode == "deny":
+                result = {"permissionDecision": "deny", "permissionDecisionReason": "不许记"}
+            elif mode == "need":
+                result = {"need": {"target": "hi", "summary": "要记东西", "rule": "cap__remember(hi)"}}
+            else:
+                result = {"updatedInput": {"text": "改过"}}
+        elif event == "PostToolUse":
+            result = {"additionalContext": "钩子看过了"}
+        elif event == "UserPromptSubmit":
+            result = {"additionalContext": "钩子补的"}
+        elif event == "Stop" and not params.get("stop_hook_active"):
+            result = {"decision": "block", "reason": "只聊天：再看一遍"}
+        send({"jsonrpc": "2.0", "id": message["id"], "result": result})
     elif method == "ping" and "id" in message:
         send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
     elif method == "shutdown":

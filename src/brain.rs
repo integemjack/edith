@@ -188,31 +188,107 @@ fn wait(seconds: f64, cancel: &AtomicBool) {
     }
 }
 
-/// 用一个工具：自带的、能力的动作；名字写走样的按 Friday 的别名表认回来
+/// 钩子的输入（同 Claude Code 交给钩子命令的标准输入）
+fn hook_input(context: &Context, cwd: &Path, fields: Value) -> Value {
+    let mut input = json!({
+        "session_id": context.session,
+        "cwd": cwd.to_string_lossy(),
+        "permission_mode": context.prefs.mode.clone().unwrap_or_else(|| "default".into()),
+    });
+    if let (Some(input), Value::Object(fields)) = (input.as_object_mut(), fields) {
+        input.extend(fields);
+    }
+    input
+}
+
+fn hook_text(key: &str, name: &str, value: &str) -> String {
+    prompts::text(key, &args(&[(name, value.to_string())]), None)
+}
+
+/// 用一个工具：调用前后有能力管的钩子（PreToolUse / PostToolUse）就跑
 fn execute(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, context: &Context) -> Outcome {
+    let mut outcome = run_tool(call, name, arguments, cwd, cancel, context);
+    if outcome.ran && !cancel.load(Ordering::Relaxed) && capabilities::has_hook("PostToolUse") {
+        let fields = json!({
+            "tool_name": name,
+            "tool_input": outcome.input.clone().map(Value::Object).unwrap_or_else(|| Value::Object(arguments.clone())),
+            "tool_response": { "success": outcome.outcome.ok, "output": outcome.outcome.text },
+        });
+        let after = capabilities::run_hook("PostToolUse", hook_input(context, cwd, fields));
+        let context_text = [after.context.join("\n"), if after.block { after.reason } else { String::new() }]
+            .into_iter()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !context_text.is_empty() {
+            outcome.outcome.text = format!("{}\n\n{}", outcome.outcome.text, hook_text("hooks.after", "context", &context_text));
+        }
+    }
+    outcome.outcome
+}
+
+struct Ran {
+    outcome: Outcome,
+    /// 真跑了（没被权限、钩子、批准拦下）
+    ran: bool,
+    /// 钩子改过的参数
+    input: Option<Map<String, Value>>,
+}
+
+/// 用一个工具：自带的、能力的动作；名字写走样的按 Friday 的别名表认回来
+fn run_tool(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, context: &Context) -> Ran {
+    let refused = |text: String| Ran { outcome: Outcome { ok: false, text }, ran: false, input: None };
+    if crate::home::disabled_tools().iter().any(|disabled| disabled == name) {
+        return refused(format!("{name} 在设置里关掉了"));
+    }
     let canonical = tool_aliases::canonical_name(name);
     let read_only = capabilities::is_read_only(name) || crate::mcp::is_read_only(name) || name == crate::memory::SEARCH;
-    if crate::home::disabled_tools().iter().any(|disabled| disabled == name) {
-        return Outcome { ok: false, text: format!("{name} 在设置里关掉了") };
-    }
     if !context.tools.allows(name, read_only) && !context.tools.allows(&canonical, read_only) {
-        return Outcome { ok: false, text: format!("没有权限用 {name}：这一轮的话来自的连接{}", context.tools.describe()) };
+        return refused(format!("没有权限用 {name}：这一轮的话来自的连接{}", context.tools.describe()));
     }
+    // 调用前的钩子（能力管的：Friday 的 hooks.json、能力替自己的动作说怎么批准）：拦下、要确认、免确认、改参数
+    let mut verdict = crate::approval::Verdict::default();
+    let mut changed: Option<Map<String, Value>> = None;
+    if capabilities::has_hook("PreToolUse") {
+        let fields = json!({ "tool_name": name, "tool_input": arguments });
+        let before = capabilities::run_hook("PreToolUse", hook_input(context, cwd, fields));
+        if before.block || before.permission.as_deref() == Some("deny") {
+            return refused(hook_text("hooks.blocked", "reason", &before.reason));
+        }
+        verdict.need = before.need.as_ref().and_then(|need| crate::approval::need_from(name, need));
+        verdict.permission = before.permission;
+        verdict.reason = before.reason;
+        changed = before.input;
+    }
+    let arguments = changed.as_ref().unwrap_or(arguments);
+    let mut ran = Ran { outcome: Outcome { ok: false, text: String::new() }, ran: true, input: changed.clone() };
     // 改东西、往外发、碰敏感的：先批准（approval.rs）；名字写走样的按认回来的那个审
     let checked = if tools::BUILTINS.contains(&name) { name } else { canonical.as_str() };
     let checked_arguments = if checked == name { arguments.clone() } else { tool_aliases::canonical_arguments(checked, arguments) };
-    let private_ok = match crate::approval::check(call, checked, &checked_arguments, cwd, context, cancel) {
+    let private_ok = match crate::approval::check(call, checked, &checked_arguments, cwd, context, cancel, &verdict) {
         Ok(private_ok) => private_ok,
-        Err(text) => return Outcome { ok: false, text },
+        Err(text) => return refused(text),
     };
+    ran.outcome = dispatch(call, name, &canonical, arguments, cwd, cancel, context, private_ok);
+    ran
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch(
+    call: &str,
+    name: &str,
+    canonical: &str,
+    arguments: &Map<String, Value>,
+    cwd: &Path,
+    cancel: &AtomicBool,
+    context: &Context,
+    private_ok: bool,
+) -> Outcome {
     if name == crate::deferred::LOAD {
         return crate::deferred::load(arguments, context);
     }
     if name == crate::skills::USE {
         return crate::skills::use_skill(arguments);
-    }
-    if let Some(outcome) = crate::browser_tools::run(name, arguments, &context.session) {
-        return outcome;
     }
     if let Some(outcome) = crate::memory::run(name, arguments) {
         return outcome;
@@ -226,7 +302,7 @@ fn execute(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, c
     }
     if canonical != name
         && let Some(outcome) =
-            tools::run(&canonical, &tool_aliases::canonical_arguments(&canonical, arguments), cwd, cancel, &context.session, private_ok)
+            tools::run(canonical, &tool_aliases::canonical_arguments(canonical, arguments), cwd, cancel, &context.session, private_ok)
     {
         return outcome;
     }
@@ -284,23 +360,44 @@ fn inline_images(mut body: Value, vision: bool) -> Value {
     body
 }
 
+/// 模型的真地址：http 的照用；别的（Friday 本地模型的 power://llm）问管它的能力（model.endpoint，可能要先拉起模型服务），
+/// 它回的 body 并进请求体
+fn endpoint(model: &Model, session: &str) -> Result<(String, String, Map<String, Value>), String> {
+    if model.base_url.starts_with("http://") || model.base_url.starts_with("https://") {
+        return Ok((model.base_url.clone(), model.api_key.clone(), Map::new()));
+    }
+    let endpoint = capabilities::model_endpoint(&model.base_url, &model.model, session)?;
+    let base = endpoint["baseURL"].as_str().filter(|base| !base.is_empty()).ok_or("能力回的模型地址是空的")?;
+    let key = endpoint["apiKey"].as_str().map(str::to_string).unwrap_or_else(|| model.api_key.clone());
+    Ok((base.trim_end_matches('/').to_string(), key, endpoint["body"].as_object().cloned().unwrap_or_default()))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn request(
     brain: &mut Loop,
     model: &Model,
+    session: &str,
     include_tools: bool,
     show_reasoning: bool,
     attempt: i64,
     cancel: &AtomicBool,
     on: &mut dyn FnMut(Event),
 ) -> Request {
-    let url = format!("{}/chat/completions", model.base_url);
-    let body = inline_images(brain.body(include_tools, None), model.supports_vision);
+    let (base, api_key, extra) = match endpoint(model, session) {
+        Ok(endpoint) => endpoint,
+        Err(message) => return Request::Failed(message),
+    };
+    let url = format!("{base}/chat/completions");
+    let mut body = inline_images(brain.body(include_tools, None), model.supports_vision);
+    if let Some(body) = body.as_object_mut() {
+        body.extend(extra);
+    }
     let mut parser = Parser::new(show_reasoning, true);
     let started = now_ms();
     let mut first: Option<i64> = None;
     let mut stream_error: Option<StreamError> = None;
     let mut in_reasoning = false;
-    let outcome = http::post_sse(&url, &model.api_key, &body, |data| {
+    let outcome = http::post_sse(&url, &api_key, &body, |data| {
         if cancel.load(Ordering::Relaxed) {
             return false;
         }
@@ -476,7 +573,7 @@ pub fn run(
         let show_reasoning = prepared["showReasoning"].as_bool().unwrap_or(true);
         let mut attempt = 1;
         let (pass, started, finished, first) = loop {
-            match request(&mut brain, model, include_tools, show_reasoning, attempt, cancel, on) {
+            match request(&mut brain, model, &context.session, include_tools, show_reasoning, attempt, cancel, on) {
                 Request::Done { pass, started, finished, first } => break (pass, started, finished, first),
                 Request::Retry => attempt += 1,
                 Request::Failed(message) => {

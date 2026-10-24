@@ -97,6 +97,39 @@ pub struct Need {
     pub private_network: bool,
     /// 读敏感的文件（什么权限模式都问）
     pub sensitive: bool,
+    /// 自动模式下也问（能力说的：Friday 浏览器里点付款 / 登录、往密码框和卡号输入）
+    pub stop: bool,
+}
+
+/// 调用工具前的钩子（能力管的 PreToolUse）对这次调用的意见
+#[derive(Debug, Default)]
+pub struct Verdict {
+    /// permissionDecision：allow 免确认、ask 一定问（deny 在调用前就拦下了）
+    pub permission: Option<String>,
+    pub reason: String,
+    /// 能力替自己的动作说的批准要求（钩子回复的 need）：Some(None) = 不用批准，Some(Some(..)) = 照它问
+    pub need: Option<Option<Need>>,
+}
+
+/// 钩子回复里的 need（EDITH 加的，Claude Code 没有）：false = 不用批准；{target, summary, rule, privateNetwork, sensitive, stop}
+pub fn need_from(name: &str, value: &Value) -> Option<Option<Need>> {
+    if value.as_bool() == Some(false) {
+        return Some(None);
+    }
+    let object = value.as_object()?;
+    let text = |key: &str| object.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let flag = |key: &str| object.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let target = text("target");
+    let summary = if text("summary").is_empty() { format!("{name}：{target}") } else { text("summary") };
+    Some(Some(Need {
+        tool: name.to_string(),
+        always: if text("rule").is_empty() { name.to_string() } else { text("rule") },
+        target,
+        summary,
+        private_network: flag("privateNetwork"),
+        sensitive: flag("sensitive"),
+        stop: flag("stop"),
+    }))
 }
 
 /// 0 按配置、1 问、2 不问（--auto）
@@ -272,6 +305,7 @@ pub fn classify(name: &str, arguments: &Map<String, Value>, cwd: &Path) -> Optio
         always,
         private_network: false,
         sensitive: false,
+        stop: false,
     };
     let path = |key: &str| crate::tools::resolve(arguments.get(key).and_then(Value::as_str).unwrap_or("."), cwd);
     if READ_TOOLS.contains(&name) {
@@ -309,36 +343,6 @@ pub fn classify(name: &str, arguments: &Map<String, Value>, cwd: &Path) -> Optio
             }
             Some(need)
         }
-        // 浏览器：打开新网站同 fetch_url（按网站问）；点、输入、跑脚本问一声（答「都行」这个会话里就不再问）；看、截图、滚动不问
-        "browser_navigate" => {
-            let url = crate::browser::normalize(&text(arguments, "url"));
-            if url.is_empty() {
-                return None;
-            }
-            let host = host_of(&url).map(|(host, _)| host).unwrap_or_else(|| url.clone());
-            let mut need = need(host.clone(), format!("在浏览器里打开：{}", clip(&url, 300)), format!("browser_navigate({host})"));
-            if private_url(&url) {
-                need.private_network = true;
-                need.summary = format!("在浏览器里打开本机 / 内网地址：{}", clip(&url, 300));
-            }
-            Some(need)
-        }
-        "browser_act" => {
-            let action = text(arguments, "action").to_lowercase();
-            if matches!(action.as_str(), "" | "hover" | "scroll" | "dialog") {
-                return None;
-            }
-            let what = [text(arguments, "ref"), text(arguments, "text"), text(arguments, "key")]
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-            Some(need(what.clone(), format!("在网页里 {action}：{}", clip(&what, 200)), "browser_act".into()))
-        }
-        "browser_run_js" => {
-            let script = text(arguments, "script");
-            Some(need(clip(&script, 200), format!("在网页里跑脚本：{}", clip(&script, 300)), "browser_run_js".into()))
-        }
         _ => {
             let shown = clip(&Value::Object(arguments.clone()).to_string(), 300);
             if crate::capabilities::is_action(name) && !crate::capabilities::is_read_only(name) {
@@ -354,8 +358,8 @@ pub fn classify(name: &str, arguments: &Map<String, Value>, cwd: &Path) -> Optio
 
 /// Friday 选的权限模式（只有全权的连接带得来）放不放行：完全 = 都不问；自动 = 删除类、改系统的才问（同 Friday 的 approvalFor）；
 /// 计划、没选照 EDITH 的规则问
-/// 浏览器里点付款 / 登录、往密码框和卡号输入（同 Friday 的 stopFor）自动模式下也问
-fn mode_allows(name: &str, arguments: &Map<String, Value>, mode: Option<&str>, session: &str) -> bool {
+/// 能力说了要停下来问的（Friday 浏览器里点付款 / 登录、往密码框和卡号输入，同 Friday 的 stopFor）自动模式下也问
+fn mode_allows(name: &str, arguments: &Map<String, Value>, mode: Option<&str>, stop: bool) -> bool {
     let command = arguments.get("command").and_then(Value::as_str);
     let path = arguments.get("path").and_then(Value::as_str);
     match mode {
@@ -363,7 +367,7 @@ fn mode_allows(name: &str, arguments: &Map<String, Value>, mode: Option<&str>, s
         Some("auto") => {
             !friday_core::approval::is_destructive(name, command, cfg!(windows))
                 && !friday_core::approval::is_system_change(name, command, path)
-                && !(name == "browser_act" && crate::browser_tools::needs_stop(arguments, session).is_some())
+                && !stop
         }
         _ => false,
     }
@@ -377,24 +381,55 @@ pub fn check(
     cwd: &Path,
     context: &Context,
     cancel: &AtomicBool,
+    verdict: &Verdict,
 ) -> Result<bool, String> {
     let guest = context.tools != Tools::All;
+    let forced = verdict.permission.as_deref() == Some("ask");
+    let mut need = match &verdict.need {
+        Some(given) => given.clone(),
+        None => classify(name, arguments, cwd),
+    };
+    // 钩子要确认、本来不用批准的：照样问一声
+    if forced && need.is_none() {
+        let shown = clip(&Value::Object(arguments.clone()).to_string(), 300);
+        need = Some(Need {
+            tool: name.to_string(),
+            target: name.to_string(),
+            summary: format!("用 {name}：{shown}"),
+            always: name.to_string(),
+            private_network: false,
+            sensitive: false,
+            stop: false,
+        });
+    }
     // 主人的这一轮：问过、批了的（或 --auto）可以访问本机 / 内网；客人的从来不行
-    let Some(need) = classify(name, arguments, cwd) else { return Ok(!guest && auto()) };
+    let Some(mut need) = need else { return Ok(!guest && auto()) };
     if need.private_network && guest {
         return Err(format!("不许：{}（权限不全的连接交来的这一轮不能访问本机 / 内网）", need.summary));
     }
     if let Some(rule) = rules("deny").into_iter().find(|rule| matches(rule, &need)) {
         return Err(format!("不许：{}（~/.edith/config.json 的 permissions.deny：{rule}）", need.summary));
     }
-    if auto() {
+    // 钩子说免确认（同 Claude Code：deny 规则照样拦）
+    if verdict.permission.as_deref() == Some("allow") {
+        return Ok(!guest && need.private_network);
+    }
+    if forced && !verdict.reason.is_empty() {
+        need.summary = format!("{}（钩子：{}）", need.summary, verdict.reason);
+    }
+    if !forced && auto() {
         return Ok(!guest);
     }
-    if !guest && !need.private_network && !need.sensitive && mode_allows(name, arguments, context.prefs.mode.as_deref(), &context.session) {
+    if !forced
+        && !guest
+        && !need.private_network
+        && !need.sensitive
+        && mode_allows(name, arguments, context.prefs.mode.as_deref(), need.stop)
+    {
         return Ok(false);
     }
     let session_rules = SESSION_RULES.lock().unwrap().get(&context.session).cloned().unwrap_or_default();
-    if rules("allow").iter().chain(session_rules.iter()).any(|rule| matches(rule, &need)) {
+    if !forced && rules("allow").iter().chain(session_rules.iter()).any(|rule| matches(rule, &need)) {
         return Ok(!guest && need.private_network);
     }
     let request = json!({
@@ -540,6 +575,7 @@ mod tests {
             always: String::new(),
             private_network: false,
             sensitive: false,
+            stop: false,
         };
         assert!(matches("run_shell(git status*)", &need) && matches("run_shell", &need) && !matches("run_shell(git push*)", &need));
         assert!(!matches("write_file", &need));
@@ -563,16 +599,26 @@ mod tests {
         let list = arguments(json!({ "command": "ls" }));
         let system = arguments(json!({ "path": "/etc/hosts", "content": "x" }));
         // 完全：都不问；自动：删除类、往系统目录写的才问；计划、没选：照 EDITH 的规则
-        assert!(mode_allows("run_shell", &remove, Some("full"), "s"));
-        assert!(mode_allows("write_file", &write, Some("auto"), "s") && mode_allows("run_shell", &list, Some("auto"), "s"));
-        assert!(!mode_allows("run_shell", &remove, Some("auto"), "s") && !mode_allows("write_file", &system, Some("auto"), "s"));
-        assert!(!mode_allows("write_file", &write, Some("plan"), "s") && !mode_allows("write_file", &write, None, "s"));
-        // 浏览器：打开新网站按网站问、看和滚动不问
-        let open = arguments(json!({ "url": "example.com" }));
-        let need = classify("browser_navigate", &open, Path::new("/w")).unwrap();
-        assert_eq!((need.target.as_str(), need.always.as_str()), ("example.com", "browser_navigate(example.com)"));
-        assert!(classify("browser_act", &arguments(json!({ "action": "scroll" })), Path::new("/w")).is_none());
-        assert!(classify("browser_read", &arguments(json!({})), Path::new("/w")).is_none());
-        assert!(classify("browser_navigate", &arguments(json!({ "url": "localhost:3000" })), Path::new("/w")).unwrap().private_network);
+        assert!(mode_allows("run_shell", &remove, Some("full"), false));
+        assert!(mode_allows("write_file", &write, Some("auto"), false) && mode_allows("run_shell", &list, Some("auto"), false));
+        assert!(!mode_allows("run_shell", &remove, Some("auto"), false) && !mode_allows("write_file", &system, Some("auto"), false));
+        assert!(!mode_allows("write_file", &write, Some("plan"), false) && !mode_allows("write_file", &write, None, false));
+        // 能力说要停下来问的：自动模式也问、完全不问
+        assert!(!mode_allows("friday__browser_act", &list, Some("auto"), true) && mode_allows("friday__browser_act", &list, Some("full"), true));
+    }
+
+    #[test]
+    fn hook_needs() {
+        // 能力替自己的动作说的批准要求：false 不用批准；对象照它问（按网站记「都行」）
+        assert!(matches!(need_from("friday__browser_read", &json!(false)), Some(None)));
+        let need = need_from(
+            "friday__browser_navigate",
+            &json!({ "target": "localhost", "summary": "在浏览器里打开本机地址", "rule": "friday__browser_navigate(localhost)", "privateNetwork": true }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(need.always, "friday__browser_navigate(localhost)");
+        assert!(need.private_network && !need.stop);
+        assert!(need_from("x", &json!(1)).is_none());
     }
 }

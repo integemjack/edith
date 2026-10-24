@@ -64,6 +64,10 @@ pub struct Capability {
     ready: bool,
     /// 它对外开的入口（initialize 回的 endpoints：WebSocket 地址等），登记进 instances/ 让别人找得到
     pub endpoints: Vec<Value>,
+    /// 它能给出真地址的模型网址前缀（initialize 回的 models，如 "power://"：Friday 的本地模型；只认全权的）
+    models: Vec<String>,
+    /// 要它管的钩子时机（initialize 回的 hooks：PreToolUse / PostToolUse / Stop / UserPromptSubmit；只认全权的）
+    hooks: Vec<String>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, Value>>>>,
     next_id: AtomicU64,
@@ -310,8 +314,6 @@ pub fn stop_all() {
     let children: Vec<Child> = LAUNCHED.lock().unwrap().drain().map(|(_, child)| child).collect();
     finish(children);
     crate::mcp::stop_all();
-    crate::pty::close_all();
-    crate::browser::stop();
 }
 
 fn restarts(config: &Value) -> bool {
@@ -454,6 +456,10 @@ pub fn accept(reader: Box<dyn Read + Send>, mut writer: Box<dyn Write + Send>, a
 /// 客人找自己名下的会话、没有就建，一次只走一句（prepare）
 static GUEST: Mutex<()> = Mutex::new(());
 
+fn strings(value: Option<&Value>) -> Vec<String> {
+    value.and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+}
+
 /// 取名到登记那一段一次只走一条连接（handshake）
 static NAMING: Mutex<()> = Mutex::new(());
 
@@ -485,6 +491,8 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
         focus_only: false,
         ready: false,
         endpoints: Vec::new(),
+        models: Vec::new(),
+        hooks: Vec::new(),
         writer: Mutex::new(Some(writer)),
         pending: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1),
@@ -555,6 +563,8 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
         focus_only: reply.get("sessions").and_then(Value::as_str) == Some("focus"),
         ready: true,
         endpoints: reply.get("endpoints").and_then(Value::as_array).cloned().unwrap_or_default(),
+        models: strings(reply.get("models")),
+        hooks: strings(reply.get("hooks")),
         writer: Mutex::new(shell.writer.lock().unwrap().take()),
         pending: Mutex::new(std::mem::take(&mut *shell.pending.lock().unwrap())),
         next_id: AtomicU64::new(shell.next_id.load(Ordering::Relaxed)),
@@ -956,58 +966,6 @@ impl Capability {
                     .map_err(|message| (protocol::INVALID_PARAMS, message))
             }
             // 会话改动（changes.rs）：改了哪些文件、改动、撤销
-            // 内置终端（Friday 的 term.*）：大脑开的伪终端，断了照常跑；能开 shell 的只有全权的连接
-            "terminals.list" | "terminals.open" | "terminals.attach" | "terminals.detach" | "terminals.write" | "terminals.resize"
-            | "terminals.close" => {
-                if !self.full() {
-                    return Err((protocol::INVALID_REQUEST, "只有全权的连接能用终端".into()));
-                }
-                let id = params.get("id").and_then(Value::as_str).unwrap_or("");
-                let size = |key: &str, default: u64| params.get(key).and_then(Value::as_u64).unwrap_or(default).min(1000) as u16;
-                let outcome = match method {
-                    "terminals.list" => Ok(json!({ "terminals": crate::pty::list() })),
-                    "terminals.open" => {
-                        let session = params.get("session").and_then(Value::as_str).unwrap_or("");
-                        let cwd = params
-                            .get("cwd")
-                            .and_then(Value::as_str)
-                            .filter(|cwd| !cwd.is_empty())
-                            .map(PathBuf::from)
-                            .or_else(|| Session::load(session).map(|stored| PathBuf::from(stored.cwd)))
-                            .unwrap_or_else(home::workspace);
-                        let command = params.get("command").and_then(Value::as_str);
-                        crate::pty::open(id, session, &cwd, size("cols", 80), size("rows", 24), command, &self.name)
-                    }
-                    "terminals.attach" => crate::pty::attach(id, &self.name),
-                    "terminals.detach" => crate::pty::detach(id, &self.name),
-                    "terminals.write" => {
-                        use base64::Engine;
-                        let data = params.get("data").and_then(Value::as_str).unwrap_or("");
-                        let bytes = base64::engine::general_purpose::STANDARD
-                            .decode(data)
-                            .map_err(|error| invalid(format!("data 不是 base64：{error}")))?;
-                        crate::pty::write(id, &bytes)
-                    }
-                    "terminals.resize" => crate::pty::resize(id, size("cols", 80), size("rows", 24)),
-                    _ => crate::pty::close(id),
-                };
-                outcome.map_err(|message| (protocol::NO_SESSION, message))
-            }
-            // 内置浏览器（Friday 的 browser.*）：大脑起的无头 Chrome，断了标签照常在；同终端只给全权的连接
-            method if method.starts_with("browser.") => {
-                if !self.full() {
-                    return Err((protocol::INVALID_REQUEST, "只有全权的连接能用浏览器".into()));
-                }
-                let outcome = match method {
-                    "browser.state" => Ok(crate::browser::state()),
-                    "browser.open" => crate::browser::open(
-                        params.get("session").and_then(Value::as_str).unwrap_or(""),
-                        params.get("url").and_then(Value::as_str).unwrap_or(""),
-                    ),
-                    _ => crate::browser::request(method, params, &self.name),
-                };
-                outcome.map_err(|message| (protocol::NO_SESSION, message))
-            }
             "changes.list" | "changes.diff" | "changes.revert" => {
                 let id = params.get("session").and_then(Value::as_str).ok_or_else(|| invalid("要给 session"))?;
                 let session =
@@ -1158,9 +1116,14 @@ impl Capability {
                     Some(other) => other.to_string(),
                     None => String::new(),
                 };
+                // 图片（截图等）：本机文件的跟在工具结果后面交给能看图的模型（同自带工具的截图），也写一行路径
                 for item in result.get("media").and_then(Value::as_array).into_iter().flatten() {
                     if let Some(path) = item.get("path").or(item.get("url")).and_then(Value::as_str) {
                         text.push_str(&format!("\n文件：{path}"));
+                        let image = item.get("mime").and_then(Value::as_str).is_some_and(|mime| mime.starts_with("image/"));
+                        if image && item.get("path").is_some() && Path::new(path).is_file() {
+                            crate::tools::note_image(path);
+                        }
                     }
                 }
                 let text = if text.trim().is_empty() {
@@ -1216,8 +1179,6 @@ impl Capability {
             all.remove(&self.name);
         }
         drop(all);
-        crate::pty::forget(&self.name);
-        crate::browser::forget(&self.name);
         crate::instance::refresh();
         if !was_alive || STOPPING.load(Ordering::Relaxed) {
             return;
@@ -1352,18 +1313,87 @@ pub fn is_action(full_name: &str) -> bool {
     capability.actions.iter().any(|action| action["name"].as_str() == Some(rest))
 }
 
-/// 推一条通知给这几个连接（终端的输出给接着它的）
-pub fn notify_some(names: &[String], method: &str, params: Value) {
-    for capability in native().into_iter().filter(|capability| names.contains(&capability.name)) {
-        capability.notify(method, params.clone());
-    }
+// MARK: - 两个口子：模型地址、钩子
+
+/// 模型的真地址（model.endpoint）：`{baseURL, apiKey?, body?}`——body 并进请求体（如 Friday 本地模型的 x_friday）。
+/// 能力可能要先拉起模型服务（下好的模型、friday-llm），最多等 3 分钟
+pub fn model_endpoint(base_url: &str, model: &str, session: &str) -> Result<Value, String> {
+    let capability = native()
+        .into_iter()
+        .find(|capability| capability.full() && capability.models.iter().any(|prefix| base_url.starts_with(prefix.as_str())))
+        .ok_or_else(|| format!("模型地址 {base_url} 要由能力提供（Friday 的本地模型要 edith-friday 常驻的那份连着），现在没有能力管它"))?;
+    capability
+        .request("model.endpoint", json!({ "baseURL": base_url, "model": model, "session": session }), Duration::from_secs(180), None)
+        .map_err(|error| format!("「{}」给不出模型地址：{}", capability.name, error_text(&error)))
 }
 
-/// 推一条通知给全部全权的连接（终端开了、关了）
-pub fn notify_full(method: &str, params: Value) {
-    for capability in native().into_iter().filter(|capability| capability.full()) {
-        capability.notify(method, params.clone());
+/// 钩子的结果（几个能力的合起来；同 Claude Code 的回法）
+#[derive(Debug, Default)]
+pub struct HookOutcome {
+    /// PreToolUse：deny / ask / allow
+    pub permission: Option<String>,
+    /// 拦下 / 接着做（decision: block）
+    pub block: bool,
+    pub reason: String,
+    /// 改过的参数
+    pub input: Option<Map<String, Value>>,
+    /// 补给模型的话
+    pub context: Vec<String>,
+    /// 能力替自己的动作说的批准要求（EDITH 加的 need，见 approval::need_from；第一个说了的算）
+    pub need: Option<Value>,
+}
+
+/// 有没有能力管这个时机
+pub fn has_hook(event: &str) -> bool {
+    native().iter().any(|capability| capability.full() && capability.hooks.iter().any(|item| item == event))
+}
+
+/// 跑一个时机的钩子：管它的全权能力一个个问（`hook` 请求，payload 同 Claude Code 交给钩子命令的标准输入），有一个拦下就停
+pub fn run_hook(event: &str, payload: Value) -> HookOutcome {
+    let mut outcome = HookOutcome::default();
+    let mut payload = payload;
+    payload["hook_event_name"] = json!(event);
+    for capability in native().into_iter().filter(|capability| capability.full() && capability.hooks.iter().any(|item| item == event)) {
+        let reply = match capability.request("hook", payload.clone(), Duration::from_secs(660), None) {
+            Ok(reply) => reply,
+            Err(error) => {
+                log_line(&capability.name, &format!("{event} 钩子没回上：{}", error_text(&error)));
+                continue;
+            }
+        };
+        let text = |key: &str| reply.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+        if let Some(context) = reply.get("additionalContext").and_then(Value::as_str).filter(|context| !context.trim().is_empty()) {
+            outcome.context.push(context.to_string());
+        }
+        if outcome.need.is_none()
+            && let Some(need) = reply.get("need").filter(|need| !need.is_null())
+        {
+            outcome.need = Some(need.clone());
+        }
+        if let Some(input) = reply.get("updatedInput").and_then(Value::as_object) {
+            outcome.input = Some(input.clone());
+            payload["tool_input"] = Value::Object(input.clone());
+        }
+        match reply.get("permissionDecision").and_then(Value::as_str) {
+            Some("deny") => {
+                outcome.permission = Some("deny".into());
+                outcome.reason = text("permissionDecisionReason");
+                return outcome;
+            }
+            Some("ask") => {
+                outcome.permission = Some("ask".into());
+                outcome.reason = text("permissionDecisionReason");
+            }
+            Some("allow") if outcome.permission.is_none() => outcome.permission = Some("allow".into()),
+            _ => {}
+        }
+        if reply.get("decision").and_then(Value::as_str) == Some("block") {
+            outcome.block = true;
+            outcome.reason = text("reason");
+            return outcome;
+        }
     }
+    outcome
 }
 
 /// 这个能力能批准（声明了 approves、是全权的）

@@ -349,8 +349,6 @@ fn work(session_id: String, first: Input) {
         let turn = input.turn.clone();
         emit(&session_id, &turn, "turn.started", json!({ "text": input.text, "origin": input.origin.to_json() }));
         let done = run_turn(&session_id, &input, &cancel);
-        // 智能体这一轮开的网页：关掉（带 keep 的、正交给用户的留着）
-        crate::browser::close_agent_tabs(&session_id);
         emit(&session_id, &turn, "done", done);
         // 下一轮：没塞进去的补充（这一轮直接答完了）先，再是排着的
         let mut sessions = SESSIONS.lock().unwrap();
@@ -409,7 +407,19 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         me: None,
     };
     let recorder = Mutex::new(crate::checks::Recorder::default());
-    let text = input.origin.wrap(if input.interjected { "edith.interjection" } else { "edith.input" }, &input.text);
+    let mut text = input.origin.wrap(if input.interjected { "edith.interjection" } else { "edith.input" }, &input.text);
+    // 用户发消息时的钩子（能力管的 UserPromptSubmit，Friday 的 hooks.json）：拦下就不交给模型；补的上下文接在这段后面
+    if input.origin.kind != "agent" && crate::capabilities::has_hook("UserPromptSubmit") {
+        let fields = json!({ "session_id": session_id, "cwd": cwd.to_string_lossy(), "prompt": input.text });
+        let outcome = crate::capabilities::run_hook("UserPromptSubmit", fields);
+        if outcome.block || outcome.permission.as_deref() == Some("deny") {
+            return failed(format!("用户配的钩子拦下了这条消息，没有发给智能体：{}", outcome.reason));
+        }
+        if !outcome.context.is_empty() {
+            let note = prompts::text("hooks.prompt", &[("context".to_string(), outcome.context.join("\n"))].into_iter().collect(), None);
+            text = format!("{text}\n\n{note}");
+        }
+    }
     let mut on_event = |event: Event| {
         recorder.lock().unwrap().on(&event);
         let (kind, data) = event_json(&event);
@@ -441,6 +451,30 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         emit(session_id, &input.turn, "notice", json!({ "text": followup.notice }));
         let previous = turn.answer.clone();
         turn = brain::run(&model, turn.history, &followup.prompt, &[], &cwd, cancel, &context, &mut on_event, &mut interject);
+        if turn.answer.trim().is_empty() {
+            turn.answer = previous;
+        }
+    }
+    // 一轮结束时的钩子（能力管的 Stop）：不让停就把它说的当一条用户消息接着做，最多 3 次（同 Friday）
+    for round in 0..3 {
+        if turn.stopped || turn.error.is_some() || cancel.load(Ordering::Relaxed) || !crate::capabilities::has_hook("Stop") {
+            break;
+        }
+        let fields = json!({
+            "session_id": session_id,
+            "cwd": cwd.to_string_lossy(),
+            "stop_hook_active": round > 0,
+            "last_assistant_message": turn.answer,
+        });
+        let outcome = crate::capabilities::run_hook("Stop", fields);
+        if !outcome.block {
+            break;
+        }
+        let first = outcome.reason.lines().next().unwrap_or("").to_string();
+        emit(session_id, &input.turn, "notice", json!({ "text": format!("一轮结束的钩子让智能体接着做：{first}") }));
+        let prompt = prompts::text("hooks.stop", &[("reason".to_string(), outcome.reason)].into_iter().collect(), None);
+        let previous = turn.answer.clone();
+        turn = brain::run(&model, turn.history, &prompt, &[], &cwd, cancel, &context, &mut on_event, &mut interject);
         if turn.answer.trim().is_empty() {
             turn.answer = previous;
         }

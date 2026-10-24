@@ -124,6 +124,8 @@ EDITH                                  能力
 | `name` | 否 | 叫什么：只对主令牌的连接有用（不写是 `client`；重名的、和配置里能力重名的 EDITH 加 `-2`、`-3`……）；专用令牌、中转的名字由大脑定，这里写的不管 |
 | `approves` | 否 | `true`：它能替用户批准（[§6.5](#65-approve请求)）。只有全权的连接会被问 |
 | `endpoints` | 否 | 它对外开的入口：`[{kind, url}]`（比如 `{"kind": "websocket", "url": "ws://127.0.0.1:52731"}`），EDITH 登记进 `instances/`，`edith instances` 列得出来 |
+| `models` | 否 | 它能给出真地址的模型网址前缀（如 `["power://"]`）：`config.json` 里 `baseURL` 是这个开头的模型，每段请求前问它 `model.endpoint`（[§6.6](#66-modelendpoint请求)）。只认全权的连接 |
+| `hooks` | 否 | 要它管的钩子时机：`PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop`，到时候问它 `hook`（[§6.7](#67-hook请求)）。只认全权的连接 |
 
 模型的系统提示里会列出每个能力：名字、标题、有哪些动作、会主动传来什么。
 
@@ -241,34 +243,8 @@ EDITH                                  能力
 
 | `tools.list` | 无 | `{tools:[{name, description, group, readOnly, parameters?}], disabled, skills:[{name, description, file, source}], skillsDirectory, mcp:{servers, unknown, global}}`：设置页看的——自带的、记忆、派子 Agent 的、能力的动作、连过的 MCP 服务的工具（`group` 是 `builtin` / `agents` / `capability` / `mcp:<服务>`），`config.json` 里关掉的、技能、合起来的 MCP 配置 |
 
-**终端**（Friday 的内置终端；只给全权的连接）：大脑开伪终端跑 shell（macOS / Linux 的 `$SHELL -l`，Windows 的 PowerShell，用 ConPTY），
-连接断了照常跑，接上来重放最近 512 KB 的输出。开它的连接、`attach` 过的收 `terminal.output`（通知 `{id, data}`，原始字节的 base64）；
-开了、关了、改了大小、退出了推 `terminals`（通知 `{terminals}`）给全部全权的连接。
-
-| 方法 | params | result |
-|---|---|---|
-| `terminals.list` | 无 | `{terminals:[{id, conversationID, title, shell, command, running, exitCode, cols, rows}]}`（`conversationID` 是会话 id） |
-| `terminals.open` | `{id, session, cols, rows, cwd?, command?}` | 这个终端：`id` 由连接给；`cwd` 不给是会话的工作目录；`command` 起好后打进去回车 |
-| `terminals.attach` / `detach` | `{id}` | attach 回 `{data, cols, rows}`：最近的输出和现在的大小 |
-| `terminals.write` | `{id, data}` | 打的字（base64） |
-| `terminals.resize` | `{id, cols, rows}` | |
-| `terminals.close` | `{id}` | 结束 shell 和它起的进程 |
-
-**浏览器**（Friday 的内置浏览器；只给全权的连接）：大脑起这台装着的 Chrome / Chromium / Edge 的无头模式（`EDITH_BROWSER` 指定别的；Linux / macOS
-走 `--remote-debugging-pipe`，Windows 走本机随机端口 + WebSocket），标签按会话开，连接断了照常在，记在 `<项目数据目录>/browser/tabs.json`，大脑重起后按网址重新打开。
-看着一个标签的连接（`browser.watch`）收它的 `browser.frame`（通知 `{tab, data（JPEG 的 base64）, viewport:[w, h]}`）；标签开了、关了、标题网址加载状态、
-对话框变了推 `browser`（通知，BrowserState）、下载推 `browser.download`（`{tab, name, path, state: progress|done|failed, fraction}`）给全部全权的连接。
-
-| 方法 | params | result |
-|---|---|---|
-| `browser.state` | 无 | BrowserState：`{available, reason?, tabs:[{id, conversationID, title, url, loading, current, viewport:[w, h], fixed, dialog?}]}`；这台没有浏览器时 `available: false`、`reason` 说怎么装 |
-| `browser.open` | `{session, url?}` | `{tab}`：给这段会话开一个标签、选中它（`url` 是地址栏风格的输入：像网址的补协议，别的用必应搜） |
-| `browser.select` / `close` | `{tab}` | |
-| `browser.navigate` | `{tab, url}` 或 `{tab, action: back\|forward\|reload\|stop}` | |
-| `browser.watch` / `unwatch` | `{tab, width?, height?}` | 开始 / 不再收这个标签的画面（不超过这个像素；一个连接同时只看一个标签） |
-| `browser.container` / `fit` | `{tab, width, height}` / `{tab}` | 界面卡片的大小（视口跟着变）/ 去掉固定的视口 |
-| `browser.input` | `{tab, kind, …}` | 用户在卡片里的操作，同 Friday：`mouse`（`type: press\|release\|move, x, y, button, clicks, modifiers`）、`wheel`（`x, y, dx, dy`）、`key`（`press, key, code, text?`）、`text`（`text`）；`modifiers` 是 Qt 的修饰键数值 |
-| `browser.dialog` | `{tab, accept, text?}` | 回答网页的对话框 |
+Friday 的内置终端、浏览器、智能体的浏览器工具不在大脑里：在 edith-friday 常驻的那份（整台机器一个，像 edith-connect；
+[edith.tools/docs/FRIDAY.md](https://github.com/integemjack/edith.tools/blob/main/docs/FRIDAY.md)），浏览器工具是它的动作（`friday__browser_navigate`……）。
 
 会话改动的基线（同 Friday 的 SessionChanges，存的格式一样）在 `<项目数据目录>/changes/<会话>/`：write_file / edit_file 写之前记原文；
 run_shell 执行前后各看一遍工作目录和命令里写到的路径，新建的记「原来没有」，改的、删的拿执行前每行的指纹到 git 里找 HEAD / 暂存区对得上的那一版，
@@ -360,6 +336,42 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 最多等 10 分钟，这一轮被停下就不等了。没人能批的就不做——`edith run`（一直开着的大脑）例外：等能批准的连上来再问它（同样最多 10 分钟，
 问着的那个断了也接着等下一个；开始等时推一条 `notice`），Friday 客户端关了再打开、换一台设备连上来照样能批。
 `--auto`、`~/.edith/config.json` 的 `permissions` 见 [EDITH.md](EDITH.md#信任与审批)。
+
+### 6.6 `model.endpoint`（请求）
+
+模型的 `baseURL` 不是 `http(s)://`、又有全权的能力在 `models` 里报了它的前缀（Friday 的本地模型 `power://llm`）：每段请求前问一次，
+
+```json
+{"jsonrpc": "2.0", "id": 31, "method": "model.endpoint", "params": {"baseURL": "power://llm", "model": "Qwen/Qwen3-8B-GGUF:Q4_K_M", "session": "…"}}
+```
+
+回 `{baseURL, apiKey?, body?}`：真地址（OpenAI 兼容，EDITH 往 `<baseURL>/chat/completions` 发）、密钥（不给用配置里的）、要并进请求体的字段
+（Friday 本地模型的 `x_friday`）。能力可以先拉起模型服务再回，最多等 3 分钟；回错误这一轮就失败，`error.message` 给用户看。
+
+### 6.7 `hook`（请求）
+
+同 Claude Code 的钩子（[Friday 的 HOOKS.md](https://github.com/integemjack/Friday/blob/main/qt/docs/HOOKS.md)）：在 `hooks` 里报了这个时机的全权能力一个个问，
+`params` 同 Claude Code 交给钩子命令的标准输入：
+
+| 时机 | 什么时候 | params（都带 `hook_event_name`、`session_id`、`cwd`） |
+|---|---|---|
+| `PreToolUse` | 用工具之前（批准之前） | `tool_name`、`tool_input`、`permission_mode`（Friday 选的：`full` / `auto` / `plan` / `default`） |
+| `PostToolUse` | 工具跑完 | 同上，加 `tool_response: {success, output}` |
+| `UserPromptSubmit` | 交来的话交给模型之前（子 Agent 的不算） | `prompt`：原话 |
+| `Stop` | 一轮做完（没出错、没被停下） | `stop_hook_active`（已经因为它接着做过）、`last_assistant_message` |
+
+回话（都可以不写）：
+
+- `permissionDecision: "deny" | "ask" | "allow"`、`permissionDecisionReason`（PreToolUse）：拦下（原因交给模型）/ 一定问用户（原因写进待确认）/ 免确认（`permissions.deny` 照样拦）。
+- `decision: "block"`、`reason`：PreToolUse、UserPromptSubmit 拦下（这条话不交给模型、这一轮报错）；PostToolUse 把原因接在工具结果后面；
+  Stop 不让停——原因当一条用户消息接着做，一轮最多 3 次。有一个能力拦下就不再问后面的。
+- `updatedInput`（PreToolUse）：换掉参数。
+- `additionalContext`：PreToolUse 以外的接在工具结果 / 用户这段话后面交给模型。
+- `need`（PreToolUse，EDITH 加的）：能力替**自己的动作**说要不要批准、怎么问——`false` 不用批准；
+  `{target, summary, rule, privateNetwork?, sensitive?, stop?}`：问用户时显示 `summary`，答「都行」记 `rule`（如 `friday__browser_navigate(example.com)`，按网站记），
+  `privateNetwork` 是访问本机 / 内网（客人的一轮不许），`sensitive` 什么权限模式都问，`stop` 自动模式下也问（点付款、往密码框输入）。
+
+钩子最多等 11 分钟；没回上的当没意见。
 
 ## 7. 事件（`event`）
 
