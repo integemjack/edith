@@ -20,6 +20,8 @@ pub const NO_SESSION: i64 = -32002;
 pub const NO_MODEL: i64 = -32003;
 /// 被停下了（动作被 act.cancel、等的那一轮被停下）
 pub const CANCELLED: i64 = -32004;
+/// 设备忙：共享设备正被别的大脑占着（error.data.holder 是占着它的大脑 {id, workspace}）
+pub const BUSY: i64 = -32005;
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })

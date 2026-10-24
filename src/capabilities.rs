@@ -738,8 +738,21 @@ impl Capability {
                 Outcome { ok, text }
             }
             Err(error) => {
-                if error.get("code").and_then(Value::as_i64) == Some(protocol::CANCELLED) {
+                let code = error.get("code").and_then(Value::as_i64);
+                if code == Some(protocol::CANCELLED) {
                     self.notify("act.cancel", json!({ "call": call }));
+                }
+                if code == Some(protocol::BUSY) {
+                    // 共享设备被别的大脑占着：告诉模型是谁、怎么办
+                    let holder = error["data"]["holder"]["workspace"].as_str().unwrap_or("另一个目录");
+                    return Outcome {
+                        ok: false,
+                        text: format!(
+                            "能力「{}」设备忙：正被 {holder} 的大脑占着（{}）。等它用完再试，或者先做别的、换个办法。",
+                            self.name,
+                            error_text(&error)
+                        ),
+                    };
                 }
                 Outcome { ok: false, text: format!("能力「{}」：{}", self.name, error_text(&error)) }
             }

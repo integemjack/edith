@@ -7,6 +7,7 @@
 - 设计：[docs/EDITH.md](docs/EDITH.md)
 - **能力协议（开放接口）**：[docs/CAPABILITY-PROTOCOL.md](docs/CAPABILITY-PROTOCOL.md)——任何语言照着写一个能力就能接上
 - WebSocket 能力（让网页、手机、别的机器连 EDITH）：[docs/WEBSOCKET.md](docs/WEBSOCKET.md)
+- 共享设备（麦克风、摄像头、串口这类独占设备，几个目录的大脑共用一个）：[docs/DEVICES.md](docs/DEVICES.md)
 - 示例能力：[examples/notes.py](examples/notes.py)（动作）、[examples/inbox.py](examples/inbox.py)（主动推内容 + 收事件）
 
 ```bash
@@ -29,7 +30,7 @@ edith run                             # 一直开着，只听能力的
 src/            main（命令行）、mind（调度：会话、急缓、事件）、brain（一轮对话）、tools（自带工具）、
                 capabilities + protocol（能力协议）、mcp（MCP 能力）、instance（本机接入、登记）、attach（接上去的终端）、
                 worktree（目录忙时开 git worktree）、terminal（终端上的样子）、sessions、http、home
-capabilities/   websocket/：edith-websocket（WebSocket 能力，只讲能力协议）
+capabilities/   websocket/：edith-websocket（WebSocket 能力）；connect/：edith-connect（共享设备的中转和设备服务）——都只讲能力协议
 examples/       示例能力（Python 标准库）
 prompts/        提示词：edith.md 是 EDITH 自己的；prompts-tools.md、prompts-framework.md 抄自 Friday（工具说明、循环里的提醒）
 core/           子模块 integemjack/friday.core（Friday 的 Swift / Qt 两端也用它）：对话循环、请求体、流式解析、文件工具、MCP 客户端等规则

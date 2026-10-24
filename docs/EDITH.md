@@ -26,6 +26,7 @@
 - **能力**（`src/capabilities.rs`、`src/protocol.rs`）：[能力协议](CAPABILITY-PROTOCOL.md)，开放接口。
 - **MCP**（`src/mcp.rs`）：`"protocol": "mcp"` 的能力，客户端是 friday-core 的 `mcp_client`。
 - **WebSocket 能力**（`capabilities/websocket/`，程序 `edith-websocket`）：[说明](WEBSOCKET.md)。
+- **共享设备**（`capabilities/connect/`，程序 `edith-connect`）：独占设备整台机器一个设备服务，几个大脑经中转共用；[说明](DEVICES.md)。
 
 ## 按目录工作
 
@@ -77,7 +78,4 @@ edith capabilities [add | add-mcp | add-mcp-url | remove] [--global]   管能力
 - 子智能体 / 工作流（规则已在 friday-core：`agents`、`team`、`workflow`、`liveness`、`delivery`）；交付检查（`delivery`、`turnCheck`）；
 - 记忆、任务状态、审批（`approval`）、密钥只以名字流转（`secret_guard`）；
 - 能力层的「本事」：能力声明自己能做「听录音」「生图」这类固定的本事，大脑挑由谁来做（Friday 的 Capability / Provider 规则）；
-- 共享设备服务：麦克风、摄像头、串口、机器人这类独占设备由一个常驻的设备服务持有，各个目录的大脑经通用的 stdio 中转
-  `edith-connect <设备>` 连它（没起就拉起、没人连一阵后自己退）；设备服务按能力协议给每个大脑各握一次手，
-  主动推的内容默认只推给「当前大脑」，占设备的动作先到先得、别的回「设备忙」（协议加错误码）；
 - 桌面端（Swift / Qt）改成 EDITH 的能力；远程机器只装 EDITH。

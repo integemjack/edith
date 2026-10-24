@@ -61,6 +61,7 @@ EDITH 是大脑；**能力**是它的四肢：耳朵、嘴、手、聊天渠道�
 | -32002 | 没有这个会话 |
 | -32003 | 大脑用哪个模型还没设（`~/.edith/config.json`） |
 | -32004 | 被停下了（动作被取消、等的那一轮被停下） |
+| -32005 | 设备忙：共享设备正被别的大脑占着，`error.data.holder` 是占着它的大脑 `{id, workspace}`（[共享设备](DEVICES.md)） |
 
 ## 3. 生命周期
 
@@ -110,7 +111,7 @@ EDITH                                  能力
 | `protocolVersion` | 是 | `"1"` |
 | `capability.title` / `version` / `description` | 否 | 给人和模型看的名字、版本、一句话 |
 | `senses` | 否 | 会主动传来什么：`[{kind, description}]`。`kind` 是自己定的词（`speech`、`message`、`vision`、`file`、`sensor`……），写进模型看到的来源里 |
-| `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?}]`。`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600 |
+| `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?, exclusive?, holds?, releases?}]`。`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600；后三个标记给[共享设备](DEVICES.md)的仲裁用 |
 | `receives` | 否 | 要收哪些事件（[§7](#7-事件event)）；`["*"]` 是全部，不写是都不要 |
 | `sessions` | 否 | `"all"`（默认）：所有会话的事件；`"focus"`：只要焦点会话的 |
 | `name` | 否 | 只对本机接入连进来的：想叫什么（重名的 EDITH 加 `-2`、`-3`……） |
@@ -249,7 +250,7 @@ EDITH                                  能力
 - `text`：给模型看的结果（不是字符串的会转成 JSON 文字；太长的留头尾截掉）。
 - `ok`：默认 `true`；`false` 表示没做成（模型会看到失败）。
 - `media`：产出的文件（`path` 或 `url`），列在结果后面。
-- 回 JSON-RPC 错误也算没做成，`error.message` 交给模型。
+- 回 JSON-RPC 错误也算没做成，`error.message` 交给模型；`-32005`（设备忙）时 EDITH 说清被哪个目录的大脑占着。
 - 超过 `timeoutSeconds`（默认 600）没回话：算失败。
 - 做动作时可以随时发 `act.progress`。
 
@@ -343,6 +344,11 @@ edith run                                           一直开着，只听能力�
 
 `address` / `token` 是本机接入（[§1](#1-传输)）；`endpoints` 是能力报的入口。进程没了的登记在 `edith instances` 列出时清掉。
 想找某个目录的大脑、它的 WebSocket 地址，读这里。
+
+## 8.3 共享设备
+
+同一时间只能被一个进程打开的设备（麦克风、摄像头、串口……），几个目录的大脑经 `edith-connect` 共用一个设备服务：
+当前大脑、设备忙、动作带上是哪个大脑。见 [DEVICES.md](DEVICES.md)。
 
 ## 9. MCP 能力
 

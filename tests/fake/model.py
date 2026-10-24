@@ -1,5 +1,6 @@
 """假的 OpenAI 兼容流式模型：按历史里已有几条工具结果决定下一步（写文件 → 跑命令核对 → 交付），把收到的请求记到 requests.jsonl"""
 import json
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -22,7 +23,15 @@ class Handler(BaseHTTPRequestHandler):
         tools = [m for m in messages if m["role"] == "tool"]
         last_user = [m for m in messages if m["role"] == "user"][-1]["content"]
         events = []
-        if "只聊天" in last_user:
+        called = re.search(r"调用工具 (\S+)", last_user)
+        last_user_index = max(index for index, m in enumerate(messages) if m["role"] == "user")
+        tools_since = [m for m in messages[last_user_index + 1:] if m["role"] == "tool"]
+        if called and not tools_since:
+            # 「调用工具 X」：调 X（没参数），再把结果原样答出来
+            events.append(chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_t", "type": "function", "function": {"name": called.group(1), "arguments": "{}"}}]}, "tool_calls"))
+        elif called:
+            events.append(chunk({"role": "assistant", "content": "结果：" + tools_since[-1]["content"]}, "stop"))
+        elif "只聊天" in last_user:
             events.append(chunk({"role": "assistant", "content": "你好，"}))
             events.append(chunk({"content": "我是 EDITH。"}, "stop"))
         elif "能力" in last_user and "记" in last_user and len(tools) == 0:
