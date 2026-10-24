@@ -71,6 +71,9 @@ worktree 里的会话记在仓库名下，回到仓库 `-c`、`edith sessions` �
   `--auto`（或 `EDITH_PERMISSION_MODE=auto`）不问；`~/.edith/config.json`：
   `{"permissions": {"mode": "ask"|"auto", "allow": ["run_shell(git status*)", "fetch_url(github.com)"], "deny": ["run_shell(rm *)"], "additionalDirectories": ["~/notes"]}}`，
   deny 什么时候都挡。只认全局的 config.json：项目里的配置不能替你放开权限。
+- **权限模式**（同 Friday，全权的连接 `sense` 时带 `mode`；Friday 客户端经 edith-friday 带上会话上选的）：`auto` 只问删除类、往系统目录写、装软件改系统设置的
+  （friday-core 的 `approval`）；`plan` 先给计划（系统提示加计划模式那段，不追「只交了方案」的提醒），照上面的规则问；`full` 都不问。
+  读敏感的文件、访问本机 / 内网什么模式都问；deny 照样挡。MCP 服务的配置写了 `"autoApprove": true` 的，它的工具不问。
 - **客人的会话**：权限不全的连接只用自己名下的会话，话不进主人的会话（防借权注入），也看不到主人的对话。
 
 ## 按需加载（工具、MCP、技能）
@@ -121,6 +124,27 @@ MCP 服务每次请求再多 2.1k，而大多数用不上（改完实测：「�
 列出净改动、看改动、撤销（协议 §4.4）；Friday 的文件卡片「本次会话改动」经 edith-friday 用的就是它们。
 - `edith "…"` 干完一件事等派出去的都交回、验收完再退出。
 
+## 模型、记忆、设置
+
+- **模型**（`src/home.rs`）：`config.json` 顶层的 `baseURL` / `apiKey` / `model`（环境变量 `EDITH_BASE_URL` / `EDITH_API_KEY` / `EDITH_MODEL` 盖掉同名的）是默认的那个；
+  `engines` 里还能列几个（格式同 Friday 的 EngineConfig：`id`、`title`、`baseURL`、`model`、`apiKeySecret`、`supportsVision`、`thinking`、`extraBody`……），
+  密钥按名字在 `secrets.json`（`{名字: 值}`，只有自己能读；没有看同名的环境变量）。`defaultEngine` 选默认用哪个；`sense` 带 `engine` 的那一轮用那个，
+  它派的子 Agent 跟着用。Friday 的模型菜单、设置 › 服务与密钥经 edith-friday 读写的就是这几样。
+- **思考档位**：`sense` 带 `thinking`（off / low / medium / high / ultra）的那一轮按它开关、分档（这个模型能调的才管用）；不带照 `enableThinking`。
+- **图片**：`sense` 带 `images`（这台上的路径），模型能看图（`supportsVision`）时随这段话给它；历史里只记 `file://路径`，发请求时才读成 base64（存档不变大）。
+- **记忆库**（`src/memory.rs`，同 Friday 的 MEMORY.md 精简）：`memory.json`，一条是 `{id（m + 4 位）, kind, text, project, pinned, source, state, uses, …}`。
+  模型用 `save_memory` 把用户明说要记住的当场记下（`replaces` 改掉记过的那条），`search_memory` 按关键词查（这个项目的和通用的，没有再找全部项目）；
+  常驻的（pinned）每轮放进系统提示。Friday 的 设置 › 记忆 经 edith-friday 直接改这份文件。
+- **设置**：`config.json` 的 `systemPrompt` 接在 EDITH 自己的系统提示后面；`disabledTools` 里的工具不给模型、硬调也拒绝；`defaultPermissionMode`
+  是 Friday 新对话的默认权限模式（edith-friday 用）。`tools.list`（协议 §4.4）给设置页看有哪些工具、技能、MCP 服务。
+
+## 终端与浏览器
+
+Friday 客户端的内置终端、浏览器开在大脑里（`src/pty.rs`、`src/browser.rs`，协议 §4.4）：客户端断了 shell、网页照常在，
+换一台设备连上来接着看。终端用伪终端（macOS / Linux 的 posix_openpt，Windows 的 ConPTY），重放最近 512 KB 的输出；浏览器起这台装着的
+Chrome / Chromium / Edge 的无头模式（`EDITH_BROWSER` 指定别的），画面用 DevTools 的 screencast 推 JPEG，鼠标键盘照转，标签按会话记、大脑重起后重新打开。
+只给全权的连接；大脑退出时一起结束。
+
 ## 升级
 
 起来时看一眼老的数据、配置（`src/migrate.rs`）：v0.1.9 及以前放在项目里的会话（`<目录>/.edith/sessions/*.json`）挪到
@@ -142,22 +166,26 @@ edith instances                         列出这台机器上在跑的大脑、�
 edith capabilities [add | remove]       管能力（默认本地那层；--project 项目那层、--global 全局那层）
 edith mcp [add | add-url | remove]      管 MCP 服务（同上）
 edith tools [install | remove]          共用的工具（edith.tools）
+edith friday [install | uninstall | status]   装成这台的 Friday 服务端（edith-friday 网关放进 ~/.friday-server/bin，Friday 客户端连这台就是 EDITH）
 ```
 
 管道送进来的也算要做的事（`cat 报错.log | edith "看看怎么回事"`）：给了参数时最多等 1.5 秒（从脚本、定时任务、别的智能体里起的 edith，
 标准输入常常是一直不关的管子），没给参数就读到底。
 
 大脑用哪个模型：`~/.edith/config.json`（`{"baseURL", "apiKey", "model", "thinking"?, "temperature"?, "enableThinking"?, "supportsVision"?, "extraBody"?}`），
-环境变量 `EDITH_BASE_URL` / `EDITH_API_KEY` / `EDITH_MODEL` 盖掉同名的。
+环境变量 `EDITH_BASE_URL` / `EDITH_API_KEY` / `EDITH_MODEL` 盖掉同名的；几个模型、密钥库见[模型、记忆、设置](#模型记忆设置)。
 
 全局 `~/.edith`（`EDITH_HOME` 换地方）：
 
 | 文件 | 内容 |
 |---|---|
-| `config.json` | 模型；`searxng`（可选，搜网页用自己的 SearXNG）；`permissions`（审批：mode、allow、deny、additionalDirectories） |
+| `config.json` | 模型（顶层的、`engines`、`defaultEngine`）；`searxng`（可选，搜网页用自己的 SearXNG）；`permissions`（审批：mode、allow、deny、additionalDirectories）；`systemPrompt`、`disabledTools`、`defaultPermissionMode` |
+| `secrets.json` | 密钥库：`engines` 按名字引用的密钥（只有自己能读） |
+| `memory.json` | 记忆库 |
+| `friday.json` | edith-friday 网关自己记的：置顶、草稿、每段会话选的档位、分出去的各支、最近一轮怎么结束的（edith.tools 的 docs/FRIDAY.md） |
 | `trust.json` | 信任了哪些目录的项目 / 本地配置（按内容哈希） |
 | `capabilities.json`、`mcp.json` | 全局那层的能力、MCP 服务（[协议 §8](CAPABILITY-PROTOCOL.md#8-配置capabilitiesjson)、[§9](CAPABILITY-PROTOCOL.md#9-mcp-服务)） |
-| `projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希前 8 位>/` | 这个目录的数据：`sessions/<id>.jsonl` 会话（只追加，一行一条；同一个会话几个大脑接着写也不互相盖掉）、`reads/<id>.json` 会话读过的文件（先读后改用）、`changes/<id>/` 会话改动的基线、`agents/<会话>/<id>.json` 子 Agent 的运行记录、`logs/<能力名>.log` 能力的日志 |
+| `projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希前 8 位>/` | 这个目录的数据：`sessions/<id>.jsonl` 会话（只追加，一行一条；同一个会话几个大脑接着写也不互相盖掉；记在 `#branch` 名下的是分出去的另一支）、`reads/<id>.json` 会话读过的文件（先读后改用）、`changes/<id>/` 会话改动的基线、`agents/<会话>/<id>.json` 子 Agent 的运行记录、`browser/` 无头浏览器的用户数据和标签、`logs/<能力名>.log` 能力的日志 |
 | `Prompts/` | 提示词（`edith.md` 是 EDITH 自己的；改了下一轮生效，改坏的段自动用自带的；friday-core 的 prompts 管合并） |
 | `instances/<目录的键>-<进程号>.json` | 在跑的大脑：目录、进程、套接字的地址和主令牌、能力、入口（[协议 §8.2](CAPABILITY-PROTOCOL.md#82-在跑的大脑instances)） |
 | `tools/<工具>/` | 从 edith.tools 下的工具；`tools/installed.json` 记版本 |

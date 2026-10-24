@@ -161,6 +161,13 @@ EDITH                                  能力
 | `from` | 否 | 说话的是谁（聊天渠道里的用户名、哪台设备……） |
 | `urgency` | 否 | 急缓（[§4.3](#43-急缓urgency)），默认 `queue` |
 | `session` | 否 | 交给哪个会话：会话 id（写开头几位也行，要唯一）、`"focus"`（默认）、`"new"`（在焦点会话的工作目录新开一个） |
+| `mode` | 否 | 这一轮的权限模式（同 Friday）：`auto` 删除类、改系统的才问；`plan` 先给计划、照 EDITH 的规则问；`full` 都不问。读敏感的文件、访问本机 / 内网什么模式都问。不写照 EDITH 的规则（[§6.5](#65-approve请求)） |
+| `thinking` | 否 | 思考档位：`off` / `low` / `medium` / `high` / `ultra`（按 high 发）；不写照 `config.json` |
+| `engine` | 否 | 用哪个模型：`config.json` 的 `engines` 里的 id（[EDITH.md](EDITH.md#模型)）；不写用默认的 |
+| `images` | 否 | 附的图片（这台上的路径）：模型能看图时随这段话一起给它（历史里只记路径，发请求时才读成 base64），看不了图的换成一句话 |
+
+`mode`、`thinking`、`engine`、`images` 只认全权的连接（客人不能替自己放开审批，也不能拿这台的文件给模型看）；这一轮派的子 Agent 照着来，
+干活时补充、排着的话按那一轮开始时的。
 
 回话：
 
@@ -214,18 +221,54 @@ EDITH                                  能力
 
 | 方法 | 参数 | 回话 |
 |---|---|---|
-| `sessions.list` | 无 | `[{id, title, cwd, created, updated, working, turn?}]`，新的在前；在干活的带 `turn: {id, text}`（哪一轮、交来的原话，后连上来的界面据此接着显示） |
+| `sessions.list` | 无 | `[{id, title, cwd, created, updated, working, turn?, queue?}]`，新的在前；在干活的带 `turn: {id, text}`（哪一轮、交来的原话，后连上来的界面据此接着显示），排着的带 `queue: [{turn, text}]` |
 | `sessions.create` | `{cwd?, focus?, id?}` | 新会话 `{id, title, cwd, created, updated}`；`cwd` 默认焦点会话的工作目录；`focus: true` 顺便设成焦点；`id`：用这个 UUID（客户端先定好 id 再建，比如 Friday 的网关），这个 id 已经有了就回那段会话 |
 | `sessions.get` | `{id}` | 会话全文：上面的字段 + `history`（OpenAI 格式的历史）+ `working`（在干的那一轮的 id 或 `null`）+ `focus` |
 | `sessions.focus` | `{id}` | `{focus}`：设焦点 |
 | `sessions.stop` | `{id?}` | `{stopping}`：停下正在干的一轮（排着的也不干了）；不给 `id` 是焦点会话 |
 | `sessions.remove` | `{id}` | `{removed}`：删掉一段会话（在干活的先停下）：存档、读过的文件、会话改动的基线、子 Agent 的运行记录一起删 |
+| `sessions.dequeue` | `{id, turn}` | `{removed}`：拿掉排着的一句（`sense` 排队时回的那一轮） |
+| `sessions.fork` | `{id, keep?, newID?, hidden?}` | 新会话的摘要：复制一段（`keep`：只要历史的前这么多条），`newID` 用这个 UUID；`hidden: true` 记在 `#branch` 名下（列表里不出现、`-c` 不接它），存放分出去的另一支（Friday 改一条重发、切分支） |
+| `sessions.truncate` | `{id, keep}` | 摘要：历史截到前 `keep` 条（重试、改一条重发） |
+| `sessions.copy` | `{id, from}` | 摘要：这段的历史换成 `from` 那段的（切分支）。截短、换历史都不动在干活的会话 |
 | `agents.list` | `{session?}` | `[Agent]`：这个进程里的子 Agent（在跑的、跑过的），带运行记录 `transcript`；给了 `session` 只要那段会话的。Agent 见 §7 的 `agent` 事件 |
 | `agents.stop` | `{id}` | `{name}`：停掉一个子 Agent（它往下派的跟着停；同 stop_agent） |
-| `agents.send` | `{id, text}` | `{name}`：给在做的子 Agent 追加指示（同 message_agent，它做完当前这一步就看到） |
+| `agents.send` | `{id, text}` | `{name, item}`：给在做的子 Agent 追加指示（同 message_agent，它做完当前这一步就看到）；`item` 是这一条的 id |
+| `agents.dequeue` | `{id, item}` | `{removed}`：拿掉它还没看的那条追加指示（Agent 的 `inbox` 里列着） |
 | `changes.list` | `{session}` | `{files:[{path, status, known, text, added, removed}]}`：这段会话（含它派的子 Agent）改了哪些文件——净改动，`status` 是 A / M / D，不知道原文的 `known: false`、增删是 -1 |
 | `changes.diff` | `{session, path}` | `{path, status, known, binary, tooLarge, old?, new?}`：一个文件的改动（基线和现在的全文，各最多 1 MB）；这段会话没动过它回 `-32002` |
 | `changes.revert` | `{session, path?}` | `{failed:[{path, error}]}`：撤销——改回这段会话第一次动它之前的样子，新建的删掉；不给 `path` 撤全部；撤不了的（不知道原文）列在 `failed` 里 |
+
+| `tools.list` | 无 | `{tools:[{name, description, group, readOnly, parameters?}], disabled, skills:[{name, description, file, source}], skillsDirectory, mcp:{servers, unknown, global}}`：设置页看的——自带的、记忆、派子 Agent 的、能力的动作、连过的 MCP 服务的工具（`group` 是 `builtin` / `agents` / `capability` / `mcp:<服务>`），`config.json` 里关掉的、技能、合起来的 MCP 配置 |
+
+**终端**（Friday 的内置终端；只给全权的连接）：大脑开伪终端跑 shell（macOS / Linux 的 `$SHELL -l`，Windows 的 PowerShell，用 ConPTY），
+连接断了照常跑，接上来重放最近 512 KB 的输出。开它的连接、`attach` 过的收 `terminal.output`（通知 `{id, data}`，原始字节的 base64）；
+开了、关了、改了大小、退出了推 `terminals`（通知 `{terminals}`）给全部全权的连接。
+
+| 方法 | params | result |
+|---|---|---|
+| `terminals.list` | 无 | `{terminals:[{id, conversationID, title, shell, command, running, exitCode, cols, rows}]}`（`conversationID` 是会话 id） |
+| `terminals.open` | `{id, session, cols, rows, cwd?, command?}` | 这个终端：`id` 由连接给；`cwd` 不给是会话的工作目录；`command` 起好后打进去回车 |
+| `terminals.attach` / `detach` | `{id}` | attach 回 `{data, cols, rows}`：最近的输出和现在的大小 |
+| `terminals.write` | `{id, data}` | 打的字（base64） |
+| `terminals.resize` | `{id, cols, rows}` | |
+| `terminals.close` | `{id}` | 结束 shell 和它起的进程 |
+
+**浏览器**（Friday 的内置浏览器；只给全权的连接）：大脑起这台装着的 Chrome / Chromium / Edge 的无头模式（`EDITH_BROWSER` 指定别的；Linux / macOS
+走 `--remote-debugging-pipe`，Windows 走本机随机端口 + WebSocket），标签按会话开，连接断了照常在，记在 `<项目数据目录>/browser/tabs.json`，大脑重起后按网址重新打开。
+看着一个标签的连接（`browser.watch`）收它的 `browser.frame`（通知 `{tab, data（JPEG 的 base64）, viewport:[w, h]}`）；标签开了、关了、标题网址加载状态、
+对话框变了推 `browser`（通知，BrowserState）、下载推 `browser.download`（`{tab, name, path, state: progress|done|failed, fraction}`）给全部全权的连接。
+
+| 方法 | params | result |
+|---|---|---|
+| `browser.state` | 无 | BrowserState：`{available, reason?, tabs:[{id, conversationID, title, url, loading, current, viewport:[w, h], fixed, dialog?}]}`；这台没有浏览器时 `available: false`、`reason` 说怎么装 |
+| `browser.open` | `{session, url?}` | `{tab}`：给这段会话开一个标签、选中它（`url` 是地址栏风格的输入：像网址的补协议，别的用必应搜） |
+| `browser.select` / `close` | `{tab}` | |
+| `browser.navigate` | `{tab, url}` 或 `{tab, action: back\|forward\|reload\|stop}` | |
+| `browser.watch` / `unwatch` | `{tab, width?, height?}` | 开始 / 不再收这个标签的画面（不超过这个像素；一个连接同时只看一个标签） |
+| `browser.container` / `fit` | `{tab, width, height}` / `{tab}` | 界面卡片的大小（视口跟着变）/ 去掉固定的视口 |
+| `browser.input` | `{tab, kind, …}` | 用户在卡片里的操作，同 Friday：`mouse`（`type: press\|release\|move, x, y, button, clicks, modifiers`）、`wheel`（`x, y, dx, dy`）、`key`（`press, key, code, text?`）、`text`（`text`）；`modifiers` 是 Qt 的修饰键数值 |
+| `browser.dialog` | `{tab, accept, text?}` | 回答网页的对话框 |
 
 会话改动的基线（同 Friday 的 SessionChanges，存的格式一样）在 `<项目数据目录>/changes/<会话>/`：write_file / edit_file 写之前记原文；
 run_shell 执行前后各看一遍工作目录和命令里写到的路径，新建的记「原来没有」，改的、删的拿执行前每行的指纹到 git 里找 HEAD / 暂存区对得上的那一版，
@@ -311,6 +354,8 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 `call` 是哪一个工具调用（同 `tool` 事件的 `id`）：界面按它把「允许 / 拒绝」放在那张工具卡片上。子 Agent 要做的还带 `agent`（它的 id）：
 那张卡片在它的运行记录里（`agent.event` 的 `tool`），不在主会话这一轮。
 
+能批准的全权连接有几个（几个 Friday 客户端开着）就都问，谁先答算谁的；其余的收一条 `approve.cancel`（通知 `{session, call, agent}`），把待确认收掉。
+
 回话：`{"decision": "allow" | "always" | "deny", "reason"?: "…"}`。`always`：这个会话里同类的都行；`deny` 的 `reason` 交给模型。
 最多等 10 分钟，这一轮被停下就不等了。没人能批的就不做——`edith run`（一直开着的大脑）例外：等能批准的连上来再问它（同样最多 10 分钟，
 问着的那个断了也接着等下一个；开始等时推一条 `notice`），Friday 客户端关了再打开、换一台设备连上来照样能批。
@@ -333,14 +378,14 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 | `text` | `{text}` | 回答的文字，一块块到（拼起来是这一段回答） |
 | `thinking` | `{text}` | 模型的思考（模型给了才有） |
 | `tool` | `{id, name, arguments}` | 开始用一个工具（自带的、能力的动作、MCP 服务的） |
-| `result` | `{id, name, ok, text}` | 用完 |
+| `result` | `{id, name, ok, text, lines?}` | 用完；改文件、跑命令改了文件的带 `lines: {added, removed}`（增删了几行，界面卡片上的「+N −M」） |
 | `stats` | `{promptTokens, generatedTokens, cachedTokens, promptTime, generateTime, contextParts, contextLimit, contextCompactAt}` | 每段请求的用量（时间是秒；`contextParts` 是上下文各部分的 token：system / tools / user / replies / toolUse） |
 | `notice` | `{text, call?, agent?}` | 顺带说一句：重试、压了上下文、收到补充、动作进度（带 `call`）、交付检查追了提醒、子智能体开始 / 交回 / 被打回（带 `agent`：子智能体的 id） |
 | `done` | `{answer, stopped, error}` | 这一轮结束 |
 | `agent` | Agent | 一个子 Agent 派出来、开始、开始 / 用完一个工具、交回、没做成、被停掉、被打回（状态变了就推一次） |
 | `agent.event` | `{agent, type, data}` | 子 Agent 干活时的一步：`type` 是 `text` / `thinking` / `tool` / `result` / `notice`，`data` 同主会话的这几种事件 |
 
-**Agent**：`{id, name, role, task, session, parent, call, slot, kind, depth, state, started, finished, steps, activity, reply}`——`parent` 是派它的上级子 Agent（主智能体派的是 `null`），
+**Agent**：`{id, name, role, task, session, parent, call, slot, kind, depth, state, started, finished, steps, activity, reply, inbox}`（`inbox`：它还没看的追加指示 `[{id, text}]`）——`parent` 是派它的上级子 Agent（主智能体派的是 `null`），
 `call` 是派它的那个工具调用（上级的 `delegate_task` / `run_parallel_tasks` / `run_workflow` 的调用 id），`slot` 是那一批里第几个，`kind` 是 `delegate` / `parallel` / `workflow`；
 `state` 是 `waiting`（排队等名额或打回后等着）/ `running` / `done` / `failed` / `stopped`；`activity` 是 `{kind: generating / tool / queued, title?}`（`title` 是工具名）；
 `reply` 是它最后交出的话（没做成的是原因）。状态一变 EDITH 就把它连同运行记录 `transcript`（`[{type: text / thinking, text} | {type: tool, call, name, arguments, status, result}]`）
