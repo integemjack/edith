@@ -21,6 +21,7 @@ mod migrate;
 mod mind;
 mod permissions;
 mod protocol;
+mod pty;
 mod sessions;
 mod skills;
 mod team;

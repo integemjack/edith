@@ -310,6 +310,7 @@ pub fn stop_all() {
     let children: Vec<Child> = LAUNCHED.lock().unwrap().drain().map(|(_, child)| child).collect();
     finish(children);
     crate::mcp::stop_all();
+    crate::pty::close_all();
 }
 
 fn restarts(config: &Value) -> bool {
@@ -945,6 +946,43 @@ impl Capability {
                     .map_err(|message| (protocol::INVALID_PARAMS, message))
             }
             // 会话改动（changes.rs）：改了哪些文件、改动、撤销
+            // 内置终端（Friday 的 term.*）：大脑开的伪终端，断了照常跑；能开 shell 的只有全权的连接
+            "terminals.list" | "terminals.open" | "terminals.attach" | "terminals.detach" | "terminals.write" | "terminals.resize"
+            | "terminals.close" => {
+                if !self.full() {
+                    return Err((protocol::INVALID_REQUEST, "只有全权的连接能用终端".into()));
+                }
+                let id = params.get("id").and_then(Value::as_str).unwrap_or("");
+                let size = |key: &str, default: u64| params.get(key).and_then(Value::as_u64).unwrap_or(default).min(1000) as u16;
+                let outcome = match method {
+                    "terminals.list" => Ok(json!({ "terminals": crate::pty::list() })),
+                    "terminals.open" => {
+                        let session = params.get("session").and_then(Value::as_str).unwrap_or("");
+                        let cwd = params
+                            .get("cwd")
+                            .and_then(Value::as_str)
+                            .filter(|cwd| !cwd.is_empty())
+                            .map(PathBuf::from)
+                            .or_else(|| Session::load(session).map(|stored| PathBuf::from(stored.cwd)))
+                            .unwrap_or_else(home::workspace);
+                        let command = params.get("command").and_then(Value::as_str);
+                        crate::pty::open(id, session, &cwd, size("cols", 80), size("rows", 24), command, &self.name)
+                    }
+                    "terminals.attach" => crate::pty::attach(id, &self.name),
+                    "terminals.detach" => crate::pty::detach(id, &self.name),
+                    "terminals.write" => {
+                        use base64::Engine;
+                        let data = params.get("data").and_then(Value::as_str).unwrap_or("");
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(data)
+                            .map_err(|error| invalid(format!("data 不是 base64：{error}")))?;
+                        crate::pty::write(id, &bytes)
+                    }
+                    "terminals.resize" => crate::pty::resize(id, size("cols", 80), size("rows", 24)),
+                    _ => crate::pty::close(id),
+                };
+                outcome.map_err(|message| (protocol::NO_SESSION, message))
+            }
             "changes.list" | "changes.diff" | "changes.revert" => {
                 let id = params.get("session").and_then(Value::as_str).ok_or_else(|| invalid("要给 session"))?;
                 let session =
@@ -1149,6 +1187,7 @@ impl Capability {
             all.remove(&self.name);
         }
         drop(all);
+        crate::pty::forget(&self.name);
         crate::instance::refresh();
         if !was_alive || STOPPING.load(Ordering::Relaxed) {
             return;
@@ -1184,7 +1223,6 @@ fn native() -> Vec<Arc<Capability>> {
     CAPABILITIES.read().unwrap().values().cloned().collect()
 }
 
-/// 能力的动作交给模型的工具定义：名字「<能力名>__<动作名>」（tools：这一轮许可的）
 /// tools.list 的回复
 fn tools_listing() -> Value {
     let context = crate::brain::Context {
@@ -1228,6 +1266,7 @@ fn tools_listing() -> Value {
     })
 }
 
+/// 能力的动作交给模型的工具定义：名字「<能力名>__<动作名>」（tools：这一轮许可的）
 pub fn specs(tools: &permissions::Tools) -> Vec<Value> {
     let mut specs = Vec::new();
     for capability in native() {
@@ -1281,6 +1320,20 @@ pub fn is_action(full_name: &str) -> bool {
     let Some((name, rest)) = full_name.split_once(SEPARATOR) else { return false };
     let Some(capability) = CAPABILITIES.read().unwrap().get(name).cloned() else { return false };
     capability.actions.iter().any(|action| action["name"].as_str() == Some(rest))
+}
+
+/// 推一条通知给这几个连接（终端的输出给接着它的）
+pub fn notify_some(names: &[String], method: &str, params: Value) {
+    for capability in native().into_iter().filter(|capability| names.contains(&capability.name)) {
+        capability.notify(method, params.clone());
+    }
+}
+
+/// 推一条通知给全部全权的连接（终端开了、关了）
+pub fn notify_full(method: &str, params: Value) {
+    for capability in native().into_iter().filter(|capability| capability.full()) {
+        capability.notify(method, params.clone());
+    }
 }
 
 /// 这个能力能批准（声明了 approves、是全权的）
