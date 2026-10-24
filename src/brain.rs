@@ -47,6 +47,10 @@ pub struct Context {
     pub tools: crate::permissions::Tools,
     /// 话是谁交来的：能力名，终端里打的是空（审批问谁看它）
     pub origin: String,
+    /// 这一轮的停下标记（派出去的子智能体跟着停）
+    pub cancel: Option<std::sync::Arc<AtomicBool>>,
+    /// 子智能体自己是谁（主智能体是 None）
+    pub me: Option<crate::team::Me>,
 }
 
 /// 一轮的结果
@@ -105,13 +109,18 @@ pub fn instructions(cwd: &Path) -> String {
             ("capabilities", capabilities),
         ]),
         None,
-    )
+    ) + "\n\n"
+        + &prompts::text("edith.team", &args(&[]), None)
 }
 
-/// 给模型的工具：自带的 + 能力的动作（只给这一轮许可的）
-pub fn tool_specs(allowed: &crate::permissions::Tools) -> Vec<Value> {
+/// 给模型的工具：自带的 + 派子智能体的 + 能力的动作 + MCP 的（只给这一轮许可的）
+pub fn tool_specs(context: &Context) -> Vec<Value> {
+    let allowed = &context.tools;
     let mut specs: Vec<Value> =
         tools::specs().into_iter().filter(|spec| allowed.allows(spec["function"]["name"].as_str().unwrap_or(""), false)).collect();
+    specs.extend(
+        crate::team::specs(context).into_iter().filter(|spec| allowed.allows(spec["function"]["name"].as_str().unwrap_or(""), false)),
+    );
     specs.extend(capabilities::specs(allowed));
     specs.extend(crate::mcp::specs(allowed));
     specs
@@ -143,6 +152,7 @@ fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &Atom
         Err(text) => return Outcome { ok: false, text },
     };
     if let Some(outcome) = tools::run(name, arguments, cwd, cancel, &context.session, private_ok)
+        .or_else(|| crate::team::call(name, arguments, cwd, context))
         .or_else(|| capabilities::call(name, arguments, context, cancel))
         .or_else(|| crate::mcp::call(name, arguments))
     {
@@ -298,8 +308,11 @@ pub fn run(
     };
     let mut brain = Loop::new(config, history);
     brain.begin(Settings {
-        instructions: instructions(cwd),
-        tools: tool_specs(&context.tools),
+        instructions: match &context.me {
+            Some(me) => crate::team::instructions(cwd, me),
+            None => instructions(cwd),
+        },
+        tools: tool_specs(context),
         temperature: model.temperature,
         enable_thinking: model.enable_thinking,
         max_tool_rounds: MAX_TOOL_ROUNDS,

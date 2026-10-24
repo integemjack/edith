@@ -52,7 +52,60 @@ class Handler(BaseHTTPRequestHandler):
         called = re.search(r"调用工具 (\S+)(?: 参数 (\{.*\}))?", last_user)
         last_user_index = max(index for index, m in enumerate(messages) if m["role"] == "user")
         tools_since = [m for m in messages[last_user_index + 1:] if m["role"] == "tool"]
-        if called and not tools_since:
+        system = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
+        first_user = [m for m in messages if m["role"] == "user"][0]["content"]
+        everything = json.dumps(messages, ensure_ascii=False)
+        def call(name, arguments):
+            return chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_" + name, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}}]}, "tool_calls")
+        def say(text):
+            return chunk({"role": "assistant", "content": text}, "stop")
+        if "你是 EDITH 派出的临时子 Agent" in system:
+            # 子智能体：打回的改好；工作流的第二步把前一步的结果带上；别的照格式交回
+            if "上级验收没通过" in last_user:
+                events.append(say("结论：按意见改好了\n依据：无\n改动：无\n未完成与风险：无"))
+            elif "第二步" in last_user:
+                upstream = "拿到了前一步的结果" if "前面步骤交来的结果" in last_user and "第一步做完" in last_user else "没拿到前一步的结果"
+                events.append(say(f"结论：第二步做完，{upstream}\n依据：无\n改动：无\n未完成与风险：无"))
+            elif "第一步" in last_user:
+                events.append(say("结论：第一步做完\n依据：无\n改动：无\n未完成与风险：无"))
+            else:
+                events.append(say("结论：子任务做完了\n依据：无\n改动：无\n未完成与风险：无"))
+        elif "派活测试" in first_user or "打回测试" in first_user:
+            ids = re.findall(r"运行记录 id：(\w+)", last_user)
+            if "交回结果" in last_user and "打回测试" in first_user and "已打回" not in everything:
+                events.append(call("rework_agent", {"id": ids[0], "feedback": "再改改"}))
+            elif tools_since:
+                events.append(say(tools_since[-1]["content"].splitlines()[0]))
+            elif "交回结果" in last_user:
+                events.append(say("验收通过：" + ("改好的也收到了" if "按意见改好了" in last_user else "子任务做完了")))
+            else:
+                events.append(call("delegate_task", {"task": "子任务：把这件事做完", "name": "小助手"}))
+        elif "工作流测试" in first_user:
+            if "等你验收" in last_user:
+                ok = "拿到了前一步的结果" in last_user
+                events.append(say("验收通过：两步都做完了" + ("，第二步用上了第一步的结果" if ok else "，但第二步没拿到第一步的结果")))
+            elif tools_since:
+                events.append(say("工作流已经在后台跑了，做完送回来验收。"))
+            else:
+                events.append(call("run_workflow", {"goal": "两步做完", "steps": [
+                    {"id": "a", "task": "第一步：先做这个", "check": "写清做完了"},
+                    {"id": "b", "task": "第二步：接着做", "check": "用上第一步的结果", "after": ["a"]},
+                ]}))
+        elif "交付测试" in first_user:
+            if "交付检查" in last_user:
+                events.append(say("做完了：结果已经交付"))
+            else:
+                events.append(say("建议你先装好依赖，然后你可以运行 make 编译。要不要我帮你做？"))
+        elif "验证测试" in first_user:
+            if "没有运行或读回确认" in last_user and not tools_since:
+                events.append(call("run_shell", {"command": "cat s.py"}))
+            elif "没有运行或读回确认" in last_user:
+                events.append(say("验证过了：s.py 能读回"))
+            elif tools_since:
+                events.append(say("写好了 s.py"))
+            else:
+                events.append(call("write_file", {"path": "s.py", "content": "print(1)\n"}))
+        elif called and not tools_since:
             # 「调用工具 X」：调 X（没参数），再把结果原样答出来
             events.append(chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_t", "type": "function", "function": {"name": called.group(1), "arguments": called.group(2) or "{}"}}]}, "tool_calls"))
         elif called:

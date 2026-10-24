@@ -318,7 +318,7 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 | `tool` | `{id, name, arguments}` | 开始用一个工具（自带的、能力的动作、MCP 服务的） |
 | `result` | `{id, name, ok, text}` | 用完 |
 | `stats` | `{promptTokens, generatedTokens, cachedTokens, promptTime, generateTime, contextParts, contextLimit, contextCompactAt}` | 每段请求的用量（时间是秒；`contextParts` 是上下文各部分的 token：system / tools / user / replies / toolUse） |
-| `notice` | `{text, call?}` | 顺带说一句：重试、压了上下文、收到补充、动作进度（带 `call`） |
+| `notice` | `{text, call?, agent?}` | 顺带说一句：重试、压了上下文、收到补充、动作进度（带 `call`）、交付检查追了提醒、子智能体开始 / 交回 / 被打回（带 `agent`：子智能体的 id） |
 | `done` | `{answer, stopped, error}` | 这一轮结束 |
 
 想边生成边说话的语音能力订 `text` 和 `done`；界面订 `*`；只关心结果的订 `done`。

@@ -146,7 +146,9 @@ fn worktree_only_when_asked_and_cleaned_when_unchanged() {
     assert_eq!(session_files(&home, &repo), 4);
     // 被强行结束留下的 worktree：edith worktree 看得到，prune 清掉没改东西的，改了的留着
     let leftover = worktrees.join("left00");
-    git(&repo, &["worktree", "add", "-q", "-b", "edith/left00", &leftover.to_string_lossy(), "HEAD"]);
+    // Windows 上 canonicalize 出来的 \\?\ 前缀 git 不认
+    let plain = leftover.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+    git(&repo, &["worktree", "add", "-q", "-b", "edith/left00", &plain, "HEAD"]);
     let listed = edith(&home, model.port, &repo, &["worktree"]);
     let stdout = String::from_utf8_lossy(&listed.stdout);
     assert!(stdout.contains("left00  edith/left00  没改东西") && stdout.contains("有没提交的改动"), "{}", text(&listed));

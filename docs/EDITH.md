@@ -72,6 +72,28 @@ worktree 里的会话记在仓库名下，回到仓库 `-c`、`edith sessions` �
   deny 什么时候都挡。只认全局的 config.json：项目里的配置不能替你放开权限。
 - **客人的会话**：权限不全的连接只用自己名下的会话，话不进主人的会话（防借权注入），也看不到主人的对话。
 
+## 交付检查
+
+照 Friday（`src/checks.rs`，规则在 friday-core 的 `delivery`）：一轮快结束时便宜地「起疑」，追一条提醒让智能体自己对照用户的原话判断，每种一轮最多一次：
+- 写了代码、配置（`.py`、`.rs`、`.json`……），写完之后没有运行或读回确认 → 先验证再汇报（用户说了「不用运行」的不催）；
+- 用户交代的是要做的事，交回来的却是方案、建议、「要不要我…」，这一轮又没真正动手 → 对照原话分析，该做就做完再交付；
+- 只说了一句下一步（「接下来改 a.rs」）就结束了 → 接着做；
+- 发现了问题却问用户要不要修 → 是自己做出来的、修法明确就修完。
+
+## 子智能体与工作流
+
+照 Friday（`src/team.rs`，规则在 friday-core 的 `agents`、`delivery`、`liveness`）：
+- `delegate_task` / `run_parallel_tasks`：派临时子 Agent。主智能体派的**在后台跑**，立刻返回 id，这一轮可以先结束；做完的结果作为一段话交回
+  这个会话（正在干活就补充进这一轮，闲着就开始新的一轮去验收）。子 Agent 也能往下派（最多 3 层），等下级做完再返回。
+- `run_workflow`：主智能体给出目标和步骤（任务、验收标准 `check`、依赖 `after`），依赖都做完的同时开始，写了 after 的带着前面的结果再开始，
+  前置没做成的不做；全部结束后各步结果连同验收标准一起交回验收。
+- `rework_agent`：验收不合格打回，原来那个子 Agent 带着它的上下文接着改；同一轮打回的几个都改完一起交回。
+- `read_agent_log`、`message_agent`、`stop_agent`：看运行记录、追加指示、停掉（停掉工作流的 id 就停整个工作流）。停下这一轮（Ctrl+C、`sessions.stop`）时它派出去的也停。
+- 子 Agent 看不到对话：系统提示（`edith.sub`）写明它是临时子 Agent、交回结果的格式（结论 / 依据 / 改动 / 未完成与风险），任务后面附用户的原话。
+  交回前自己查一遍（没写结果、只说下一步、只交方案、写完没验证 → 原地打回），交给上级的结果后面附验收提示；结果太长的全文存进 `~/.edith/projects/<目录>/agents/`。
+- 同时跑几个有上限（`EDITH_MAX_AGENTS`，默认 4），多的排队。工具权限、审批照派它的那一轮。子 Agent 只在这个进程里活着，不存档。
+- `edith "…"` 干完一件事等派出去的都交回、验收完再退出。
+
 ## 升级
 
 起来时看一眼老的数据、配置（`src/migrate.rs`）：v0.1.9 及以前放在项目里的会话（`<目录>/.edith/sessions/*.json`）挪到
@@ -121,7 +143,7 @@ edith tools [install | remove]          共用的工具（edith.tools）
 
 ## 原型之后
 
-- 子智能体 / 工作流（规则已在 friday-core：`agents`、`team`、`workflow`、`liveness`、`delivery`）；交付检查（`delivery`、`turnCheck`）；
-- 记忆、任务状态、审批（`approval`）、密钥只以名字流转（`secret_guard`）；
+- 子智能体按活挑模型（`work`、`thinking`、`engine` 现在收下不用）、看门狗（`liveness`）、往下派的放后台（`wait_agents`）、`report_to_parent`；
+- 记忆、任务状态、密钥只以名字流转（`secret_guard`）；
 - 能力层的「本事」：能力声明自己能做「听录音」「生图」这类固定的本事，大脑挑由谁来做（Friday 的 Capability / Provider 规则）；
 - 桌面端（Swift / Qt）改成 EDITH 的能力；远程机器只装 EDITH。

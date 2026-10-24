@@ -57,6 +57,11 @@ impl Origin {
         Origin::default()
     }
 
+    /// 子智能体、工作流交回的结果（team.rs）：权限照派它的那一轮
+    pub fn agent(tools: crate::permissions::Tools) -> Origin {
+        Origin { kind: "agent".into(), tools, ..Origin::default() }
+    }
+
     pub fn to_json(&self) -> Value {
         json!({ "capability": self.capability, "kind": self.kind, "from": self.from })
     }
@@ -69,9 +74,9 @@ impl Origin {
         }
     }
 
-    /// 交给模型的那段话（终端里打的原样）
+    /// 交给模型的那段话（终端里打的原样；子智能体交回的自带说明，也原样）
     fn wrap(&self, key: &str, text: &str) -> String {
-        if self.capability.is_empty() && key == "edith.input" {
+        if self.capability.is_empty() && (key == "edith.input" || self.kind == "agent") {
             return text.to_string();
         }
         let from = if self.from.is_empty() { String::new() } else { format!("，说话的是 {}", self.from) };
@@ -145,6 +150,13 @@ struct State {
     notes: Vec<String>,
     /// 正在干的这一轮许可的工具（补充 / 打断只在不越过它时生效）
     tools: crate::permissions::Tools,
+    /// 用户（或能力）最近交来的原话：交付检查、派给子智能体的背景按它（子智能体交回的不算）
+    request: String,
+}
+
+/// 这个会话里最近交来的原话（子智能体交回的不算）
+pub fn request_of(session: &str) -> String {
+    SESSIONS.lock().unwrap().get(session).map(|state| state.request.clone()).unwrap_or_default()
 }
 
 static SESSIONS: LazyLock<Mutex<HashMap<String, State>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -189,8 +201,9 @@ pub fn working(session: &str) -> Option<String> {
     SESSIONS.lock().unwrap().get(session).filter(|state| state.working).map(|state| state.turn.clone())
 }
 
-/// 停下这个会话正在干的一轮（排着的也不干了）；没在干返回 false
+/// 停下这个会话正在干的一轮（排着的也不干了，派出去的子智能体、工作流也停）；没在干返回 false
 pub fn stop(session: &str) -> bool {
+    crate::team::stop_session(session);
     let mut sessions = SESSIONS.lock().unwrap();
     let Some(state) = sessions.get_mut(session).filter(|state| state.working) else { return false };
     state.queue.clear();
@@ -218,6 +231,9 @@ pub fn submit(
     let state = sessions.entry(session.to_string()).or_default();
     if !state.working && Session::load(session).is_none() {
         return Err(format!("没有会话 {session}"));
+    }
+    if origin.kind != "agent" && urgency != Urgency::Note {
+        state.request = text.to_string();
     }
     if urgency == Urgency::Note {
         let note = origin.wrap("edith.note", text);
@@ -324,9 +340,13 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         turn: input.turn.clone(),
         tools: input.origin.tools.clone(),
         origin: input.origin.capability.clone(),
+        cancel: Some(cancel.clone()),
+        me: None,
     };
+    let recorder = Mutex::new(crate::checks::Recorder::default());
     let text = input.origin.wrap(if input.interjected { "edith.interjection" } else { "edith.input" }, &input.text);
     let mut on_event = |event: Event| {
+        recorder.lock().unwrap().on(&event);
         let (kind, data) = event_json(&event);
         emit(session_id, &input.turn, kind, data);
     };
@@ -338,7 +358,22 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         };
         taken.iter().map(|item| item.origin.wrap("edith.interjection", &item.text)).collect::<Vec<_>>()
     };
-    let turn = brain::run(&model, std::mem::take(&mut session.history), &text, &cwd, cancel, &context, &mut on_event, &mut interject);
+    let mut turn = brain::run(&model, std::mem::take(&mut session.history), &text, &cwd, cancel, &context, &mut on_event, &mut interject);
+    // 交付检查（checks.rs）：写完没验证、交的是方案、只说了下一步、问要不要修——追一条提醒接着做，每种最多一次
+    let request = request_of(session_id);
+    let delegates = context.tools.allows("delegate_task", false);
+    let mut checked = std::collections::HashSet::new();
+    while !turn.stopped && turn.error.is_none() && !cancel.load(Ordering::Relaxed) {
+        let followup = crate::checks::main_followup(&request, &recorder.lock().unwrap().blocks, delegates, &checked);
+        let Some(followup) = followup else { break };
+        checked.insert(followup.kind);
+        emit(session_id, &input.turn, "notice", json!({ "text": followup.notice }));
+        let previous = turn.answer.clone();
+        turn = brain::run(&model, turn.history, &followup.prompt, &cwd, cancel, &context, &mut on_event, &mut interject);
+        if turn.answer.trim().is_empty() {
+            turn.answer = previous;
+        }
+    }
     session.history = turn.history;
     let notes: Vec<String> = {
         let mut sessions = SESSIONS.lock().unwrap();
@@ -412,7 +447,8 @@ fn pending(turn: &str) -> bool {
 
 /// 等到这个会话闲下来（命令行干完一件事再退出：中途补充、排着的也干完）
 pub fn wait_idle(session: &str) {
-    while working(session).is_some() {
+    // 派出去的子智能体、工作流还没交回的也等（交回后会再干一轮验收）
+    while working(session).is_some() || crate::team::busy(session) {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
