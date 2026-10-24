@@ -347,11 +347,16 @@ fn fetch_engine(engine: &'static str, query: &str, range: &str, language: &str) 
     let failed = |failure: String| EngineResult { engine, hits: Vec::new(), failure: Some(failure) };
     let url = request_url(engine, query, range, language);
     let accept_language = if language.starts_with("en") { "en-US,en;q=0.9" } else { "zh-CN,zh;q=0.9,en;q=0.8" };
-    let mut response =
-        match AGENT.get(&url).header("Accept", "text/html,application/xhtml+xml").header("Accept-Language", accept_language).call() {
-            Ok(response) => response,
-            Err(error) => return failed(error.to_string()),
-        };
+    let request = || AGENT.get(&url).header("Accept", "text/html,application/xhtml+xml").header("Accept-Language", accept_language).call();
+    // 连不上、连接被断这类一下子的网络错误：隔半秒再试一次（状态码不对的不重试）
+    let retried = request().or_else(|_| {
+        std::thread::sleep(Duration::from_millis(500));
+        request()
+    });
+    let mut response = match retried {
+        Ok(response) => response,
+        Err(error) => return failed(error.to_string()),
+    };
     // DuckDuckGo 限流时回 202 + 验证页；百度跳安全验证
     let status = response.status().as_u16();
     if status != 200 {
