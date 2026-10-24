@@ -1,6 +1,9 @@
-//! 数据目录（`~/.edith`，`EDITH_HOME` 换地方）和大脑用的模型（`config.json` + 环境变量）
+//! 数据目录分两层，和大脑用的模型（`config.json` + 环境变量）：
+//! - 全局 `~/.edith`（`EDITH_HOME` 换地方）：模型、提示词、所有目录都要的能力、在跑的大脑登记（instances/）、本机套接字（run/）；
+//! - 目录 `<工作目录>/.edith`：这个目录的会话、主会话、能力、日志、锁。一个目录一个大脑（`edith .`）。
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde_json::{Value, json};
 
@@ -9,11 +12,55 @@ pub fn user_home() -> PathBuf {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// 全局数据目录
 pub fn dir() -> PathBuf {
     match std::env::var_os("EDITH_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => user_home().join(".edith"),
     }
+}
+
+static WORKSPACE: OnceLock<PathBuf> = OnceLock::new();
+
+/// 定下这次的工作目录（启动时一次）
+pub fn set_workspace(dir: PathBuf) {
+    let _ = WORKSPACE.set(dir);
+}
+
+/// 工作目录：这个大脑管的那个目录（没定过是当前目录）
+pub fn workspace() -> PathBuf {
+    WORKSPACE.get().cloned().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// 目录这一层的数据：`<工作目录>/.edith`
+pub fn workspace_data() -> PathBuf {
+    workspace().join(".edith")
+}
+
+/// 从 start 往上找工作目录：先碰到有 .edith/ 的目录就是它（全局数据目录那个不算）；碰到 git 仓库的根（有 .git，
+/// git worktree 的根是个 .git 文件）就停在那里——每个 worktree 自成一个工作目录，不会找到外面主仓库的 .edith；
+/// 都没有用 start 本身
+pub fn find_workspace(start: &Path) -> PathBuf {
+    let global = std::fs::canonicalize(dir()).unwrap_or_else(|_| dir());
+    let mut current = Some(start);
+    while let Some(candidate) = current {
+        let data = candidate.join(".edith");
+        if data.is_dir() && std::fs::canonicalize(&data).unwrap_or(data) != global {
+            return candidate.to_path_buf();
+        }
+        if candidate.join(".git").exists() {
+            return candidate.to_path_buf();
+        }
+        current = candidate.parent();
+    }
+    start.to_path_buf()
+}
+
+/// 一个工作目录的键（登记、套接字的文件名用）：完整路径的 SHA-256 前 16 位
+pub fn workspace_key(workspace: &Path) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(workspace.to_string_lossy().as_bytes());
+    digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn read_json(path: &Path) -> Option<Value> {

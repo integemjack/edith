@@ -1,4 +1,4 @@
-//! 会话：`~/.edith/sessions/<id>.json`，存 OpenAI 格式的历史（不含 system）和几项元数据
+//! 会话：`<工作目录>/.edith/sessions/<id>.json`，存 OpenAI 格式的历史（不含 system）和几项元数据
 
 use std::path::PathBuf;
 
@@ -17,7 +17,7 @@ pub struct Session {
 }
 
 fn dir() -> PathBuf {
-    home::dir().join("sessions")
+    home::workspace_data().join("sessions")
 }
 
 /// 会话 id 只认 uuid 的字符（防止拼出别的路径）
@@ -113,14 +113,15 @@ pub fn list() -> Vec<Session> {
     sessions
 }
 
-/// `edith run` 的主会话（能力没指明会话的话都进它）：id 记在 ~/.edith/main-session；没有就在 cwd 新开一个
+/// 这个目录的主会话（能力没指明会话的话都进它）：id 记在 <工作目录>/.edith/main-session；没有就新开一个
 pub fn main_session(cwd: &str) -> Result<Session, String> {
-    let path = home::dir().join("main-session");
+    let path = home::workspace_data().join("main-session");
     if let Some(session) = std::fs::read_to_string(&path).ok().and_then(|id| Session::load(id.trim())) {
         return Ok(session);
     }
     let mut session = Session::new(cwd);
     session.save()?;
+    std::fs::create_dir_all(home::workspace_data()).map_err(|error| error.to_string())?;
     std::fs::write(&path, &session.id).map_err(|error| format!("写不了 {}：{error}", path.display()))?;
     Ok(session)
 }

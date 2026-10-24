@@ -7,12 +7,14 @@ EDITH 经 stdio 起它，它对外开一个 WebSocket 端口，把远程客户�
 ## 接上
 
 ```bash
-edith capabilities add ws edith-websocket --listen 127.0.0.1:7789
+edith capabilities add ws edith-websocket                       # 只听本机，端口自动挑
 edith capabilities add ws edith-websocket --listen 0.0.0.0:7789 --token 一串随机的令牌
 edith run
+edith instances                                                 # 看它开在哪个地址
 ```
 
-- `--listen 地址:端口`：默认 `127.0.0.1:7789`。
+- `--listen 地址:端口`：默认 `127.0.0.1:0`（系统挑一个空端口：几个目录的大脑各接一个也不会撞）。
+  实际地址在握手时报给 EDITH（`endpoints`），登记在 `~/.edith/instances/`（[能力协议 §8.2](CAPABILITY-PROTOCOL.md#82-在跑的大脑instances)），`edith instances` 列得出来。
 - `--token 令牌`（或环境变量 `EDITH_WEBSOCKET_TOKEN`）：**不是只听本机（127.0.0.1 / ::1 / localhost）时必须给**，不给不启动。
 - 它对 EDITH 报的是：感知 `message`（远程客户端交来的话）、没有动作、订全部事件、所有会话。
 
@@ -45,7 +47,7 @@ ws://<地址>:<端口>/?token=<令牌>&name=<客户端名字>
 ## 例子（浏览器）
 
 ```js
-const ws = new WebSocket("ws://127.0.0.1:7789/?name=browser");
+const ws = new WebSocket("ws://127.0.0.1:7789/?name=browser");   // 地址见 edith instances
 ws.onopen = () => ws.send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ask", params: { text: "列一下桌面上有什么" } }));
 ws.onmessage = ({ data }) => {
   const message = JSON.parse(data);

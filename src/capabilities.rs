@@ -1,12 +1,17 @@
-//! 能力：大脑的四肢。EDITH 只认一种接法——在本机起能力的进程，经 stdin / stdout 讲能力协议（docs/CAPABILITY-PROTOCOL.md）：
-//! 双向、实时，能力能主动推内容（sense）、交事（ask），大脑能让它做动作（act）、把干活的过程推给它（event）。
-//! WebSocket、聊天渠道、语音、桌面客户端……都是这样的能力；只会被调用的 MCP 服务也算一种（`"protocol": "mcp"`，见 mcp.rs）。
+//! 能力：大脑的四肢，讲能力协议（docs/CAPABILITY-PROTOCOL.md）：双向、实时，能力能主动推内容（sense）、交事（ask），
+//! 大脑能让它做动作（act）、把干活的过程推给它（event）。两种接法，协议一样：
+//! - 大脑按配置起能力的进程，经 stdin / stdout 讲（WebSocket、聊天渠道、语音……都这样接）；
+//! - 自己打开的程序（终端、桌面端）经这个大脑的本机套接字连进来（instance.rs），断开就摘掉、不重启。
 //!
-//! 哪些能力：`~/.edith/capabilities.json`：`{"capabilities": [{name, command, args?, env?, cwd?, protocol?, url?, headers?, disabled?, restart?}]}`。
+//! 只会被调用的 MCP 服务也算一种能力（`"protocol": "mcp"`，见 mcp.rs）。
+//!
+//! 配置两层：全局 `~/.edith/capabilities.json` + 目录 `<工作目录>/.edith/capabilities.json`（同名的以目录为准）：
+//! `{"capabilities": [{name, command, args?, env?, cwd?, protocol?, url?, headers?, disabled?, restart?}]}`。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, Mutex, RwLock, Weak};
@@ -40,7 +45,11 @@ pub struct Capability {
     focus_only: bool,
     /// 握手做完了（之前它发来的请求一律回 NOT_INITIALIZED）
     ready: bool,
-    stdin: Mutex<Option<ChildStdin>>,
+    /// 它对外开的入口（initialize 回的 endpoints：WebSocket 地址等），登记进 instances/ 让别人找得到
+    pub endpoints: Vec<Value>,
+    /// 经本机套接字连进来的（不是大脑起的进程）
+    pub connected: bool,
+    writer: Mutex<Option<Box<dyn Write + Send>>>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, Value>>>>,
     next_id: AtomicU64,
     alive: AtomicBool,
@@ -61,16 +70,51 @@ pub fn clean_name(name: &str) -> String {
     cleaned.trim_matches('_').chars().take(24).collect()
 }
 
-fn config_path() -> std::path::PathBuf {
-    home::dir().join("capabilities.json")
+fn layer_path(global: bool) -> PathBuf {
+    if global { home::dir() } else { home::workspace_data() }.join("capabilities.json")
 }
 
+/// 两层是不是同一个文件（工作目录就是家目录时 .edith 就是全局的那个）
+fn single_layer() -> bool {
+    let canonical = |path: PathBuf| std::fs::canonicalize(&path).unwrap_or(path);
+    canonical(home::dir()) == canonical(home::workspace_data())
+}
+
+fn read_layer(global: bool) -> Vec<Value> {
+    home::read_json(&layer_path(global)).and_then(|value| value.get("capabilities").and_then(Value::as_array).cloned()).unwrap_or_default()
+}
+
+fn name_of(config: &Value) -> String {
+    clean_name(config.get("name").and_then(Value::as_str).unwrap_or(""))
+}
+
+/// 合并后的配置：全局的 + 目录的（同名的以目录为准：目录里写 `{"name": "x", "disabled": true}` 就关掉全局的 x）；
+/// 每项多一个 "scope"：global / workspace
 pub fn configs() -> Vec<Value> {
-    home::read_json(&config_path()).and_then(|value| value.get("capabilities").and_then(Value::as_array).cloned()).unwrap_or_default()
+    let mut merged: Vec<Value> = Vec::new();
+    let layers: &[bool] = if single_layer() { &[false] } else { &[true, false] };
+    for &global in layers {
+        for mut item in read_layer(global) {
+            item["scope"] = json!(if global { "global" } else { "workspace" });
+            let name = name_of(&item);
+            match merged.iter_mut().find(|existing| name_of(existing) == name) {
+                // 只写了 disabled 的：关掉全局那个，别的照旧
+                Some(existing) if item.get("command").is_none() && item.get("url").is_none() => {
+                    if let Some(disabled) = item.get("disabled") {
+                        existing["disabled"] = disabled.clone();
+                    }
+                    existing["scope"] = item["scope"].clone();
+                }
+                Some(existing) => *existing = item,
+                None => merged.push(item),
+            }
+        }
+    }
+    merged
 }
 
-fn save_configs(items: &[Value]) -> Result<(), String> {
-    home::write_json(&config_path(), &json!({ "capabilities": items }))
+fn save_layer(global: bool, items: &[Value]) -> Result<(), String> {
+    home::write_json(&layer_path(global), &json!({ "capabilities": items }))
 }
 
 fn is_mcp(config: &Value) -> bool {
@@ -78,7 +122,7 @@ fn is_mcp(config: &Value) -> bool {
 }
 
 fn log_line(name: &str, text: &str) {
-    let dir = home::dir().join("logs");
+    let dir = home::workspace_data().join("logs");
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{name}.log"))) {
         let _ = writeln!(file, "{} {text}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
@@ -112,29 +156,44 @@ fn start(name: &str, config: &Value) -> Result<(), String> {
     if is_mcp(config) { mcp::attach(name, config.clone()).map(|_| ()) } else { start_native(name, config).map(|_| ()) }
 }
 
-/// 加一个能力：先接上试试，接得上才记进 capabilities.json（同名的换掉）。返回接上后的说明
-pub fn add(config: Value) -> Result<Value, String> {
-    let name = clean_name(config.get("name").and_then(Value::as_str).unwrap_or(""));
+/// 加一个能力：先接上试试，接得上才记进配置（global：全局那层，否则这个目录那层；同名的换掉）。返回接上后的说明
+pub fn add(config: Value, global: bool) -> Result<Value, String> {
+    let name = name_of(&config);
     let mut stored = config.clone();
     stored["name"] = json!(name);
     stop(&name);
     start(&name, &stored)?;
-    let mut items = configs();
-    items.retain(|item| clean_name(item.get("name").and_then(Value::as_str).unwrap_or("")) != name);
+    let global = global && !single_layer();
+    let mut items = read_layer(global);
+    items.retain(|item| name_of(item) != name);
     items.push(stored);
-    save_configs(&items)?;
+    save_layer(global, &items)?;
     Ok(describe(&name).unwrap_or(Value::Null))
 }
 
-/// 去掉一个能力（断开并从 capabilities.json 删掉）；没有这个返回 false
-pub fn remove(name: &str) -> bool {
+/// 只记进配置、不接（这个目录的大脑在别的进程里跑着时用；它重启后生效）
+pub fn save(config: Value, global: bool) -> Result<(), String> {
+    let name = name_of(&config);
+    if name.is_empty() {
+        return Err("能力要有名字（name：字母、数字、-、_）".into());
+    }
+    let global = global && !single_layer();
+    let mut items = read_layer(global);
+    items.retain(|item| name_of(item) != name);
+    items.push(config);
+    save_layer(global, &items)
+}
+
+/// 去掉一个能力（断开并从那一层的配置删掉）；没有这个返回 false
+pub fn remove(name: &str, global: bool) -> bool {
     let name = clean_name(name);
-    let mut items = configs();
+    let global = global && !single_layer();
+    let mut items = read_layer(global);
     let before = items.len();
-    items.retain(|item| clean_name(item.get("name").and_then(Value::as_str).unwrap_or("")) != name);
+    items.retain(|item| name_of(item) != name);
     let removed = items.len() != before;
     if removed {
-        let _ = save_configs(&items);
+        let _ = save_layer(global, &items);
     }
     stop(&name) || removed
 }
@@ -191,6 +250,7 @@ fn schedule_restart(name: String, delay: Duration) {
 }
 
 fn start_native(name: &str, config: &Value) -> Result<Arc<Capability>, String> {
+    let workspace = home::workspace();
     let command =
         config.get("command").and_then(Value::as_str).filter(|command| !command.is_empty()).ok_or("能力要给 command（怎么起它）")?;
     let arguments: Vec<String> = config
@@ -205,9 +265,12 @@ fn start_native(name: &str, config: &Value) -> Result<Arc<Capability>, String> {
             process.env(key, value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string()));
         }
     }
-    if let Some(cwd) = config.get("cwd").and_then(Value::as_str).filter(|cwd| !cwd.is_empty()) {
-        process.current_dir(cwd);
-    }
+    // 没写 cwd 的在工作目录里跑
+    match config.get("cwd").and_then(Value::as_str).filter(|cwd| !cwd.is_empty()) {
+        Some(cwd) => process.current_dir(cwd),
+        None => process.current_dir(&workspace),
+    };
+    process.env("EDITH_WORKSPACE", &workspace);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -215,7 +278,7 @@ fn start_native(name: &str, config: &Value) -> Result<Arc<Capability>, String> {
         process.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = process.spawn().map_err(|error| format!("起不了 {command}：{error}"))?;
-    let stdin = child.stdin.take();
+    let stdin = child.stdin.take().ok_or("拿不到它的标准输入")?;
     let stdout = child.stdout.take().ok_or("拿不到它的标准输出")?;
     if let Some(stderr) = child.stderr.take() {
         let name = name.to_string();
@@ -225,9 +288,39 @@ fn start_native(name: &str, config: &Value) -> Result<Arc<Capability>, String> {
             }
         });
     }
+    handshake(name, config, Box::new(stdin), Box::new(stdout), Some(child))
+}
+
+/// 经本机套接字连进来的一个（instance.rs 接到连接后调）：握手，名字用它回的 name（重名的加编号）
+pub fn accept(reader: Box<dyn Read + Send>, writer: Box<dyn Write + Send>) -> Result<Arc<Capability>, String> {
+    handshake("", &json!({ "restart": false }), writer, reader, None)
+}
+
+/// 用一个不重名的名字：想要的已经被占了就加 -2、-3……
+fn unique_name(wanted: &str) -> String {
+    let base = {
+        let cleaned = clean_name(wanted);
+        if cleaned.is_empty() { "client".to_string() } else { cleaned }
+    };
+    let taken = |name: &str| CAPABILITIES.read().unwrap().contains_key(name) || mcp::all().iter().any(|limb| limb.name == name);
+    if !taken(&base) {
+        return base;
+    }
+    (2..).map(|index| format!("{base}-{index}")).find(|name| !taken(name)).unwrap()
+}
+
+/// 握手（EDITH 发 initialize、它回话、EDITH 发 initialized）并登记。name 为空：连进来的，名字按它回的
+fn handshake(
+    name: &str,
+    config: &Value,
+    writer: Box<dyn Write + Send>,
+    stdout: Box<dyn Read + Send>,
+    child: Option<Child>,
+) -> Result<Arc<Capability>, String> {
+    let connected = child.is_none();
     // 握手前先用一个临时的壳收发（还不知道它报了什么）
     let shell = Arc::new(Capability {
-        name: name.to_string(),
+        name: if connected { "connecting".into() } else { name.to_string() },
         config: config.clone(),
         info: Value::Null,
         senses: Vec::new(),
@@ -235,14 +328,16 @@ fn start_native(name: &str, config: &Value) -> Result<Arc<Capability>, String> {
         receives: Vec::new(),
         focus_only: false,
         ready: false,
-        stdin: Mutex::new(stdin),
+        endpoints: Vec::new(),
+        connected,
+        writer: Mutex::new(Some(writer)),
         pending: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1),
         alive: AtomicBool::new(true),
         asked: Mutex::new(HashSet::new()),
         acting: Mutex::new(HashMap::new()),
         listener: Mutex::new(None),
-        child: Mutex::new(Some(child)),
+        child: Mutex::new(child),
     });
     let current: Arc<Mutex<Weak<Capability>>> = Arc::new(Mutex::new(Arc::downgrade(&shell)));
     {
@@ -253,7 +348,13 @@ fn start_native(name: &str, config: &Value) -> Result<Arc<Capability>, String> {
     let model = crate::home::Model::load().map(|model| model.model).unwrap_or_default();
     let params = json!({
         "protocolVersion": protocol::VERSION,
-        "brain": { "name": "EDITH", "version": env!("CARGO_PKG_VERSION"), "model": model },
+        "brain": {
+            "name": "EDITH",
+            "version": env!("CARGO_PKG_VERSION"),
+            "model": model,
+            "id": crate::instance::brain_id(),
+            "workspace": home::workspace().to_string_lossy(),
+        },
         "name": name,
         "focus": mind::focus(),
     });
@@ -264,6 +365,8 @@ fn start_native(name: &str, config: &Value) -> Result<Arc<Capability>, String> {
             return Err(format!("握手没成功：{}", error_text(&error)));
         }
     };
+    let name = if connected { unique_name(reply.get("name").and_then(Value::as_str).unwrap_or("client")) } else { name.to_string() };
+    let name = name.as_str();
     let actions: Vec<Value> = reply
         .get("actions")
         .and_then(Value::as_array)
@@ -289,7 +392,9 @@ fn start_native(name: &str, config: &Value) -> Result<Arc<Capability>, String> {
         receives,
         focus_only: reply.get("sessions").and_then(Value::as_str) == Some("focus"),
         ready: true,
-        stdin: Mutex::new(shell.stdin.lock().unwrap().take()),
+        endpoints: reply.get("endpoints").and_then(Value::as_array).cloned().unwrap_or_default(),
+        connected,
+        writer: Mutex::new(shell.writer.lock().unwrap().take()),
         pending: Mutex::new(std::mem::take(&mut *shell.pending.lock().unwrap())),
         next_id: AtomicU64::new(shell.next_id.load(Ordering::Relaxed)),
         alive: AtomicBool::new(true),
@@ -310,11 +415,12 @@ fn start_native(name: &str, config: &Value) -> Result<Arc<Capability>, String> {
         old.shutdown();
     }
     capability.notify("initialized", json!({}));
-    // 进程结束：摘掉、按配置重启
-    {
+    // 进程结束：摘掉、按配置重启（连进来的在 read_loop 读到断开时摘掉）
+    if !connected {
         let capability = capability.clone();
         std::thread::spawn(move || capability.watch());
     }
+    crate::instance::refresh();
     log_line(
         name,
         &format!(
@@ -370,6 +476,11 @@ fn read_loop(name: &str, stdout: impl Read, current: Arc<Mutex<Weak<Capability>>
             }
         }
     }
+    // 连进来的断开了：摘掉（大脑起的进程由 watch 等它退出）
+    let capability = current.lock().unwrap().upgrade();
+    if let Some(capability) = capability.filter(|capability| capability.connected) {
+        capability.ended();
+    }
 }
 
 type Failure = (i64, String);
@@ -380,11 +491,11 @@ fn invalid(message: impl Into<String>) -> Failure {
 
 impl Capability {
     fn send(&self, message: &Value) -> bool {
-        let mut stdin = self.stdin.lock().unwrap();
-        let Some(pipe) = stdin.as_mut() else { return false };
+        let mut writer = self.writer.lock().unwrap();
+        let Some(pipe) = writer.as_mut() else { return false };
         let ok = writeln!(pipe, "{message}").and_then(|_| pipe.flush()).is_ok();
         if !ok {
-            *stdin = None;
+            *writer = None;
         }
         ok
     }
@@ -649,7 +760,8 @@ impl Capability {
             mind::unlisten(id);
         }
         self.notify("shutdown", json!({}));
-        *self.stdin.lock().unwrap() = None;
+        // 关掉写的一头：进程读到 EOF；连进来的连接整个关掉（SocketWriter 丢掉时关）
+        *self.writer.lock().unwrap() = None;
         let child = self.child.lock().unwrap().take();
         if let Some(mut child) = child {
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -662,6 +774,25 @@ impl Capability {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    /// 不在了（进程退出、连接断开）：摘掉它的动作和事件，等着的请求立刻失败
+    fn ended(self: Arc<Self>) {
+        let was_alive = self.alive.swap(false, Ordering::Relaxed);
+        if let Some(id) = self.listener.lock().unwrap().take() {
+            mind::unlisten(id);
+        }
+        self.pending.lock().unwrap().clear();
+        *self.writer.lock().unwrap() = None;
+        let mut all = CAPABILITIES.write().unwrap();
+        if all.get(&self.name).is_some_and(|current| Arc::ptr_eq(current, &self)) {
+            all.remove(&self.name);
+        }
+        drop(all);
+        if was_alive && self.connected {
+            log_line(&self.name, "断开了");
+        }
+        crate::instance::refresh();
     }
 
     /// 等进程结束：摘掉它，等着的请求立刻失败；按配置重启
@@ -680,16 +811,8 @@ impl Capability {
                 break;
             }
         }
-        let was_alive = self.alive.swap(false, Ordering::Relaxed);
-        if let Some(id) = self.listener.lock().unwrap().take() {
-            mind::unlisten(id);
-        }
-        self.pending.lock().unwrap().clear();
-        let mut all = CAPABILITIES.write().unwrap();
-        if all.get(&self.name).is_some_and(|current| Arc::ptr_eq(current, &self)) {
-            all.remove(&self.name);
-        }
-        drop(all);
+        let was_alive = self.alive.load(Ordering::Relaxed);
+        self.clone().ended();
         if !was_alive || STOPPING.load(Ordering::Relaxed) {
             return;
         }
@@ -789,4 +912,26 @@ pub fn describe(name: &str) -> Option<Value> {
             "actions": limb.tools.iter().map(|tool| tool["name"].clone()).collect::<Vec<_>>(),
         })
     })
+}
+
+/// 各个能力对外开的入口（登记进 instances/）：[{capability, kind, url, …}]
+pub fn endpoints() -> Vec<Value> {
+    let mut all = Vec::new();
+    for capability in native() {
+        for endpoint in &capability.endpoints {
+            let mut entry = endpoint.clone();
+            if entry.is_object() {
+                entry["capability"] = json!(capability.name);
+                all.push(entry);
+            }
+        }
+    }
+    all
+}
+
+/// 接着的能力名（登记用）
+pub fn names() -> Vec<String> {
+    let mut names: Vec<String> = native().iter().map(|capability| capability.name.clone()).collect();
+    names.extend(mcp::all().iter().map(|limb| limb.name.clone()));
+    names
 }

@@ -15,9 +15,18 @@ EDITH 是大脑；**能力**是它的四肢：耳朵、嘴、手、聊天渠道�
 
 ## 1. 传输
 
-**EDITH 只认一种接法：本机进程 + stdio。** 网络（WebSocket、HTTP、MQTT、串口……）都由能力自己去接，大脑不碰。
+**大脑不碰网络**：WebSocket、HTTP、MQTT、串口、蓝牙……都由能力自己去接（比如 [WebSocket 能力](WEBSOCKET.md)）。
+协议本身和怎么连无关，EDITH 认两种本机的接法，消息一模一样：
 
-- EDITH 按 `~/.edith/capabilities.json`（[§8](#8-配置capabilitiesjson)）起能力的进程。
+1. **stdio**（主要的）：EDITH 按 `capabilities.json`（[§8](#8-配置capabilitiesjson)）起能力的进程，经它的标准输入 / 输出讲；
+2. **本机接入**：自己打开的程序（终端 `edith attach`、桌面端……）连到在跑的大脑上。每个大脑在 `127.0.0.1` 的随机端口上等，
+   地址和令牌写在 `~/.edith/instances/<目录的键>-<进程号>.json`（只有本用户能读，[§8.2](#82-在跑的大脑instances)）。
+   连上后**第一行**先报令牌：`{"jsonrpc": "2.0", "method": "auth", "params": {"token": "…"}}`，不对就断开；
+   之后和 stdio 一样（EDITH 发 `initialize`……）。一条连接就是一个能力，断开就摘掉、不重启。
+
+下面说 stdio，本机接入只是把「标准输入 / 输出」换成这条 TCP 连接（日志用 `log` 通知）。
+
+- EDITH 按配置起能力的进程。
 - **标准输入 / 标准输出**：协议消息，**一行一条 JSON**（UTF-8，以 `\n` 结尾；JSON 里的换行要转义成 `\n`，不能有裸换行）。
   空行忽略。不是 JSON 的行 EDITH 回 `-32700` 并记日志。
 - **标准错误**：日志，随便写；EDITH 逐行记进 `~/.edith/logs/<能力名>.log`（`edith -v` 时也打到终端）。
@@ -70,13 +79,14 @@ EDITH                                  能力
 ```json
 {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
   "protocolVersion": "1",
-  "brain": {"name": "EDITH", "version": "0.1.0", "model": "qwen-max"},
+  "brain": {"name": "EDITH", "version": "0.1.0", "model": "qwen-max", "id": "3f9a0c1b2d4e5f60", "workspace": "/Users/me/project"},
   "name": "ear",
   "focus": "5d0c…（焦点会话的 id，可能是空字符串）"
 }}
 ```
 
-- `name`：EDITH 给这个能力起的名字（配置里的 `name`）。它的动作在模型那里叫 `<name>__<动作名>`。
+- `brain.id`：这个大脑的 id（工作目录的键，同一个目录重启后不变）；`brain.workspace`：它管的目录。连着几个大脑的能力（共享设备）靠它分清是谁。
+- `name`：EDITH 给这个能力起的名字（配置里的 `name`；本机接入连进来的是空字符串，用它回的 `name`）。它的动作在模型那里叫 `<name>__<动作名>`。
 - `focus`：现在的焦点会话（[§5](#5-会话与焦点)）。
 
 能力回话（30 秒内，否则 EDITH 当它没起来）：
@@ -103,6 +113,8 @@ EDITH                                  能力
 | `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?}]`。`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600 |
 | `receives` | 否 | 要收哪些事件（[§7](#7-事件event)）；`["*"]` 是全部，不写是都不要 |
 | `sessions` | 否 | `"all"`（默认）：所有会话的事件；`"focus"`：只要焦点会话的 |
+| `name` | 否 | 只对本机接入连进来的：想叫什么（重名的 EDITH 加 `-2`、`-3`……） |
+| `endpoints` | 否 | 它对外开的入口：`[{kind, url}]`（比如 `{"kind": "websocket", "url": "ws://127.0.0.1:52731"}`），EDITH 登记进 `instances/`，`edith instances` 列得出来 |
 
 模型的系统提示里会列出每个能力：名字、标题、有哪些动作、会主动传来什么。
 
@@ -212,9 +224,9 @@ EDITH                                  能力
 
 ## 5. 会话与焦点
 
-- **会话**：一段持续的对话（历史、工作目录），存在 `~/.edith/sessions/<id>.json`。工具的相对路径按会话的工作目录算。
-- **焦点会话**：没指明会话的话交给它。`edith "…"` / `edith` 时是这次开的会话；`edith run` 时是**主会话**
-  （id 记在 `~/.edith/main-session`，第一次在 `run` 的目录新开）。能力可以用 `sessions.focus` 换焦点。
+- **按目录工作**：一个大脑管一个目录（工作目录），会话存在 `<工作目录>/.edith/sessions/<id>.json`。工具的相对路径按会话的工作目录算。
+- **焦点会话**：没指明会话的话交给它。`edith "…"` / `edith` 时是这次新开的会话；`edith run` 时是这个目录的**主会话**
+  （id 记在 `<工作目录>/.edith/main-session`）。能力可以用 `sessions.focus` 换焦点。
 
 ## 6. EDITH → 能力
 
@@ -282,7 +294,8 @@ EDITH 要它退出（[§3.3](#33-结束)）。
 
 ## 8. 配置：`capabilities.json`
 
-`~/.edith/capabilities.json`（`EDITH_HOME` 换了就跟着换）：
+两层，合起来用：**全局** `~/.edith/capabilities.json`（`EDITH_HOME` 换了就跟着换；所有目录都接）+ **目录**
+`<工作目录>/.edith/capabilities.json`（只有这个目录接）。同名的以目录为准；目录里只写 `{"name": "x", "disabled": true}` 就是在这个目录关掉全局的 x。
 
 ```json
 {"capabilities": [
@@ -303,16 +316,33 @@ EDITH 要它退出（[§3.3](#33-结束)）。
 | `restart` | 崩了要不要重启，默认 `true`（只对本协议的能力） |
 | `disabled` | `true`：不接 |
 
-命令行：
+能力进程的工作目录默认是大脑的工作目录，环境变量里有 `EDITH_WORKSPACE`（工作目录）、`EDITH_CAPABILITY`（能力名）。
+
+命令行（默认改这个目录那层，加 `--global` 改全局那层）：
 
 ```
-edith capabilities                                  列出能力（会先接上它们，看得到动作、感知、订的事件）
+edith capabilities                                  列出能力（全局的 + 这个目录的；会先接上它们，看得到动作、感知、订的事件）
 edith capabilities add <名字> <命令> [参数…]         接一个讲本协议的程序（接得上才记进配置）
 edith capabilities add-mcp <名字> <命令> [参数…]     接一个本机的 MCP 服务
 edith capabilities add-mcp-url <名字> <地址>          接一个 HTTP 的 MCP 服务
 edith capabilities remove <名字>                     去掉
 edith run                                           一直开着，只听能力的（主会话是焦点）
 ```
+
+这个目录有大脑在跑时，`edith capabilities` 不另起一份（独占的设备会撞），`add` / `remove` 只改配置，那个大脑重启后生效。
+
+### 8.2 在跑的大脑（`instances/`）
+
+每个在跑的大脑写一份 `~/.edith/instances/<目录的键>-<进程号>.json`（只有本用户能读）：
+
+```json
+{"id": "3f9a0c1b2d4e5f60", "workspace": "/Users/me/project", "pid": 4242, "version": "0.1.0",
+ "address": "127.0.0.1:52710", "token": "…", "started": "2026-10-24T15:02:11+08:00",
+ "capabilities": ["ear", "ws"], "endpoints": [{"capability": "ws", "kind": "websocket", "url": "ws://127.0.0.1:52731"}]}
+```
+
+`address` / `token` 是本机接入（[§1](#1-传输)）；`endpoints` 是能力报的入口。进程没了的登记在 `edith instances` 列出时清掉。
+想找某个目录的大脑、它的 WebSocket 地址，读这里。
 
 ## 9. MCP 能力
 

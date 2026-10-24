@@ -214,6 +214,7 @@ dependencies = [
  "friday-core",
  "libc",
  "serde_json",
+ "sha2",
  "tungstenite",
  "ureq",
  "uuid",

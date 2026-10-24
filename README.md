@@ -10,8 +10,10 @@
 - 示例能力：[examples/notes.py](examples/notes.py)（动作）、[examples/inbox.py](examples/inbox.py)（主动推内容 + 收事件）
 
 ```bash
-edith "把 src 里的 TODO 列成清单"      # 在当前目录干一件事
-edith                                 # 一句一句聊（干活时再打字算补充）
+edith "把 src 里的 TODO 列成清单"      # 在这个目录干一件事（数据在 ./.edith；这个目录已经有大脑在干活就自动开 git worktree）
+edith .                               # 一句一句聊（干活时再打字算补充）
+edith attach                          # 接到这个目录正在跑的大脑上
+edith instances                       # 这台机器上在跑的大脑
 edith capabilities add inbox python3 -u examples/inbox.py ~/edith-inbox   # 接一个能力
 edith capabilities add ws edith-websocket --listen 127.0.0.1:7789         # 让网页、手机连进来
 edith capabilities add-mcp fs npx -y @modelcontextprotocol/server-filesystem ~/Documents   # 接一个 MCP 服务
@@ -25,7 +27,8 @@ edith run                             # 一直开着，只听能力的
 
 ```
 src/            main（命令行）、mind（调度：会话、急缓、事件）、brain（一轮对话）、tools（自带工具）、
-                capabilities + protocol（能力协议）、mcp（MCP 能力）、sessions、http、home
+                capabilities + protocol（能力协议）、mcp（MCP 能力）、instance（本机接入、登记）、attach（接上去的终端）、
+                worktree（目录忙时开 git worktree）、terminal（终端上的样子）、sessions、http、home
 capabilities/   websocket/：edith-websocket（WebSocket 能力，只讲能力协议）
 examples/       示例能力（Python 标准库）
 prompts/        提示词：edith.md 是 EDITH 自己的；prompts-tools.md、prompts-framework.md 抄自 Friday（工具说明、循环里的提醒）

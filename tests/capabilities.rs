@@ -134,7 +134,7 @@ fn sense_starts_a_turn_and_notes() {
     let requests = std::fs::read_to_string(home.join("requests.jsonl")).unwrap();
     assert!(requests.contains("由能力「cap」（speech）传来，说话的是 小明"), "{requests}");
     let id = sessions[0]["id"].as_str().unwrap();
-    let stored = std::fs::read_to_string(home.join("sessions").join(format!("{id}.json"))).unwrap();
+    let stored = std::fs::read_to_string(work.join(".edith").join("sessions").join(format!("{id}.json"))).unwrap();
     assert!(stored.contains("明天下雨") && stored.contains("不用回复"), "{stored}");
 }
 
@@ -191,15 +191,27 @@ fn interject_joins_the_running_turn() {
 fn websocket_capability_bridges_remote_clients() {
     let (work, home) = scratch("websocket");
     let model = fake_model(&home.join("requests.jsonl"));
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    // 端口让它自己挑：地址在 ~/.edith/instances/ 的登记里（它握手时报的 endpoints）
     let config = json!({ "capabilities": [{
         "name": "ws",
         "command": env!("CARGO_BIN_EXE_edith-websocket"),
-        "args": ["--listen", format!("127.0.0.1:{port}"), "--token", "secret"],
+        "args": ["--token", "secret"],
     }]});
     std::fs::write(home.join("capabilities.json"), config.to_string()).unwrap();
     let _edith = run(&home, model.port, &work);
-    let url = format!("ws://127.0.0.1:{port}/?token=secret&name=phone");
+    let mut base = String::new();
+    assert!(wait_until(20, || {
+        let entries = std::fs::read_dir(home.join("instances")).into_iter().flatten().flatten();
+        for entry in entries {
+            let value: Value = serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap_or_default()).unwrap_or(Value::Null);
+            if let Some(url) = value["endpoints"][0]["url"].as_str() {
+                base = url.to_string();
+                return true;
+            }
+        }
+        false
+    }));
+    let url = format!("{base}/?token=secret&name=phone");
     let mut socket = None;
     assert!(wait_until(20, || {
         socket = tungstenite::connect(&url).ok().map(|(socket, _)| socket);
@@ -207,7 +219,7 @@ fn websocket_capability_bridges_remote_clients() {
     }));
     let mut socket = socket.unwrap();
     // 令牌不对连不上
-    assert!(tungstenite::connect(format!("ws://127.0.0.1:{port}/?token=wrong")).is_err());
+    assert!(tungstenite::connect(format!("{base}/?token=wrong")).is_err());
     let send =
         |socket: &mut tungstenite::WebSocket<_>, message: Value| socket.send(tungstenite::Message::text(message.to_string())).unwrap();
     send(&mut socket, request(1, "ask", json!({ "text": "只聊天" })));

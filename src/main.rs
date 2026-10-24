@@ -1,15 +1,21 @@
 //! EDITH：下一代的大脑（docs/EDITH.md）。给它用户的话，它自己调模型、用工具把事做完；
-//! 能力（四肢）是本机起的进程，经 stdio 讲能力协议（docs/CAPABILITY-PROTOCOL.md），双向实时：没有能力也能干活，接上了更强。
+//! 能力（四肢）讲能力协议（docs/CAPABILITY-PROTOCOL.md），双向实时：没有能力也能干活，接上了更强。
+//! 按目录工作（`edith .`）：数据在 <目录>/.edith；目录不加锁——这个目录已经有大脑在干活时，新起的大脑自动开一个
+//! git worktree 去那里干（worktree.rs，`--here` 不开）；想接到一个正在跑的大脑上用 `edith attach`。
 
+mod attach;
 mod brain;
 mod capabilities;
 mod home;
 mod http;
+mod instance;
 mod mcp;
 mod mind;
 mod protocol;
 mod sessions;
+mod terminal;
 mod tools;
+mod worktree;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
@@ -18,27 +24,33 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use mind::{Envelope, Origin, Urgency};
+use mind::{Origin, Urgency};
 use sessions::Session;
+use terminal::Printer;
 
-const HELP: &str = "EDITH——能自己把事做完的大脑
+const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作：数据在 <目录>/.edith（往上找，到 git 仓库根为止；
+都没有就是当前目录）。这个目录已经有大脑在干活时，新起的大脑自动开一个 git worktree（.edith/worktrees/，
+分支 edith/<编号>）去那里干，互不干扰；--here 不开。
 
 用法：
-  edith \"要做的事\"                 在当前目录干一件事
-  edith                            一句一句聊（同一个会话；干活时再打字算补充；空行或 Ctrl+D 结束）
-  edith -c <会话 id> \"…\"           接着某个会话（id 写开头几位就行）
-  edith run                        一直开着，只听能力的（主会话；Ctrl+C 退出）
-  edith sessions                   列出会话
-  edith capabilities               列出能力（会先接上它们）
-  edith capabilities add <名字> <命令> [参数…]       接一个讲能力协议的程序（记进 ~/.edith/capabilities.json）
+  edith \"要做的事\"                 在这个目录干一件事（新开一个会话）
+  edith [目录]                     一句一句聊（新开一个会话；干活时再打字算补充；空行或 Ctrl+D 结束）
+  edith -c <会话 id> [\"…\"]         接着某个会话（id 写开头几位就行）
+  edith run [目录]                 一直开着，只听能力的（这个目录的主会话；Ctrl+C 退出）
+  edith attach [目录] [\"…\"]        接到这个目录正在跑的大脑上（一句一句聊，或干一件事就退）
+  edith sessions                   列出这个目录的会话
+  edith instances                  列出这台机器上在跑的大脑
+  edith capabilities               列出能力（全局的 + 这个目录的）
+  edith capabilities add <名字> <命令> [参数…]       接一个讲能力协议的程序（记进这个目录；--global 记进全局）
   edith capabilities add-mcp <名字> <命令> [参数…]   接一个本机的 MCP 服务
   edith capabilities add-mcp-url <名字> <地址>        接一个 HTTP 的 MCP 服务
-  edith capabilities remove <名字>                    去掉
+  edith capabilities remove <名字>                    去掉（--global 从全局去掉）
 
 选项：
   -C, --cwd <目录>    工作目录（默认当前目录）
   -q, --quiet         只打最终回答，不打过程
   -v, --verbose       也打思考、每段请求的用量、能力的日志
+  --here              这个目录有大脑在干活也不开 worktree，就在这里一起干
 
 模型：~/.edith/config.json 的 {\"baseURL\", \"apiKey\", \"model\"}，或环境变量 EDITH_BASE_URL / EDITH_API_KEY / EDITH_MODEL
 能力协议：docs/CAPABILITY-PROTOCOL.md";
@@ -61,6 +73,13 @@ fn install_interrupt() {
 #[cfg(not(unix))]
 fn install_interrupt() {}
 
+/// 收拾好退出：关能力、删登记
+fn shutdown(code: i32) -> ! {
+    capabilities::stop_all();
+    instance::release();
+    std::process::exit(code);
+}
+
 /// 收 Ctrl+C：在干活就停下这一轮，闲着（或 exit_anyway）就收拾好退出
 fn watch_interrupt(exit_anyway: bool) {
     std::thread::spawn(move || {
@@ -75,43 +94,101 @@ fn watch_interrupt(exit_anyway: bool) {
                 INTERRUPTED.store(false, Ordering::SeqCst);
                 continue;
             }
-            capabilities::stop_all();
-            std::process::exit(130);
+            shutdown(130);
         }
     });
 }
 
 struct Options {
+    /// 当前目录（新会话的工作目录）
     cwd: PathBuf,
+    /// 明说了的目录（edith <目录>、edith run <目录>、-C）：就用它当工作目录，不往上找
+    explicit: bool,
     quiet: bool,
     verbose: bool,
     session: Option<String>,
+    global: bool,
+    here: bool,
     words: Vec<String>,
 }
 
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    match arguments.first().map(String::as_str) {
-        Some("-h" | "--help" | "help") => println!("{HELP}"),
-        Some("-V" | "--version") => println!("edith {}", env!("CARGO_PKG_VERSION")),
-        Some("sessions") => list_sessions(),
-        Some("capabilities" | "caps") => {
+    if matches!(arguments.first().map(String::as_str), Some("-h" | "--help" | "help")) {
+        println!("{HELP}");
+        return;
+    }
+    if matches!(arguments.first().map(String::as_str), Some("-V" | "--version")) {
+        println!("edith {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    let mut options = match parse(&arguments) {
+        Ok(options) => options,
+        Err(message) => return exit_on(Err(message)),
+    };
+    let command = options.words.first().cloned().unwrap_or_default();
+    // edith run <目录>、edith attach <目录> […]、edith <目录>：明说的工作目录
+    let directory_argument = match command.as_str() {
+        "run" | "attach" => options.words.get(1).filter(|word| std::path::Path::new(word).is_dir()).cloned(),
+        _ if options.words.len() == 1 && std::path::Path::new(&command).is_dir() => Some(command.clone()),
+        _ => None,
+    };
+    if let Some(directory) = directory_argument {
+        match std::fs::canonicalize(&directory) {
+            Ok(path) => {
+                options.cwd = path;
+                options.explicit = true;
+            }
+            Err(_) => return exit_on(Err(format!("目录不存在：{directory}"))),
+        }
+        if matches!(command.as_str(), "run" | "attach") {
+            options.words.remove(1);
+        } else {
+            options.words.clear();
+        }
+    }
+    let mut workspace = if options.explicit { options.cwd.clone() } else { home::find_workspace(&options.cwd) };
+    // 要起大脑的（干活、聊天、run）：这个目录已经有大脑在干活就开 worktree 去那里
+    let starts_brain = !matches!(command.as_str(), "sessions" | "instances" | "capabilities" | "caps" | "attach");
+    if starts_brain && !options.here && !instance::running_in(&workspace).is_empty() {
+        match worktree::create(&workspace) {
+            Ok(tree) => {
+                eprintln!(
+                    "\x1b[2m（{} 已经有大脑在干活：在 git worktree {} 里接着干，分支 {}；干完要合并就 git merge {}）\x1b[0m",
+                    workspace.display(),
+                    tree.path.display(),
+                    tree.branch,
+                    tree.branch
+                );
+                options.cwd = worktree::map_cwd(&options.cwd, &workspace, &tree.path);
+                workspace = tree.path;
+            }
+            Err(reason) => {
+                eprintln!("\x1b[33m{} 已经有大脑在干活，开不了 worktree（{reason}），就在这里一起干\x1b[0m", workspace.display())
+            }
+        }
+    }
+    home::set_workspace(workspace);
+    match command.as_str() {
+        "sessions" if options.words.len() == 1 => list_sessions(),
+        "instances" if options.words.len() == 1 => list_instances(),
+        "capabilities" | "caps" => {
             brain::setup_prompts();
-            let result = capabilities_command(&arguments[1..]);
+            let rest: Vec<String> = options.words[1..].to_vec();
+            let result = capabilities_command(&rest, options.global);
             capabilities::stop_all();
             exit_on(result);
         }
-        _ => match parse(&arguments) {
-            Ok(options) if options.words.first().map(String::as_str) == Some("run") && options.words.len() == 1 => exit_on(run(options)),
-            Ok(options) => exit_on(work(options)),
-            Err(message) => exit_on(Err(message)),
-        },
+        "run" if options.words.len() == 1 => exit_on(run(options)),
+        "attach" => exit_on(attach_to(options)),
+        _ => exit_on(work(options)),
     }
 }
 
 fn exit_on(result: Result<(), String>) {
     if let Err(message) = result {
         eprintln!("edith：{message}");
+        instance::release();
         std::process::exit(1);
     }
 }
@@ -119,17 +196,25 @@ fn exit_on(result: Result<(), String>) {
 fn parse(arguments: &[String]) -> Result<Options, String> {
     let mut options = Options {
         cwd: std::env::current_dir().map_err(|error| error.to_string())?,
+        explicit: false,
         quiet: false,
         verbose: false,
         session: None,
+        global: false,
+        here: false,
         words: Vec::new(),
     };
     let mut rest = arguments.iter();
     while let Some(argument) = rest.next() {
         match argument.as_str() {
-            "-C" | "--cwd" => options.cwd = PathBuf::from(rest.next().ok_or("-C 后面要跟目录")?),
+            "-C" | "--cwd" => {
+                options.cwd = PathBuf::from(rest.next().ok_or("-C 后面要跟目录")?);
+                options.explicit = true;
+            }
             "-q" | "--quiet" => options.quiet = true,
             "-v" | "--verbose" => options.verbose = true,
+            "--global" => options.global = true,
+            "--here" => options.here = true,
             "-c" | "--continue" => options.session = Some(rest.next().ok_or("-c 后面要跟会话 id")?.clone()),
             "--" => options.words.extend(rest.by_ref().cloned()),
             other if other.starts_with('-') && options.words.is_empty() => return Err(format!("不认识的选项 {other}（edith --help）")),
@@ -144,47 +229,76 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
+/// 起这个目录的大脑：接能力、开本机接入
 fn prepare() -> Result<(), String> {
     home::Model::load()?;
     brain::setup_prompts();
-    capabilities::start_all(&mut |message| eprintln!("\x1b[33m{message}\x1b[0m"));
     install_interrupt();
+    instance::serve()?;
+    capabilities::start_all(&mut |message| eprintln!("\x1b[33m{message}\x1b[0m"));
     Ok(())
 }
 
-/// edith run：一直开着，干活的事都由能力交来（主会话是焦点）
+/// edith run：一直开着，干活的事都由能力交来（这个目录的主会话是焦点）
 fn run(options: Options) -> Result<(), String> {
     prepare()?;
-    let session = sessions::main_session(&options.cwd.to_string_lossy())?;
+    let session = sessions::main_session(&home::workspace().to_string_lossy())?;
     mind::set_focus(&session.id);
-    let printer = Arc::new(Mutex::new(Printer::new(&options)));
-    let shown = printer.clone();
-    mind::listen(move |envelope| shown.lock().unwrap().show(envelope, true));
+    let printer = Arc::new(Mutex::new(Printer::new(options.quiet, options.verbose)));
+    mind::listen(move |envelope| printer.lock().unwrap().show(envelope.kind, &envelope.session, &envelope.data, true));
     watch_interrupt(true);
-    eprintln!("EDITH 开着（主会话 {}，{} 个能力）。Ctrl+C 退出。", &session.id[..8], capability_count());
+    eprintln!(
+        "EDITH 在 {} 开着（主会话 {}，{} 个能力）。Ctrl+C 退出。",
+        home::workspace().display(),
+        &session.id[..8],
+        capabilities::names().len()
+    );
     loop {
         std::thread::park();
     }
 }
 
-fn capability_count() -> usize {
-    capabilities::configs().iter().filter(|config| config.get("disabled").and_then(Value::as_bool) != Some(true)).count()
+/// 要做的事：参数 + 管道送进来的
+fn task(options: &Options) -> Result<Option<String>, String> {
+    let mut task = options.words.join(" ");
+    let piped = !std::io::stdin().is_terminal();
+    if piped {
+        let mut input = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).map_err(|error| error.to_string())?;
+        if !input.trim().is_empty() {
+            task = if task.is_empty() { input } else { format!("{task}\n\n{input}") };
+        }
+        if task.trim().is_empty() {
+            return Err("没有要做的事".into());
+        }
+    }
+    Ok(if task.trim().is_empty() { None } else { Some(task) })
+}
+
+/// edith attach：接到这个目录正在跑的大脑上（几个的话接最新起的那个）
+fn attach_to(mut options: Options) -> Result<(), String> {
+    options.words.remove(0);
+    let task = task(&options)?;
+    let running = instance::running_in(&home::workspace());
+    let entry = running.first().ok_or_else(|| format!("{} 没有在跑的大脑（edith instances 看有哪些）", home::workspace().display()))?;
+    install_interrupt();
+    attach::run(entry, task, options.quiet, options.verbose, &INTERRUPTED)
 }
 
 fn work(options: Options) -> Result<(), String> {
+    let task = task(&options)?;
     let model = home::Model::load()?;
     prepare()?;
     let mut session = match &options.session {
         Some(id) => Session::find(id).ok_or_else(|| format!("没有会话 {id}（edith sessions 看有哪些）"))?,
         None => Session::new(&options.cwd.to_string_lossy()),
     };
-    if options.session.is_none() || !std::path::Path::new(&session.cwd).is_dir() {
+    if !std::path::Path::new(&session.cwd).is_dir() {
         session.cwd = options.cwd.to_string_lossy().into_owned();
     }
     session.save()?;
     mind::set_focus(&session.id);
-    let printer = Arc::new(Mutex::new(Printer::new(&options)));
-    let shown = printer.clone();
+    let printer = Arc::new(Mutex::new(Printer::new(options.quiet, options.verbose)));
     let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let failed = failure.clone();
     let session_id = session.id.clone();
@@ -195,36 +309,23 @@ fn work(options: Options) -> Result<(), String> {
         if envelope.kind == "done" {
             *failed.lock().unwrap() = envelope.data["error"].as_str().map(str::to_string);
         }
-        shown.lock().unwrap().show(envelope, false);
+        printer.lock().unwrap().show(envelope.kind, &envelope.session, &envelope.data, false);
     });
-    let mut task = options.words.join(" ");
-    // 管道送进来的整段当成要做的事（前面有参数的接在后面）
-    let piped = !std::io::stdin().is_terminal();
-    if piped {
-        let mut input = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).map_err(|error| error.to_string())?;
-        if !input.trim().is_empty() {
-            task = if task.is_empty() { input } else { format!("{task}\n\n{input}") };
-        }
-    }
-    if !task.trim().is_empty() || piped {
-        if task.trim().is_empty() {
-            return Err("没有要做的事".into());
-        }
-        watch_interrupt(false);
+    watch_interrupt(false);
+    if let Some(task) = task {
         mind::submit(&session.id, &task, Origin::terminal(), Urgency::Queue, None)?;
         // 干完（中途能力补充、排着的也干完）再退出
         std::thread::sleep(std::time::Duration::from_millis(50));
         mind::wait_idle(&session.id);
         capabilities::stop_all();
+        instance::release();
         if !options.quiet {
             eprintln!("\x1b[2m（会话 {}，接着做：edith -c {} \"…\"）\x1b[0m", &session.id[..8], &session.id[..8]);
         }
         return failure.lock().unwrap().take().map_or(Ok(()), Err);
     }
     // 一句一句聊：闲着时打的开始一轮，干活时打的补充进这一轮
-    watch_interrupt(false);
-    eprintln!("EDITH（{}）在 {}。说要做的事；干活时再打字算补充；空行或 Ctrl+D 结束。", model.model, session.cwd);
+    eprintln!("EDITH（{}）在 {}。说要做的事；干活时再打字算补充；空行或 Ctrl+D 结束。", model.model, home::workspace().display());
     let stdin = std::io::stdin();
     loop {
         if mind::working(&session.id).is_none() {
@@ -249,6 +350,7 @@ fn work(options: Options) -> Result<(), String> {
     }
     mind::wait_idle(&session.id);
     capabilities::stop_all();
+    instance::release();
     eprintln!("\x1b[2m（会话 {}）\x1b[0m", &session.id[..8]);
     Ok(())
 }
@@ -265,189 +367,114 @@ fn stdin_ready() -> bool {
     true
 }
 
-/// 终端上的样子：回答打到标准输出，过程（工具、提示、能力交来的话）打到标准错误
-struct Printer {
-    quiet: bool,
-    verbose: bool,
-    thinking: bool,
-    line_start: bool,
-}
-
-impl Printer {
-    fn new(options: &Options) -> Printer {
-        Printer { quiet: options.quiet, verbose: options.verbose, thinking: false, line_start: true }
-    }
-
-    fn out(&mut self, text: &str) {
-        print!("{text}");
-        let _ = std::io::stdout().flush();
-        self.line_start = text.ends_with('\n');
-    }
-
-    fn side(&mut self, text: &str) {
-        if self.thinking {
-            self.thinking = false;
-            eprint!("\x1b[0m");
-        }
-        if !self.line_start {
-            println!();
-            self.line_start = true;
-        }
-        eprintln!("{text}");
-    }
-
-    /// all_sessions：edith run 打所有会话的（前面标上会话）
-    fn show(&mut self, envelope: &Envelope, all_sessions: bool) {
-        let data = &envelope.data;
-        if self.quiet {
-            if envelope.kind == "done" {
-                println!("{}", data["answer"].as_str().unwrap_or("").trim());
-            }
-            return;
-        }
-        let tag = if all_sessions { format!("[{}] ", &envelope.session[..8.min(envelope.session.len())]) } else { String::new() };
-        match envelope.kind {
-            "turn.started" => {
-                let origin = &data["origin"];
-                let capability = origin["capability"].as_str().unwrap_or("");
-                if !capability.is_empty() || all_sessions {
-                    let from = origin["from"].as_str().filter(|from| !from.is_empty()).map(|from| format!(" {from}")).unwrap_or_default();
-                    let source = if capability.is_empty() { "终端".to_string() } else { format!("能力「{capability}」") };
-                    let text = data["text"].as_str().unwrap_or("").chars().take(200).collect::<String>();
-                    self.side(&format!("\x1b[35m{tag}◂ {source}{from}：{text}\x1b[0m"));
-                }
-            }
-            "text" => {
-                if self.thinking {
-                    self.thinking = false;
-                    eprintln!("\x1b[0m");
-                }
-                self.out(data["text"].as_str().unwrap_or(""));
-            }
-            "thinking" if self.verbose => {
-                if !self.thinking {
-                    self.thinking = true;
-                    eprint!("\x1b[2m");
-                }
-                eprint!("{}", data["text"].as_str().unwrap_or(""));
-            }
-            "tool" => {
-                let brief = brief(&data["arguments"]);
-                self.side(&format!("\x1b[36m{tag}▸ {}\x1b[0m {brief}", data["name"].as_str().unwrap_or("")));
-            }
-            "result" => {
-                let text = data["text"].as_str().unwrap_or("");
-                let first = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").chars().take(100).collect::<String>();
-                let mark = if data["ok"].as_bool() == Some(true) { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
-                self.side(&format!("  {mark} \x1b[2m{first}\x1b[0m"));
-            }
-            "stats" if self.verbose => {
-                let line = format!(
-                    "  · 输入 {} token、输出 {} token",
-                    data["promptTokens"].as_i64().unwrap_or(0),
-                    data["generatedTokens"].as_i64().unwrap_or(0)
-                );
-                self.side(&format!("\x1b[2m{line}\x1b[0m"));
-            }
-            "notice" => self.side(&format!("\x1b[33m{tag}{}\x1b[0m", data["text"].as_str().unwrap_or(""))),
-            "done" => {
-                if !self.line_start {
-                    println!();
-                    self.line_start = true;
-                }
-                if data["stopped"].as_bool() == Some(true) {
-                    self.side("\x1b[33m（停下了）\x1b[0m");
-                }
-                if let Some(error) = data["error"].as_str() {
-                    self.side(&format!("\x1b[31m{error}\x1b[0m"));
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// 工具参数的一行简述（路径、命令、关键词……）
-fn brief(arguments: &Value) -> String {
-    for key in ["command", "path", "pattern", "keywords", "url", "query", "text"] {
-        if let Some(text) = arguments.get(key).and_then(Value::as_str) {
-            let line = text.lines().next().unwrap_or("");
-            let clipped: String = line.chars().take(90).collect();
-            return if clipped.len() < text.len() { format!("{clipped}…") } else { clipped };
-        }
-    }
-    let text = arguments.to_string();
-    if text == "{}" { String::new() } else { text.chars().take(90).collect() }
-}
-
 fn list_sessions() {
     let all = sessions::list();
     if all.is_empty() {
-        println!("还没有会话");
+        println!("{} 还没有会话", home::workspace().display());
     }
     for session in all {
         println!("{}  {}  {}  {}", &session.id[..8], session.updated.get(..16).unwrap_or(&session.updated), session.title, session.cwd);
     }
 }
 
-fn capabilities_command(arguments: &[String]) -> Result<(), String> {
+fn list_instances() {
+    let running = instance::list();
+    if running.is_empty() {
+        println!("没有在跑的大脑");
+    }
+    for entry in running {
+        let names: Vec<&str> = entry["capabilities"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        println!(
+            "{}  进程 {}  {}",
+            entry["workspace"].as_str().unwrap_or(""),
+            entry["pid"],
+            if names.is_empty() { "（没接能力）".into() } else { names.join("、") }
+        );
+        for endpoint in entry["endpoints"].as_array().into_iter().flatten() {
+            println!("  {}：{}", endpoint["capability"].as_str().unwrap_or(""), endpoint["url"].as_str().unwrap_or(""));
+        }
+    }
+}
+
+fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String> {
+    // 这个目录有大脑在跑：只看配置、不另起一份（独占的设备会撞）；改了配置要它重启才生效
+    let running = instance::running_in(&home::workspace()).into_iter().next();
     let added = |value: Value| {
         let name = value["name"].as_str().unwrap_or("").to_string();
         let actions = value["actions"].as_array().map_or(0, Vec::len);
         println!("接上了「{name}」：{actions} 个动作");
     };
+    let layer = if global { "全局" } else { "这个目录" };
     match arguments.first().map(String::as_str) {
         None | Some("list") => {
-            let reported = Arc::new(AtomicBool::new(false));
-            let flag = reported.clone();
-            capabilities::start_all(&mut |message| {
-                flag.store(true, Ordering::Relaxed);
-                eprintln!("{message}");
-            });
+            if running.is_none() {
+                capabilities::start_all(&mut |message| eprintln!("{message}"));
+            }
             let configs = capabilities::configs();
             if configs.is_empty() {
                 println!("还没有能力（edith capabilities add <名字> <命令> [参数…]）");
             }
+            let live: Vec<String> = match &running {
+                Some(entry) => entry["capabilities"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(),
+                None => capabilities::names(),
+            };
             for config in configs {
                 let name = capabilities::clean_name(config["name"].as_str().unwrap_or(""));
                 let protocol = config["protocol"].as_str().unwrap_or("edith");
+                let scope = if config["scope"] == "global" { "全局" } else { "目录" };
                 if config["disabled"].as_bool() == Some(true) {
-                    println!("{name}（{protocol}）：关掉了");
+                    println!("{name}（{protocol}，{scope}）：关掉了");
                     continue;
                 }
                 match capabilities::describe(&name) {
                     Some(info) => {
                         let list = |key: &str| {
-                            info[key].as_array().map(|items| items.iter().filter_map(|item| item.as_str().or(item["kind"].as_str())).collect::<Vec<_>>().join("、")).unwrap_or_default()
+                            info[key]
+                                .as_array()
+                                .map(|items| items.iter().filter_map(|item| item.as_str().or(item["kind"].as_str())).collect::<Vec<_>>().join("、"))
+                                .unwrap_or_default()
                         };
                         let title = info["info"]["title"].as_str().map(|title| format!(" {title}")).unwrap_or_default();
-                        println!("{name}（{protocol}）{title}");
-                        println!("  动作：{}", if list("actions").is_empty() { "（没有）".into() } else { list("actions") });
+                        let or_none = |text: String| if text.is_empty() { "（没有）".to_string() } else { text };
+                        println!("{name}（{protocol}，{scope}）{title}");
+                        println!("  动作：{}", or_none(list("actions")));
                         if protocol != "mcp" {
-                            println!("  感知：{}", if list("senses").is_empty() { "（没有）".into() } else { list("senses") });
-                            println!("  订的事件：{}", if list("receives").is_empty() { "（没有）".into() } else { list("receives") });
+                            println!("  感知：{}", or_none(list("senses")));
+                            println!("  订的事件：{}", or_none(list("receives")));
                         }
                     }
-                    None => println!("{name}（{protocol}）：没接上（日志在 ~/.edith/logs/{name}.log）"),
+                    None if live.contains(&name) => println!("{name}（{protocol}，{scope}）：接着（在正在跑的大脑上）"),
+                    None => println!("{name}（{protocol}，{scope}）：没接上（日志在 .edith/logs/{name}.log）"),
                 }
             }
             Ok(())
         }
-        Some("add") if arguments.len() >= 3 => {
-            added(capabilities::add(json!({ "name": arguments[1], "command": arguments[2], "args": arguments[3..] }))?);
-            Ok(())
-        }
-        Some("add-mcp") if arguments.len() >= 3 => {
-            added(capabilities::add(json!({ "name": arguments[1], "protocol": "mcp", "command": arguments[2], "args": arguments[3..] }))?);
-            Ok(())
-        }
-        Some("add-mcp-url") if arguments.len() == 3 => {
-            added(capabilities::add(json!({ "name": arguments[1], "protocol": "mcp", "url": arguments[2] }))?);
+        Some(verb @ ("add" | "add-mcp" | "add-mcp-url")) if arguments.len() >= 3 => {
+            let mut config = match verb {
+                "add" => json!({ "name": arguments[1], "command": arguments[2], "args": arguments[3..] }),
+                "add-mcp" => json!({ "name": arguments[1], "protocol": "mcp", "command": arguments[2], "args": arguments[3..] }),
+                _ => json!({ "name": arguments[1], "protocol": "mcp", "url": arguments[2] }),
+            };
+            if running.is_some() {
+                // 不在这里起它（正在跑的大脑那边会起）：只记配置
+                config["name"] = json!(capabilities::clean_name(&arguments[1]));
+                capabilities::save(config, global)?;
+                println!("记进了{layer}的配置；这个目录的大脑在跑，重启它后生效");
+                return Ok(());
+            }
+            added(capabilities::add(config, global)?);
             Ok(())
         }
         Some("remove") if arguments.len() == 2 => {
-            if capabilities::remove(&arguments[1]) { Ok(()) } else { Err(format!("没有能力「{}」", arguments[1])) }
+            if capabilities::remove(&arguments[1], global) {
+                if running.is_some() {
+                    println!("从{layer}的配置去掉了；这个目录的大脑在跑，重启它后生效");
+                }
+                Ok(())
+            } else {
+                Err(format!("{layer}的配置里没有能力「{}」", arguments[1]))
+            }
         }
-        _ => Err("用法：edith capabilities [add <名字> <命令> [参数…] | add-mcp <名字> <命令> [参数…] | add-mcp-url <名字> <地址> | remove <名字>]".into()),
+        _ => Err("用法：edith capabilities [add <名字> <命令> [参数…] | add-mcp <名字> <命令> [参数…] | add-mcp-url <名字> <地址> | remove <名字>] [--global]".into()),
     }
 }

@@ -27,34 +27,57 @@
 - **MCP**（`src/mcp.rs`）：`"protocol": "mcp"` 的能力，客户端是 friday-core 的 `mcp_client`。
 - **WebSocket 能力**（`capabilities/websocket/`，程序 `edith-websocket`）：[说明](WEBSOCKET.md)。
 
+## 按目录工作
+
+`edith .`：一个大脑管一个目录（工作目录），会话、能力、日志都在 `<目录>/.edith`。工作目录是从当前目录往上找到的第一个
+有 `.edith/` 的目录，**到 git 仓库的根为止**（git worktree 的根也算，所以每个 worktree 自成一个工作目录）；都没有就是当前目录。
+
+目录**不加锁**。这个目录已经有大脑在干活（`~/.edith/instances/` 里登记着）时，新起的大脑自动开一个 git worktree
+（`<仓库根>/.edith/worktrees/<编号>`，分支 `edith/<编号>`，从 HEAD 开）去那里干，互不干扰；在子目录里起的对应到 worktree
+的同一个子目录。`.edith/` 自动写进仓库的 `info/exclude`。worktree 和分支干完留着，由你合并（`git merge edith/<编号>`）或删掉。
+不是 git 仓库就在原目录一起干；`--here` 强制在原目录。想接到正在跑的那个大脑上（共用它的会话和能力）用 `edith attach`。
+
 ## 用法
 
 ```
-edith "把 src 里的 TODO 列成清单"        在当前目录干一件事（能力中途补充的、排着的也干完再退出）
-edith                                   一句一句聊；干活时再打字算补充；Ctrl+C 停下这一轮
+edith "把 src 里的 TODO 列成清单"        在这个目录干一件事（新会话；能力中途补充的、排着的也干完再退出）
+edith [目录]                            一句一句聊（新会话）；干活时再打字算补充；Ctrl+C 停下这一轮
 edith -c <会话 id> "接着把第二条做了"   接着某个会话
-edith run                               一直开着，只听能力的（主会话是焦点）
-edith sessions                          列出会话
-edith capabilities [add | add-mcp | add-mcp-url | remove]   管能力
+edith run [目录]                        一直开着，只听能力的（这个目录的主会话是焦点）
+edith attach [目录] ["…"]               接到这个目录正在跑的大脑上（经本机接入，自己当一个叫 terminal 的能力）
+edith sessions                          列出这个目录的会话
+edith instances                         列出这台机器上在跑的大脑、它们的能力和入口地址
+edith capabilities [add | add-mcp | add-mcp-url | remove] [--global]   管能力（默认这个目录那层）
 ```
 
 大脑用哪个模型：`~/.edith/config.json`（`{"baseURL", "apiKey", "model", "thinking"?, "temperature"?, "enableThinking"?, "supportsVision"?, "extraBody"?}`），
 环境变量 `EDITH_BASE_URL` / `EDITH_API_KEY` / `EDITH_MODEL` 盖掉同名的。
 
-数据目录 `~/.edith`（`EDITH_HOME` 换地方）：
+数据分两层。全局 `~/.edith`（`EDITH_HOME` 换地方）：
 
 | 文件 | 内容 |
 |---|---|
 | `config.json` | 模型 |
-| `capabilities.json` | 接哪些能力（[协议 §8](CAPABILITY-PROTOCOL.md#8-配置capabilitiesjson)） |
+| `capabilities.json` | 所有目录都接的能力（[协议 §8](CAPABILITY-PROTOCOL.md#8-配置capabilitiesjson)） |
+| `Prompts/` | 提示词（`edith.md` 是 EDITH 自己的；改了下一轮生效，改坏的段自动用自带的；friday-core 的 prompts 管合并） |
+| `instances/<目录的键>-<进程号>.json` | 在跑的大脑：目录、进程、本机接入的地址和令牌、能力、入口（[协议 §8.2](CAPABILITY-PROTOCOL.md#82-在跑的大脑instances)） |
+
+目录 `<工作目录>/.edith`：
+
+| 文件 | 内容 |
+|---|---|
+| `capabilities.json` | 只有这个目录接的能力（同名的盖掉全局的） |
 | `sessions/<id>.json` | 会话（OpenAI 格式的历史 + 标题、工作目录、时间） |
 | `main-session` | `edith run` 的主会话 id |
 | `logs/<能力名>.log` | 能力的标准错误、协议出错 |
-| `Prompts/` | 提示词（`edith.md` 是 EDITH 自己的；改了下一轮生效，改坏的段自动用自带的；friday-core 的 prompts 管合并） |
+| `worktrees/<编号>/` | 这个目录有大脑在干活时，新起的大脑开的 git worktree |
 
 ## 原型之后
 
 - 子智能体 / 工作流（规则已在 friday-core：`agents`、`team`、`workflow`、`liveness`、`delivery`）；交付检查（`delivery`、`turnCheck`）；
 - 记忆、任务状态、审批（`approval`）、密钥只以名字流转（`secret_guard`）；
 - 能力层的「本事」：能力声明自己能做「听录音」「生图」这类固定的本事，大脑挑由谁来做（Friday 的 Capability / Provider 规则）；
+- 共享设备服务：麦克风、摄像头、串口、机器人这类独占设备由一个常驻的设备服务持有，各个目录的大脑经通用的 stdio 中转
+  `edith-connect <设备>` 连它（没起就拉起、没人连一阵后自己退）；设备服务按能力协议给每个大脑各握一次手，
+  主动推的内容默认只推给「当前大脑」，占设备的动作先到先得、别的回「设备忙」（协议加错误码）；
 - 桌面端（Swift / Qt）改成 EDITH 的能力；远程机器只装 EDITH。

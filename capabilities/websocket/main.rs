@@ -2,7 +2,9 @@
 //! 它对外开一个 WebSocket 端口：远程的客户端（网页、手机、别的机器上的程序）连上来交事（ask / sense）、管会话、
 //! 实时收干活的过程（event）。它只讲协议、不用大脑的代码——别人照着文档也能写一个一样的。
 //!
-//! 用法：`edith capabilities add ws edith-websocket --listen 127.0.0.1:7789 --token <令牌>`
+//! 用法：`edith capabilities add ws edith-websocket [--listen 地址:端口] [--token <令牌>]`
+//! 默认 127.0.0.1 上系统挑的空端口（几个目录的大脑各接一个也不会撞）；实际地址在握手时报给 EDITH（endpoints），
+//! EDITH 登记进 ~/.edith/instances/，`edith instances` 看得到。
 //! 不是只听本机（127.0.0.1 / ::1 / localhost）时必须给令牌（或环境变量 EDITH_WEBSOCKET_TOKEN）。
 
 use std::collections::HashMap;
@@ -66,7 +68,7 @@ struct Settings {
 }
 
 fn settings() -> Result<Settings, String> {
-    let mut listen = "127.0.0.1:7789".to_string();
+    let mut listen = "127.0.0.1:0".to_string();
     let mut token = std::env::var("EDITH_WEBSOCKET_TOKEN").ok().filter(|token| !token.is_empty());
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -108,7 +110,8 @@ fn main() {
     // 握手（initialize → initialized）之后才接客户端
     let (ready_sender, ready) = mpsc::channel::<()>();
     let description = format!("在 ws://{address} 接远程客户端：交事（ask / sense）、管会话、实时收干活的过程");
-    std::thread::spawn(move || brain_loop(ready_sender, description));
+    let url = format!("ws://{address}");
+    std::thread::spawn(move || brain_loop(ready_sender, description, url));
     if ready.recv().is_err() {
         return;
     }
@@ -120,7 +123,7 @@ fn main() {
 }
 
 /// 读 EDITH 发来的（stdin 一行一条）
-fn brain_loop(ready: Sender<()>, description: String) {
+fn brain_loop(ready: Sender<()>, description: String, url: String) {
     let mut ready = Some(ready);
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -138,6 +141,7 @@ fn brain_loop(ready: Sender<()>, description: String) {
                     "actions": [],
                     "receives": ["*"],
                     "sessions": "all",
+                    "endpoints": [{ "kind": "websocket", "url": url }],
                 },
             })),
             (Some("ping"), Some(id)) => to_brain(&json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
