@@ -1,14 +1,21 @@
 # EDITH
 
-下一代的大脑（第一个原型）。给它用户的话，它自己调模型、用内置工具（读写改文件、找文件、搜内容、抓网页、跑命令）把事做完、存好会话；
-助手、聊天渠道、浏览器、本地模型、通话、桌面客户端都是**四肢**——经对外接口挂上来，没有四肢也能干活，挂上了能力更强。
-设计见 [docs/EDITH.md](docs/EDITH.md)。
+下一代的大脑（原型）。给它用户的话，它自己调模型、用内置工具（读写改文件、找文件、搜内容、抓网页、跑命令）把事做完、存好会话。
+助手、聊天渠道、浏览器、本地模型、通话、桌面客户端都是**能力**（四肢）：本机进程，经 stdio 和大脑**双向、实时**地通信——
+能力能主动把内容推给大脑（打断、补充、排队、只记下），大脑能让能力做动作、把干活的过程实时推给它。没有能力也能干活，接上了更强。
+
+- 设计：[docs/EDITH.md](docs/EDITH.md)
+- **能力协议（开放接口）**：[docs/CAPABILITY-PROTOCOL.md](docs/CAPABILITY-PROTOCOL.md)——任何语言照着写一个能力就能接上
+- WebSocket 能力（让网页、手机、别的机器连 EDITH）：[docs/WEBSOCKET.md](docs/WEBSOCKET.md)
+- 示例能力：[examples/notes.py](examples/notes.py)（动作）、[examples/inbox.py](examples/inbox.py)（主动推内容 + 收事件）
 
 ```bash
 edith "把 src 里的 TODO 列成清单"      # 在当前目录干一件事
-edith                                 # 一句一句聊
-edith limbs add fs npx -y @modelcontextprotocol/server-filesystem ~/Documents   # 挂一个 MCP 四肢
-edith serve --listen 127.0.0.1:7788   # 开对外接口（HTTP + SSE）
+edith                                 # 一句一句聊（干活时再打字算补充）
+edith capabilities add inbox python3 -u examples/inbox.py ~/edith-inbox   # 接一个能力
+edith capabilities add ws edith-websocket --listen 127.0.0.1:7789         # 让网页、手机连进来
+edith capabilities add-mcp fs npx -y @modelcontextprotocol/server-filesystem ~/Documents   # 接一个 MCP 服务
+edith run                             # 一直开着，只听能力的
 ```
 
 模型：`~/.edith/config.json` 写 `{"baseURL": "https://…/v1", "apiKey": "…", "model": "…"}`，或设环境变量
@@ -17,17 +24,20 @@ edith serve --listen 127.0.0.1:7788   # 开对外接口（HTTP + SSE）
 ## 目录
 
 ```
-src/            main（命令行）、brain（一轮对话）、tools（自带工具）、limbs（MCP 四肢）、server（对外接口）、sessions、http、home
+src/            main（命令行）、mind（调度：会话、急缓、事件）、brain（一轮对话）、tools（自带工具）、
+                capabilities + protocol（能力协议）、mcp（MCP 能力）、sessions、http、home
+capabilities/   websocket/：edith-websocket（WebSocket 能力，只讲能力协议）
+examples/       示例能力（Python 标准库）
 prompts/        提示词：edith.md 是 EDITH 自己的；prompts-tools.md、prompts-framework.md 抄自 Friday（工具说明、循环里的提醒）
 core/           子模块 integemjack/friday.core（Friday 的 Swift / Qt 两端也用它）：对话循环、请求体、流式解析、文件工具、MCP 客户端等规则
-tests/          端到端冒烟测试：tests/fake/ 里的假模型（OpenAI 流式）和假四肢（stdio MCP）
+tests/          端到端测试：tests/fake/ 里的假模型（OpenAI 流式）、假能力（cap.py）、假 MCP 服务（limb.py）
 ```
 
 ## 开发
 
 ```bash
 git clone --recursive https://github.com/integemjack/edith.git
-cargo test            # 要 python3（假模型、假四肢）
+cargo test            # 要 python3（假模型、假能力）
 cargo build --release
 ```
 

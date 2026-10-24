@@ -1,5 +1,5 @@
-//! 能力四肢：MCP 服务（stdio 或 Streamable HTTP）。挂上后它的工具和自带工具一起交给模型，名字前加「<四肢名>__」。
-//! `~/.edith/limbs.json`：`{"limbs": [{name, command, args?, env?, cwd?} | {name, url, headers?}, …]}`；运行中也能经对外接口挂上 / 摘下。
+//! MCP 能力：只会被调用、不会主动说话的能力（capabilities.json 里 `"protocol": "mcp"` 的项；stdio 或 Streamable HTTP）。
+//! 挂上后它的工具和自带工具一起交给模型，名字前加「<能力名>__」。哪些要挂、存在哪由 capabilities.rs 管。
 //! MCP 客户端是 friday-core 的 mcp_client；它的 HTTP 交给宿主发（mcpClient.httpPost 事件），EDITH 就是这个宿主。
 
 use std::collections::{BTreeMap, HashMap};
@@ -9,7 +9,7 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use friday_core::{events, mcp_client};
 use serde_json::{Map, Value, json};
 
-use crate::{home, tools::Outcome};
+use crate::tools::Outcome;
 
 const CONNECT_TIMEOUT_MS: u64 = 60_000;
 const CALL_TIMEOUT_MS: u64 = 10 * 60_000;
@@ -17,8 +17,6 @@ pub const SEPARATOR: &str = "__";
 
 pub struct Limb {
     pub name: String,
-    /// 挂它用的设置（limbs.json 里那一项）
-    pub config: Value,
     client: Arc<mcp_client::Client>,
     client_id: u64,
     /// 规整过的 MCP 工具（{name, description?, inputSchema, …}）
@@ -27,42 +25,12 @@ pub struct Limb {
 
 static LIMBS: LazyLock<RwLock<BTreeMap<String, Arc<Limb>>>> = LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
-fn path() -> std::path::PathBuf {
-    home::dir().join("limbs.json")
-}
-
-/// 四肢名只留字母、数字、-、_（工具名要合 OpenAI 的规矩）
-pub fn clean_name(name: &str) -> String {
-    let cleaned: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
-    cleaned.trim_matches('_').chars().take(24).collect()
-}
-
-/// 启动时把 limbs.json 里的都挂上（挂不上的打出原因、跳过）
-pub fn attach_saved(report: &mut dyn FnMut(String)) {
+/// 挂上一个 MCP 能力（同名的先摘下）；name 已经规整过
+pub fn attach(name: &str, config: Value) -> Result<Arc<Limb>, String> {
     install_http_host();
-    let configs = home::read_json(&path()).and_then(|value| value.get("limbs").cloned()).and_then(|limbs| limbs.as_array().cloned());
-    for config in configs.unwrap_or_default() {
-        let name = config.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-        if let Err(error) = attach(config, false) {
-            report(format!("四肢「{name}」挂不上：{error}"));
-        }
-    }
-}
-
-fn save() -> Result<(), String> {
-    let limbs: Vec<Value> = LIMBS.read().unwrap().values().map(|limb| limb.config.clone()).collect();
-    home::write_json(&path(), &json!({ "limbs": limbs }))
-}
-
-/// 挂上一个四肢（同名的先摘下）。remember：写进 limbs.json，下次启动自动挂
-pub fn attach(config: Value, remember: bool) -> Result<Arc<Limb>, String> {
-    install_http_host();
-    let object = config.as_object().ok_or("四肢的设置要是 JSON 对象")?;
-    let name = clean_name(object.get("name").and_then(Value::as_str).unwrap_or(""));
-    if name.is_empty() {
-        return Err("四肢要有名字（name：字母、数字、-、_）".into());
-    }
-    detach(&name, false);
+    let object = config.as_object().ok_or("能力的设置要是 JSON 对象")?;
+    let name = name.to_string();
+    detach(&name);
     let client_id = mcp_client::open("EDITH", env!("CARGO_PKG_VERSION"));
     let client = mcp_client::get(client_id).ok_or("开不了 MCP 客户端")?;
     let connected = if let Some(command) = object.get("command").and_then(Value::as_str) {
@@ -88,7 +56,7 @@ pub fn attach(config: Value, remember: bool) -> Result<Arc<Limb>, String> {
         client.connect_http(url, headers, CONNECT_TIMEOUT_MS, None)
     } else {
         mcp_client::close(client_id);
-        return Err("四肢要给 command（本机起的 MCP 服务）或 url（HTTP 的 MCP 服务）".into());
+        return Err("MCP 能力要给 command（本机起的 MCP 服务）或 url（HTTP 的 MCP 服务）".into());
     };
     if let Err(failure) = connected {
         mcp_client::close(client_id);
@@ -110,24 +78,16 @@ pub fn attach(config: Value, remember: bool) -> Result<Arc<Limb>, String> {
             break;
         }
     }
-    let mut stored = config.clone();
-    stored["name"] = json!(name);
-    let limb = Arc::new(Limb { name: name.clone(), config: stored, client, client_id, tools });
+    let limb = Arc::new(Limb { name: name.clone(), client, client_id, tools });
     LIMBS.write().unwrap().insert(name, limb.clone());
-    if remember {
-        save()?;
-    }
     Ok(limb)
 }
 
-/// 摘下（forget：也从 limbs.json 里去掉）；没有这个四肢返回 false
-pub fn detach(name: &str, forget: bool) -> bool {
+/// 摘下；没挂着返回 false
+pub fn detach(name: &str) -> bool {
     let removed = LIMBS.write().unwrap().remove(name);
     if let Some(limb) = &removed {
         mcp_client::close(limb.client_id);
-    }
-    if forget && removed.is_some() {
-        let _ = save();
     }
     removed.is_some()
 }
@@ -136,7 +96,7 @@ pub fn all() -> Vec<Arc<Limb>> {
     LIMBS.read().unwrap().values().cloned().collect()
 }
 
-/// 四肢带来的工具定义（OpenAI 格式；名字「<四肢名>__<工具名>」，太长的截到 64 个字符）
+/// MCP 能力带来的工具定义（OpenAI 格式；名字「<能力名>__<工具名>」，太长的截到 64 个字符）
 pub fn specs() -> Vec<Value> {
     let mut specs = Vec::new();
     for limb in all() {
@@ -148,7 +108,7 @@ pub fn specs() -> Vec<Value> {
                 "type": "function",
                 "function": {
                     "name": full,
-                    "description": format!("（四肢「{}」）{description}", limb.name),
+                    "description": format!("（能力「{}」）{description}", limb.name),
                     "parameters": tool.get("inputSchema").cloned().unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
                 },
             }));
@@ -157,7 +117,7 @@ pub fn specs() -> Vec<Value> {
     specs
 }
 
-/// 给提示词看的：挂着哪些四肢
+/// 给提示词看的：挂着哪些 MCP 能力
 pub fn summary() -> String {
     all()
         .iter()
@@ -169,7 +129,7 @@ pub fn summary() -> String {
         .join("\n")
 }
 
-/// 调四肢的工具（名字不是四肢的返回 None）
+/// 调 MCP 能力的工具（名字不是它们的返回 None）
 pub fn call(full_name: &str, arguments: &Map<String, Value>) -> Option<Outcome> {
     let (limb_name, _) = full_name.split_once(SEPARATOR)?;
     let limb = LIMBS.read().unwrap().get(limb_name).cloned()?;
@@ -187,7 +147,7 @@ pub fn call(full_name: &str, arguments: &Map<String, Value>) -> Option<Outcome> 
             let text = content_text(&result);
             Outcome { ok: !failed, text: friday_core::tool_files::truncate(if text.is_empty() { "（没有内容）" } else { &text }) }
         }
-        Err(failure) => Outcome { ok: false, text: format!("四肢「{}」出错：{}", limb.name, failure.message) },
+        Err(failure) => Outcome { ok: false, text: format!("能力「{}」出错：{}", limb.name, failure.message) },
     })
 }
 

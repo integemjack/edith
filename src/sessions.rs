@@ -112,3 +112,15 @@ pub fn list() -> Vec<Session> {
     sessions.sort_by(|a, b| b.updated.cmp(&a.updated));
     sessions
 }
+
+/// `edith run` 的主会话（能力没指明会话的话都进它）：id 记在 ~/.edith/main-session；没有就在 cwd 新开一个
+pub fn main_session(cwd: &str) -> Result<Session, String> {
+    let path = home::dir().join("main-session");
+    if let Some(session) = std::fs::read_to_string(&path).ok().and_then(|id| Session::load(id.trim())) {
+        return Ok(session);
+    }
+    let mut session = Session::new(cwd);
+    session.save()?;
+    std::fs::write(&path, &session.id).map_err(|error| format!("写不了 {}：{error}", path.display()))?;
+    Ok(session)
+}

@@ -14,8 +14,8 @@ use serde_json::{Map, Value, json};
 
 use crate::home::{self, Model};
 use crate::http::{self, Failure};
-use crate::limbs;
 use crate::tools::{self, Outcome};
+use crate::{capabilities, mcp};
 
 /// 一轮里最多请求几次模型（到了让模型把目前的结果交出来）
 const MAX_TOOL_ROUNDS: i64 = 200;
@@ -37,6 +37,13 @@ pub enum Event {
     Stats(Value),
     /// 顺带说一句（重试、压了上下文……）
     Notice(String),
+}
+
+/// 这一轮在哪个会话、是哪一轮（能力的动作要知道）
+#[derive(Debug, Clone, Default)]
+pub struct Context {
+    pub session: String,
+    pub turn: String,
 }
 
 /// 一轮的结果
@@ -80,8 +87,8 @@ fn args(pairs: &[(&str, String)]) -> prompts::Args {
 
 /// 系统提示
 pub fn instructions(cwd: &Path) -> String {
-    let list = limbs::summary();
-    let limbs = if list.is_empty() { String::new() } else { prompts::text("edith.limbs", &args(&[("list", list)]), None) };
+    let list = [capabilities::summary(), mcp::summary()].into_iter().filter(|text| !text.is_empty()).collect::<Vec<_>>().join("\n");
+    let capabilities = if list.is_empty() { String::new() } else { prompts::text("edith.capabilities", &args(&[("list", list)]), None) };
     prompts::text(
         "edith.main",
         &args(&[
@@ -92,16 +99,17 @@ pub fn instructions(cwd: &Path) -> String {
                 let now = chrono::Local::now();
                 format!("{}（{}）", now.format("%Y-%m-%d %H:%M"), tools::weekday(&now))
             }),
-            ("limbs", limbs),
+            ("capabilities", capabilities),
         ]),
         None,
     )
 }
 
-/// 给模型的工具：自带的 + 四肢带来的
+/// 给模型的工具：自带的 + 能力的动作 + MCP 带来的
 pub fn tool_specs() -> Vec<Value> {
     let mut specs = tools::specs();
-    specs.extend(limbs::specs());
+    specs.extend(capabilities::specs());
+    specs.extend(mcp::specs());
     specs
 }
 
@@ -116,9 +124,12 @@ fn wait(seconds: f64, cancel: &AtomicBool) {
     }
 }
 
-/// 用一个工具：自带的、四肢的；名字写走样的按 Friday 的别名表认回来
-fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool) -> Outcome {
-    if let Some(outcome) = tools::run(name, arguments, cwd, cancel).or_else(|| limbs::call(name, arguments)) {
+/// 用一个工具：自带的、能力的动作、MCP 的；名字写走样的按 Friday 的别名表认回来
+fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, context: &Context) -> Outcome {
+    if let Some(outcome) = tools::run(name, arguments, cwd, cancel)
+        .or_else(|| capabilities::call(name, arguments, context, cancel))
+        .or_else(|| mcp::call(name, arguments))
+    {
         return outcome;
     }
     let canonical = tool_aliases::canonical_name(name);
@@ -248,8 +259,18 @@ fn request(
     }
 }
 
-/// 干一轮
-pub fn run(model: &Model, history: Vec<Value>, user_text: &str, cwd: &Path, cancel: &AtomicBool, on: &mut dyn FnMut(Event)) -> Turn {
+/// 干一轮。interject：工具跑完、下一段请求之前取等着补充的话（已经包好给模型看的样子）
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    model: &Model,
+    history: Vec<Value>,
+    user_text: &str,
+    cwd: &Path,
+    cancel: &AtomicBool,
+    context: &Context,
+    on: &mut dyn FnMut(Event),
+    interject: &mut dyn FnMut() -> Vec<String>,
+) -> Turn {
     let config = engine_loop::Config {
         engine_id: model.engine_id(),
         model: model.model.clone(),
@@ -334,11 +355,15 @@ pub fn run(model: &Model, history: Vec<Value>, user_text: &str, cwd: &Path, canc
             } else if cancel.load(Ordering::Relaxed) {
                 Outcome { ok: false, text: "（用户停下了，没有执行）".into() }
             } else {
-                execute(&name, &arguments, cwd, cancel)
+                execute(&name, &arguments, cwd, cancel, context)
             };
             on(Event::Result { id: id.clone(), name: name.clone(), ok: outcome.ok, text: outcome.text.clone() });
             results.push((id, name, outcome.text));
         }
-        brain.tool_results(results, 0, None, Vec::new(), None);
+        let added: Vec<Value> = interject().into_iter().map(|text| json!({ "role": "user", "content": text })).collect();
+        if !added.is_empty() {
+            on(Event::Notice(format!("收到 {} 段补充，接着做时一起考虑", added.len())));
+        }
+        brain.tool_results(results, 0, None, added, None);
     }
 }

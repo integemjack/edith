@@ -1,4 +1,4 @@
-//! 大脑自带的工具（不靠四肢就有的）：时间、列目录、读 / 写 / 改文件、按名字找、按内容搜、按关键词搜、抓网页、跑命令。
+//! 大脑自带的工具（不靠能力就有的）：时间、列目录、读 / 写 / 改文件、按名字找、按内容搜、按关键词搜、抓网页、跑命令。
 //! 工具定义和说明来自 friday-core 的 tool_defs + prompts-tools.md，执行用 tool_files / file_edit / file_search / shell_rules。
 
 use std::io::Read;

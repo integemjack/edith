@@ -1,50 +1,55 @@
-//! EDITH：下一代的大脑（第一个原型，docs/EDITH.md）。给它用户的话，它自己调模型、用工具把事做完；
-//! 四肢（MCP 能力、客户端、渠道）经对外接口挂上来，没有四肢也能干活。
+//! EDITH：下一代的大脑（docs/EDITH.md）。给它用户的话，它自己调模型、用工具把事做完；
+//! 能力（四肢）是本机起的进程，经 stdio 讲能力协议（docs/CAPABILITY-PROTOCOL.md），双向实时：没有能力也能干活，接上了更强。
 
 mod brain;
+mod capabilities;
 mod home;
 mod http;
-mod limbs;
-mod server;
+mod mcp;
+mod mind;
+mod protocol;
 mod sessions;
 mod tools;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use brain::Event;
+use mind::{Envelope, Origin, Urgency};
 use sessions::Session;
 
 const HELP: &str = "EDITH——能自己把事做完的大脑
 
 用法：
   edith \"要做的事\"                 在当前目录干一件事
-  edith                            一句一句聊（同一个会话；空行或 Ctrl+D 结束）
+  edith                            一句一句聊（同一个会话；干活时再打字算补充；空行或 Ctrl+D 结束）
   edith -c <会话 id> \"…\"           接着某个会话（id 写开头几位就行）
+  edith run                        一直开着，只听能力的（主会话；Ctrl+C 退出）
   edith sessions                   列出会话
-  edith limbs                      列出挂着的四肢和它们的工具
-  edith limbs add <名字> <命令> [参数…]   挂上一个本机的 MCP 服务（记进 ~/.edith/limbs.json）
-  edith limbs add-url <名字> <地址>        挂上一个 HTTP 的 MCP 服务
-  edith limbs remove <名字>                摘下
-  edith serve [--listen 127.0.0.1:7788] [--token …]   开对外接口
+  edith capabilities               列出能力（会先接上它们）
+  edith capabilities add <名字> <命令> [参数…]       接一个讲能力协议的程序（记进 ~/.edith/capabilities.json）
+  edith capabilities add-mcp <名字> <命令> [参数…]   接一个本机的 MCP 服务
+  edith capabilities add-mcp-url <名字> <地址>        接一个 HTTP 的 MCP 服务
+  edith capabilities remove <名字>                    去掉
 
 选项：
   -C, --cwd <目录>    工作目录（默认当前目录）
   -q, --quiet         只打最终回答，不打过程
-  -v, --verbose       也打思考和每段请求的用量
+  -v, --verbose       也打思考、每段请求的用量、能力的日志
 
-模型：~/.edith/config.json 的 {\"baseURL\", \"apiKey\", \"model\"}，或环境变量 EDITH_BASE_URL / EDITH_API_KEY / EDITH_MODEL";
+模型：~/.edith/config.json 的 {\"baseURL\", \"apiKey\", \"model\"}，或环境变量 EDITH_BASE_URL / EDITH_API_KEY / EDITH_MODEL
+能力协议：docs/CAPABILITY-PROTOCOL.md";
 
-/// Ctrl+C：第一次让这一轮停下，第二次直接退出
-static CANCEL: AtomicBool = AtomicBool::new(false);
+/// Ctrl+C：干活时第一次让这一轮停下，第二次（或闲着时）退出
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
 fn install_interrupt() {
     extern "C" fn on_interrupt(_: libc::c_int) {
-        if CANCEL.swap(true, Ordering::SeqCst) {
+        if INTERRUPTED.swap(true, Ordering::SeqCst) {
             unsafe { libc::_exit(130) };
         }
     }
@@ -55,6 +60,26 @@ fn install_interrupt() {
 
 #[cfg(not(unix))]
 fn install_interrupt() {}
+
+/// 收 Ctrl+C：在干活就停下这一轮，闲着（或 exit_anyway）就收拾好退出
+fn watch_interrupt(exit_anyway: bool) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if !INTERRUPTED.load(Ordering::SeqCst) {
+                continue;
+            }
+            let focus = mind::focus();
+            if !exit_anyway && mind::stop(&focus) {
+                mind::wait_idle(&focus);
+                INTERRUPTED.store(false, Ordering::SeqCst);
+                continue;
+            }
+            capabilities::stop_all();
+            std::process::exit(130);
+        }
+    });
+}
 
 struct Options {
     cwd: PathBuf,
@@ -70,26 +95,14 @@ fn main() {
         Some("-h" | "--help" | "help") => println!("{HELP}"),
         Some("-V" | "--version") => println!("edith {}", env!("CARGO_PKG_VERSION")),
         Some("sessions") => list_sessions(),
-        Some("limbs") => {
+        Some("capabilities" | "caps") => {
             brain::setup_prompts();
-            exit_on(limbs_command(&arguments[1..]));
-        }
-        Some("serve") => {
-            brain::setup_prompts();
-            limbs::attach_saved(&mut |message| eprintln!("{message}"));
-            let mut listen = "127.0.0.1:7788".to_string();
-            let mut token = std::env::var("EDITH_TOKEN").ok().filter(|token| !token.is_empty());
-            let mut rest = arguments[1..].iter();
-            while let Some(argument) = rest.next() {
-                match argument.as_str() {
-                    "--listen" => listen = rest.next().cloned().unwrap_or(listen),
-                    "--token" => token = rest.next().cloned(),
-                    other => exit_on(Err(format!("serve 不认识 {other}"))),
-                }
-            }
-            exit_on(server::serve(&listen, token));
+            let result = capabilities_command(&arguments[1..]);
+            capabilities::stop_all();
+            exit_on(result);
         }
         _ => match parse(&arguments) {
+            Ok(options) if options.words.first().map(String::as_str) == Some("run") && options.words.len() == 1 => exit_on(run(options)),
             Ok(options) => exit_on(work(options)),
             Err(message) => exit_on(Err(message)),
         },
@@ -124,23 +137,66 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         }
     }
     options.cwd = std::fs::canonicalize(&options.cwd).map_err(|_| format!("工作目录不存在：{}", options.cwd.display()))?;
+    if options.verbose {
+        // capabilities.rs 看它决定要不要把能力的日志也打到终端
+        unsafe { std::env::set_var("EDITH_VERBOSE", "1") };
+    }
     Ok(options)
+}
+
+fn prepare() -> Result<(), String> {
+    home::Model::load()?;
+    brain::setup_prompts();
+    capabilities::start_all(&mut |message| eprintln!("\x1b[33m{message}\x1b[0m"));
+    install_interrupt();
+    Ok(())
+}
+
+/// edith run：一直开着，干活的事都由能力交来（主会话是焦点）
+fn run(options: Options) -> Result<(), String> {
+    prepare()?;
+    let session = sessions::main_session(&options.cwd.to_string_lossy())?;
+    mind::set_focus(&session.id);
+    let printer = Arc::new(Mutex::new(Printer::new(&options)));
+    let shown = printer.clone();
+    mind::listen(move |envelope| shown.lock().unwrap().show(envelope, true));
+    watch_interrupt(true);
+    eprintln!("EDITH 开着（主会话 {}，{} 个能力）。Ctrl+C 退出。", &session.id[..8], capability_count());
+    loop {
+        std::thread::park();
+    }
+}
+
+fn capability_count() -> usize {
+    capabilities::configs().iter().filter(|config| config.get("disabled").and_then(Value::as_bool) != Some(true)).count()
 }
 
 fn work(options: Options) -> Result<(), String> {
     let model = home::Model::load()?;
-    brain::setup_prompts();
-    limbs::attach_saved(&mut |message| eprintln!("{message}"));
-    install_interrupt();
+    prepare()?;
     let mut session = match &options.session {
         Some(id) => Session::find(id).ok_or_else(|| format!("没有会话 {id}（edith sessions 看有哪些）"))?,
         None => Session::new(&options.cwd.to_string_lossy()),
     };
-    let cwd = if options.session.is_some() && std::path::Path::new(&session.cwd).is_dir() {
-        PathBuf::from(&session.cwd)
-    } else {
-        options.cwd.clone()
-    };
+    if options.session.is_none() || !std::path::Path::new(&session.cwd).is_dir() {
+        session.cwd = options.cwd.to_string_lossy().into_owned();
+    }
+    session.save()?;
+    mind::set_focus(&session.id);
+    let printer = Arc::new(Mutex::new(Printer::new(&options)));
+    let shown = printer.clone();
+    let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let failed = failure.clone();
+    let session_id = session.id.clone();
+    mind::listen(move |envelope| {
+        if envelope.session != session_id {
+            return;
+        }
+        if envelope.kind == "done" {
+            *failed.lock().unwrap() = envelope.data["error"].as_str().map(str::to_string);
+        }
+        shown.lock().unwrap().show(envelope, false);
+    });
     let mut task = options.words.join(" ");
     // 管道送进来的整段当成要做的事（前面有参数的接在后面）
     let piped = !std::io::stdin().is_terminal();
@@ -155,50 +211,61 @@ fn work(options: Options) -> Result<(), String> {
         if task.trim().is_empty() {
             return Err("没有要做的事".into());
         }
-        let failed = turn(&model, &mut session, &task, &cwd, &options);
+        watch_interrupt(false);
+        mind::submit(&session.id, &task, Origin::terminal(), Urgency::Queue, None)?;
+        // 干完（中途能力补充、排着的也干完）再退出
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        mind::wait_idle(&session.id);
+        capabilities::stop_all();
         if !options.quiet {
             eprintln!("\x1b[2m（会话 {}，接着做：edith -c {} \"…\"）\x1b[0m", &session.id[..8], &session.id[..8]);
         }
-        return failed.map_or(Ok(()), Err);
+        return failure.lock().unwrap().take().map_or(Ok(()), Err);
     }
-    // 一句一句聊
-    eprintln!("EDITH（{}）在 {}。说要做的事，空行或 Ctrl+D 结束。", model.model, cwd.display());
+    // 一句一句聊：闲着时打的开始一轮，干活时打的补充进这一轮
+    watch_interrupt(false);
+    eprintln!("EDITH（{}）在 {}。说要做的事；干活时再打字算补充；空行或 Ctrl+D 结束。", model.model, session.cwd);
     let stdin = std::io::stdin();
     loop {
-        eprint!("\x1b[1m> \x1b[0m");
-        let _ = std::io::stderr().flush();
+        if mind::working(&session.id).is_none() {
+            eprint!("\x1b[1m> \x1b[0m");
+            let _ = std::io::stderr().flush();
+        }
         let mut line = String::new();
         if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
             break;
         }
-        CANCEL.store(false, Ordering::SeqCst);
-        if let Some(message) = turn(&model, &mut session, line.trim(), &cwd, &options) {
-            eprintln!("\x1b[31m{message}\x1b[0m");
+        let urgency = if mind::working(&session.id).is_some() { Urgency::Interject } else { Urgency::Queue };
+        match mind::submit(&session.id, line.trim(), Origin::terminal(), urgency, None) {
+            Ok((mind::Disposition::Interjected, _)) => eprintln!("\x1b[2m（补充进了正在做的这一轮）\x1b[0m"),
+            Ok(_) => {}
+            Err(message) => eprintln!("\x1b[31m{message}\x1b[0m"),
+        }
+        // 刚开始的这一轮先打一会儿，再回来收下一句
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        while mind::working(&session.id).is_some() && !stdin_ready() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
-    if !session.history.is_empty() {
-        eprintln!("\x1b[2m（会话 {}）\x1b[0m", &session.id[..8]);
-    }
+    mind::wait_idle(&session.id);
+    capabilities::stop_all();
+    eprintln!("\x1b[2m（会话 {}）\x1b[0m", &session.id[..8]);
     Ok(())
 }
 
-/// 干一轮、存会话；出错返回原因
-fn turn(model: &home::Model, session: &mut Session, task: &str, cwd: &std::path::Path, options: &Options) -> Option<String> {
-    let mut printer = Printer { quiet: options.quiet, verbose: options.verbose, thinking: false, line_start: true };
-    let result = brain::run(model, std::mem::take(&mut session.history), task, cwd, &CANCEL, &mut |event| printer.show(event));
-    printer.finish();
-    session.history = result.history;
-    let saved = session.save().err();
-    if options.quiet {
-        println!("{}", result.answer.trim());
-    }
-    if result.stopped {
-        eprintln!("\x1b[33m（停下了）\x1b[0m");
-    }
-    result.error.or(saved)
+/// 终端里已经有打好的一行在等着读（干活时用户打字补充）
+#[cfg(unix)]
+fn stdin_ready() -> bool {
+    let mut poll = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+    unsafe { libc::poll(&mut poll, 1, 0) > 0 }
 }
 
-/// 终端上的样子：回答打到标准输出，过程（工具、提示）打到标准错误
+#[cfg(not(unix))]
+fn stdin_ready() -> bool {
+    true
+}
+
+/// 终端上的样子：回答打到标准输出，过程（工具、提示、能力交来的话）打到标准错误
 struct Printer {
     quiet: bool,
     verbose: bool,
@@ -207,6 +274,10 @@ struct Printer {
 }
 
 impl Printer {
+    fn new(options: &Options) -> Printer {
+        Printer { quiet: options.quiet, verbose: options.verbose, thinking: false, line_start: true }
+    }
+
     fn out(&mut self, text: &str) {
         print!("{text}");
         let _ = std::io::stdout().flush();
@@ -214,6 +285,10 @@ impl Printer {
     }
 
     fn side(&mut self, text: &str) {
+        if self.thinking {
+            self.thinking = false;
+            eprint!("\x1b[0m");
+        }
         if !self.line_start {
             println!();
             self.line_start = true;
@@ -221,62 +296,80 @@ impl Printer {
         eprintln!("{text}");
     }
 
-    fn show(&mut self, event: Event) {
+    /// all_sessions：edith run 打所有会话的（前面标上会话）
+    fn show(&mut self, envelope: &Envelope, all_sessions: bool) {
+        let data = &envelope.data;
         if self.quiet {
+            if envelope.kind == "done" {
+                println!("{}", data["answer"].as_str().unwrap_or("").trim());
+            }
             return;
         }
-        match event {
-            Event::Text(text) => {
+        let tag = if all_sessions { format!("[{}] ", &envelope.session[..8.min(envelope.session.len())]) } else { String::new() };
+        match envelope.kind {
+            "turn.started" => {
+                let origin = &data["origin"];
+                let capability = origin["capability"].as_str().unwrap_or("");
+                if !capability.is_empty() || all_sessions {
+                    let from = origin["from"].as_str().filter(|from| !from.is_empty()).map(|from| format!(" {from}")).unwrap_or_default();
+                    let source = if capability.is_empty() { "终端".to_string() } else { format!("能力「{capability}」") };
+                    let text = data["text"].as_str().unwrap_or("").chars().take(200).collect::<String>();
+                    self.side(&format!("\x1b[35m{tag}◂ {source}{from}：{text}\x1b[0m"));
+                }
+            }
+            "text" => {
                 if self.thinking {
                     self.thinking = false;
                     eprintln!("\x1b[0m");
                 }
-                self.out(&text);
+                self.out(data["text"].as_str().unwrap_or(""));
             }
-            Event::Thinking(text) if self.verbose => {
+            "thinking" if self.verbose => {
                 if !self.thinking {
                     self.thinking = true;
                     eprint!("\x1b[2m");
                 }
-                eprint!("{text}");
+                eprint!("{}", data["text"].as_str().unwrap_or(""));
             }
-            Event::Thinking(_) => {}
-            Event::Tool { name, arguments, .. } => {
-                let brief = brief(&arguments);
-                self.side(&format!("\x1b[36m▸ {name}\x1b[0m {brief}"));
+            "tool" => {
+                let brief = brief(&data["arguments"]);
+                self.side(&format!("\x1b[36m{tag}▸ {}\x1b[0m {brief}", data["name"].as_str().unwrap_or("")));
             }
-            Event::Result { ok, text, .. } => {
+            "result" => {
+                let text = data["text"].as_str().unwrap_or("");
                 let first = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").chars().take(100).collect::<String>();
-                let mark = if ok { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+                let mark = if data["ok"].as_bool() == Some(true) { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
                 self.side(&format!("  {mark} \x1b[2m{first}\x1b[0m"));
             }
-            Event::Stats(stats) if self.verbose => {
+            "stats" if self.verbose => {
                 let line = format!(
                     "  · 输入 {} token、输出 {} token",
-                    stats["promptTokens"].as_i64().unwrap_or(0),
-                    stats["generatedTokens"].as_i64().unwrap_or(0)
+                    data["promptTokens"].as_i64().unwrap_or(0),
+                    data["generatedTokens"].as_i64().unwrap_or(0)
                 );
                 self.side(&format!("\x1b[2m{line}\x1b[0m"));
             }
-            Event::Stats(_) => {}
-            Event::Notice(text) => self.side(&format!("\x1b[33m{text}\x1b[0m")),
-        }
-    }
-
-    fn finish(&mut self) {
-        if self.thinking {
-            eprint!("\x1b[0m");
-        }
-        if !self.line_start {
-            println!();
-            self.line_start = true;
+            "notice" => self.side(&format!("\x1b[33m{tag}{}\x1b[0m", data["text"].as_str().unwrap_or(""))),
+            "done" => {
+                if !self.line_start {
+                    println!();
+                    self.line_start = true;
+                }
+                if data["stopped"].as_bool() == Some(true) {
+                    self.side("\x1b[33m（停下了）\x1b[0m");
+                }
+                if let Some(error) = data["error"].as_str() {
+                    self.side(&format!("\x1b[31m{error}\x1b[0m"));
+                }
+            }
+            _ => {}
         }
     }
 }
 
 /// 工具参数的一行简述（路径、命令、关键词……）
 fn brief(arguments: &Value) -> String {
-    for key in ["command", "path", "pattern", "keywords", "url", "query"] {
+    for key in ["command", "path", "pattern", "keywords", "url", "query", "text"] {
         if let Some(text) = arguments.get(key).and_then(Value::as_str) {
             let line = text.lines().next().unwrap_or("");
             let clipped: String = line.chars().take(90).collect();
@@ -297,38 +390,64 @@ fn list_sessions() {
     }
 }
 
-fn limbs_command(arguments: &[String]) -> Result<(), String> {
+fn capabilities_command(arguments: &[String]) -> Result<(), String> {
+    let added = |value: Value| {
+        let name = value["name"].as_str().unwrap_or("").to_string();
+        let actions = value["actions"].as_array().map_or(0, Vec::len);
+        println!("接上了「{name}」：{actions} 个动作");
+    };
     match arguments.first().map(String::as_str) {
         None | Some("list") => {
-            limbs::attach_saved(&mut |message| eprintln!("{message}"));
-            let all = limbs::all();
-            if all.is_empty() {
-                println!("还没有挂四肢（edith limbs add <名字> <命令> [参数…]）");
+            let reported = Arc::new(AtomicBool::new(false));
+            let flag = reported.clone();
+            capabilities::start_all(&mut |message| {
+                flag.store(true, Ordering::Relaxed);
+                eprintln!("{message}");
+            });
+            let configs = capabilities::configs();
+            if configs.is_empty() {
+                println!("还没有能力（edith capabilities add <名字> <命令> [参数…]）");
             }
-            for limb in all {
-                let names: Vec<&str> = limb.tools.iter().filter_map(|tool| tool.get("name").and_then(Value::as_str)).collect();
-                println!("{}（{} 个工具）：{}", limb.name, names.len(), names.join("、"));
+            for config in configs {
+                let name = capabilities::clean_name(config["name"].as_str().unwrap_or(""));
+                let protocol = config["protocol"].as_str().unwrap_or("edith");
+                if config["disabled"].as_bool() == Some(true) {
+                    println!("{name}（{protocol}）：关掉了");
+                    continue;
+                }
+                match capabilities::describe(&name) {
+                    Some(info) => {
+                        let list = |key: &str| {
+                            info[key].as_array().map(|items| items.iter().filter_map(|item| item.as_str().or(item["kind"].as_str())).collect::<Vec<_>>().join("、")).unwrap_or_default()
+                        };
+                        let title = info["info"]["title"].as_str().map(|title| format!(" {title}")).unwrap_or_default();
+                        println!("{name}（{protocol}）{title}");
+                        println!("  动作：{}", if list("actions").is_empty() { "（没有）".into() } else { list("actions") });
+                        if protocol != "mcp" {
+                            println!("  感知：{}", if list("senses").is_empty() { "（没有）".into() } else { list("senses") });
+                            println!("  订的事件：{}", if list("receives").is_empty() { "（没有）".into() } else { list("receives") });
+                        }
+                    }
+                    None => println!("{name}（{protocol}）：没接上（日志在 ~/.edith/logs/{name}.log）"),
+                }
             }
             Ok(())
         }
         Some("add") if arguments.len() >= 3 => {
-            limbs::attach_saved(&mut |_| {});
-            let config = json!({ "name": arguments[1], "command": arguments[2], "args": arguments[3..] });
-            let limb = limbs::attach(config, true)?;
-            println!("挂上了「{}」：{} 个工具", limb.name, limb.tools.len());
+            added(capabilities::add(json!({ "name": arguments[1], "command": arguments[2], "args": arguments[3..] }))?);
             Ok(())
         }
-        Some("add-url") if arguments.len() == 3 => {
-            limbs::attach_saved(&mut |_| {});
-            let limb = limbs::attach(json!({ "name": arguments[1], "url": arguments[2] }), true)?;
-            println!("挂上了「{}」：{} 个工具", limb.name, limb.tools.len());
+        Some("add-mcp") if arguments.len() >= 3 => {
+            added(capabilities::add(json!({ "name": arguments[1], "protocol": "mcp", "command": arguments[2], "args": arguments[3..] }))?);
+            Ok(())
+        }
+        Some("add-mcp-url") if arguments.len() == 3 => {
+            added(capabilities::add(json!({ "name": arguments[1], "protocol": "mcp", "url": arguments[2] }))?);
             Ok(())
         }
         Some("remove") if arguments.len() == 2 => {
-            // 先挂上才能摘（摘时顺带从 limbs.json 去掉）
-            limbs::attach_saved(&mut |_| {});
-            if limbs::detach(&limbs::clean_name(&arguments[1]), true) { Ok(()) } else { Err(format!("没有挂「{}」", arguments[1])) }
+            if capabilities::remove(&arguments[1]) { Ok(()) } else { Err(format!("没有能力「{}」", arguments[1])) }
         }
-        _ => Err("用法：edith limbs [add <名字> <命令> [参数…] | add-url <名字> <地址> | remove <名字>]".into()),
+        _ => Err("用法：edith capabilities [add <名字> <命令> [参数…] | add-mcp <名字> <命令> [参数…] | add-mcp-url <名字> <地址> | remove <名字>]".into()),
     }
 }

@@ -1,0 +1,397 @@
+//! 调度：谁的话、什么时候交给大脑。终端里打的、能力推来的（sense / ask）都从这里进；一个会话同一时间只干一轮，
+//! 正在干的时候新来的按急缓（docs/CAPABILITY-PROTOCOL.md「急缓」）：
+//! - interrupt 打断：停下手上这轮，马上带着新内容重来（历史里留着停下前做了的）；
+//! - interject 补充：在下一个步骤之前塞进这一轮；这一轮没有下一步了（直接答完）就紧接着为它再干一轮；
+//! - queue 排队（默认）：这轮干完再干；
+//! - note 只记下：记进会话，不回复。
+//!
+//! 干活过程中的事件（开始、文字、工具、结果、用量、提示、做完）推给所有登记的收听者（终端、能力）。
+
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
+
+use friday_core::prompts;
+use serde_json::{Value, json};
+
+use crate::brain::{self, Event};
+use crate::home::Model;
+use crate::sessions::Session;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Urgency {
+    Interrupt,
+    Interject,
+    Queue,
+    Note,
+}
+
+impl Urgency {
+    pub fn parse(text: &str) -> Option<Urgency> {
+        Some(match text {
+            "interrupt" => Urgency::Interrupt,
+            "interject" => Urgency::Interject,
+            "queue" => Urgency::Queue,
+            "note" => Urgency::Note,
+            _ => return None,
+        })
+    }
+}
+
+/// 话从哪来：终端（capability 为空）或某个能力
+#[derive(Debug, Clone, Default)]
+pub struct Origin {
+    /// 能力名（capabilities.json 里的名字）；终端里打的是空
+    pub capability: String,
+    /// 能力说的是哪种感知（speech / message / vision / event …）
+    pub kind: String,
+    /// 能力说的是谁（比如聊天渠道里的用户名）
+    pub from: String,
+}
+
+impl Origin {
+    pub fn terminal() -> Origin {
+        Origin::default()
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({ "capability": self.capability, "kind": self.kind, "from": self.from })
+    }
+
+    fn source(&self) -> String {
+        match (self.capability.is_empty(), self.kind.is_empty()) {
+            (true, _) => "用户".into(),
+            (false, true) => format!("能力「{}」", self.capability),
+            (false, false) => format!("能力「{}」（{}）", self.capability, self.kind),
+        }
+    }
+
+    /// 交给模型的那段话（终端里打的原样）
+    fn wrap(&self, key: &str, text: &str) -> String {
+        if self.capability.is_empty() && key == "edith.input" {
+            return text.to_string();
+        }
+        let from = if self.from.is_empty() { String::new() } else { format!("，说话的是 {}", self.from) };
+        let args = [("source", self.source()), ("from", from), ("text", text.to_string())];
+        prompts::text(key, &args.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(), None)
+    }
+}
+
+struct Input {
+    text: String,
+    origin: Origin,
+    turn: String,
+    /// 补充没赶上那一轮（它直接答完了）、紧接着单独干的：照补充的说法交给模型
+    interjected: bool,
+}
+
+/// 收到的话怎么处理了
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disposition {
+    /// 会话闲着：马上开始一轮
+    Started,
+    /// 打断了正在干的一轮，带着它重来
+    Interrupted,
+    /// 塞进了正在干的这一轮
+    Interjected,
+    /// 排在后面
+    Queued,
+    /// 记进了会话
+    Noted,
+}
+
+impl Disposition {
+    pub fn name(self) -> &'static str {
+        match self {
+            Disposition::Started => "started",
+            Disposition::Interrupted => "interrupted",
+            Disposition::Interjected => "interjected",
+            Disposition::Queued => "queued",
+            Disposition::Noted => "noted",
+        }
+    }
+}
+
+/// 推给收听者的一件事
+#[derive(Debug, Clone)]
+pub struct Envelope {
+    pub session: String,
+    pub turn: String,
+    /// turn.started / text / thinking / tool / result / stats / notice / done
+    pub kind: &'static str,
+    pub data: Value,
+}
+
+impl Envelope {
+    pub fn to_json(&self) -> Value {
+        json!({ "session": self.session, "turn": self.turn, "type": self.kind, "data": self.data })
+    }
+}
+
+type Listener = Arc<dyn Fn(&Envelope) + Send + Sync>;
+
+#[derive(Default)]
+struct State {
+    working: bool,
+    turn: String,
+    cancel: Arc<AtomicBool>,
+    /// 等着塞进这一轮的（还是原话，塞的时候再包）
+    interjections: Vec<Input>,
+    queue: VecDeque<Input>,
+    /// 干活时来的「只记下」：这一轮存档时记进去
+    notes: Vec<String>,
+}
+
+static SESSIONS: LazyLock<Mutex<HashMap<String, State>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static LISTENERS: LazyLock<RwLock<Vec<(u64, Listener)>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+static NEXT_LISTENER: AtomicU64 = AtomicU64::new(1);
+/// 没指明会话的话交给它（终端开的会话、edith run 的主会话）
+static FOCUS: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
+
+pub fn focus() -> String {
+    FOCUS.lock().unwrap().clone()
+}
+
+pub fn set_focus(session: &str) {
+    *FOCUS.lock().unwrap() = session.to_string();
+}
+
+pub fn listen(listener: impl Fn(&Envelope) + Send + Sync + 'static) -> u64 {
+    let id = NEXT_LISTENER.fetch_add(1, Ordering::Relaxed);
+    LISTENERS.write().unwrap().push((id, Arc::new(listener)));
+    id
+}
+
+pub fn unlisten(id: u64) {
+    LISTENERS.write().unwrap().retain(|(existing, _)| *existing != id);
+}
+
+pub fn emit(session: &str, turn: &str, kind: &'static str, data: Value) {
+    let envelope = Envelope { session: session.to_string(), turn: turn.to_string(), kind, data };
+    // 先把收听者拿出来再调，调的时候不拿着锁（收听者里登记 / 退订也不会死锁）
+    let listeners: Vec<Listener> = LISTENERS.read().unwrap().iter().map(|(_, listener)| listener.clone()).collect();
+    for listener in listeners {
+        listener(&envelope);
+    }
+}
+
+pub fn new_turn_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+/// 会话在干活吗；在干的是哪一轮
+pub fn working(session: &str) -> Option<String> {
+    SESSIONS.lock().unwrap().get(session).filter(|state| state.working).map(|state| state.turn.clone())
+}
+
+/// 停下这个会话正在干的一轮（排着的也不干了）；没在干返回 false
+pub fn stop(session: &str) -> bool {
+    let mut sessions = SESSIONS.lock().unwrap();
+    let Some(state) = sessions.get_mut(session).filter(|state| state.working) else { return false };
+    state.queue.clear();
+    state.interjections.clear();
+    state.cancel.store(true, Ordering::Relaxed);
+    true
+}
+
+/// 交一段话给大脑。turn：调用方先定好的轮 id（能力要先登记自己等哪一轮；补充进正在干的那轮时不用它）。
+/// 返回怎么处理的、算在哪一轮（只记下的没有轮）
+pub fn submit(
+    session: &str,
+    text: &str,
+    origin: Origin,
+    urgency: Urgency,
+    turn: Option<String>,
+) -> Result<(Disposition, Option<String>), String> {
+    let mut turn = turn;
+    let mut new_turn_id = move || turn.take().unwrap_or_else(new_turn_id);
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("text 是空的".into());
+    }
+    let mut sessions = SESSIONS.lock().unwrap();
+    let state = sessions.entry(session.to_string()).or_default();
+    if !state.working && Session::load(session).is_none() {
+        return Err(format!("没有会话 {session}"));
+    }
+    if urgency == Urgency::Note {
+        let note = origin.wrap("edith.note", text);
+        if state.working {
+            state.notes.push(note);
+        } else {
+            // 闲着：直接记进存档（拿着锁，不会和刚开始的一轮抢着读写）
+            let mut stored = Session::load(session).ok_or_else(|| format!("没有会话 {session}"))?;
+            stored.history.push(json!({ "role": "user", "content": note }));
+            stored.save()?;
+        }
+        return Ok((Disposition::Noted, None));
+    }
+    if !state.working {
+        let input = Input { text: text.to_string(), origin, turn: new_turn_id(), interjected: false };
+        let turn = input.turn.clone();
+        state.working = true;
+        state.turn = turn.clone();
+        state.cancel = Arc::new(AtomicBool::new(false));
+        let session = session.to_string();
+        std::thread::spawn(move || work(session, input));
+        return Ok((Disposition::Started, Some(turn)));
+    }
+    Ok(match urgency {
+        Urgency::Interrupt => {
+            let input = Input { text: text.to_string(), origin, turn: new_turn_id(), interjected: false };
+            let turn = input.turn.clone();
+            state.queue.push_front(input);
+            state.cancel.store(true, Ordering::Relaxed);
+            (Disposition::Interrupted, Some(turn))
+        }
+        Urgency::Interject => {
+            state.interjections.push(Input { text: text.to_string(), origin, turn: state.turn.clone(), interjected: true });
+            (Disposition::Interjected, Some(state.turn.clone()))
+        }
+        _ => {
+            let input = Input { text: text.to_string(), origin, turn: new_turn_id(), interjected: false };
+            let turn = input.turn.clone();
+            state.queue.push_back(input);
+            (Disposition::Queued, Some(turn))
+        }
+    })
+}
+
+/// 一个会话的活：一轮接一轮，直到没有排着的
+fn work(session_id: String, first: Input) {
+    let mut input = first;
+    loop {
+        let cancel = {
+            let mut sessions = SESSIONS.lock().unwrap();
+            let state = sessions.entry(session_id.clone()).or_default();
+            state.turn = input.turn.clone();
+            state.cancel.clone()
+        };
+        let turn = input.turn.clone();
+        emit(&session_id, &turn, "turn.started", json!({ "text": input.text, "origin": input.origin.to_json() }));
+        let done = run_turn(&session_id, &input, &cancel);
+        emit(&session_id, &turn, "done", done);
+        // 下一轮：没塞进去的补充（这一轮直接答完了）先，再是排着的
+        let mut sessions = SESSIONS.lock().unwrap();
+        let state = sessions.entry(session_id.clone()).or_default();
+        state.cancel = Arc::new(AtomicBool::new(false));
+        if !state.interjections.is_empty() {
+            let leftovers: Vec<Input> = std::mem::take(&mut state.interjections);
+            let origin = leftovers[0].origin.clone();
+            let text = leftovers.iter().map(|item| item.text.as_str()).collect::<Vec<_>>().join("\n\n");
+            input = Input { text, origin, turn: new_turn_id(), interjected: true };
+            continue;
+        }
+        match state.queue.pop_front() {
+            Some(next) => input = next,
+            None => {
+                state.working = false;
+                state.turn.clear();
+                return;
+            }
+        }
+    }
+}
+
+fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value {
+    let failed = |message: String| json!({ "answer": "", "stopped": false, "error": message });
+    let Some(mut session) = Session::load(session_id) else { return failed(format!("没有会话 {session_id}")) };
+    let model = match Model::load() {
+        Ok(model) => model,
+        Err(message) => return failed(message),
+    };
+    let cwd = PathBuf::from(&session.cwd);
+    let cwd = if cwd.is_dir() { cwd } else { crate::home::user_home() };
+    let context = brain::Context { session: session_id.to_string(), turn: input.turn.clone() };
+    let text = input.origin.wrap(if input.interjected { "edith.interjection" } else { "edith.input" }, &input.text);
+    let mut on_event = |event: Event| {
+        let (kind, data) = event_json(&event);
+        emit(session_id, &input.turn, kind, data);
+    };
+    // 工具跑完、下一段请求之前：把等着的补充塞进去
+    let mut interject = || {
+        let taken: Vec<Input> = {
+            let mut sessions = SESSIONS.lock().unwrap();
+            sessions.get_mut(session_id).map(|state| std::mem::take(&mut state.interjections)).unwrap_or_default()
+        };
+        taken.iter().map(|item| item.origin.wrap("edith.interjection", &item.text)).collect::<Vec<_>>()
+    };
+    let turn = brain::run(&model, std::mem::take(&mut session.history), &text, &cwd, cancel, &context, &mut on_event, &mut interject);
+    session.history = turn.history;
+    let notes: Vec<String> = {
+        let mut sessions = SESSIONS.lock().unwrap();
+        sessions.get_mut(session_id).map(|state| std::mem::take(&mut state.notes)).unwrap_or_default()
+    };
+    session.history.extend(notes.into_iter().map(|note| json!({ "role": "user", "content": note })));
+    let saved = session.save().err();
+    json!({ "answer": turn.answer, "stopped": turn.stopped, "error": turn.error.or(saved) })
+}
+
+pub fn event_json(event: &Event) -> (&'static str, Value) {
+    match event {
+        Event::Text(text) => ("text", json!({ "text": text })),
+        Event::Thinking(text) => ("thinking", json!({ "text": text })),
+        Event::Tool { id, name, arguments } => ("tool", json!({ "id": id, "name": name, "arguments": arguments })),
+        Event::Result { id, name, ok, text } => ("result", json!({ "id": id, "name": name, "ok": ok, "text": text })),
+        Event::Stats(stats) => ("stats", stats.clone()),
+        Event::Notice(text) => ("notice", json!({ "text": text })),
+    }
+}
+
+/// 交一段话、等它那一轮做完（ask）：先登记收听再交，免得做得太快错过结果。返回怎么处理的、哪一轮、done 的内容
+pub fn ask(
+    session: &str,
+    text: &str,
+    origin: Origin,
+    urgency: Urgency,
+    turn: Option<String>,
+) -> Result<(Disposition, Option<String>, Value), String> {
+    let (sender, receiver) = std::sync::mpsc::channel::<(String, Value)>();
+    let sender = Mutex::new(sender);
+    let id = listen(move |envelope| {
+        if envelope.kind == "done" {
+            let _ = sender.lock().unwrap().send((envelope.turn.clone(), envelope.data.clone()));
+        }
+    });
+    let submitted = submit(session, text, origin, urgency, turn);
+    let (disposition, turn) = match submitted {
+        Ok(result) => result,
+        Err(message) => {
+            unlisten(id);
+            return Err(message);
+        }
+    };
+    let Some(wanted) = turn.clone() else {
+        unlisten(id);
+        return Ok((disposition, None, json!({ "answer": "", "stopped": false, "error": null })));
+    };
+    let value = loop {
+        match receiver.recv_timeout(std::time::Duration::from_millis(500)) {
+            Ok((done_turn, value)) if done_turn == wanted => break value,
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !pending(&wanted) => {
+                break json!({ "answer": "", "stopped": true, "error": "这一轮没有干（会话被停下了）" });
+            }
+            Err(_) => {}
+        }
+    };
+    unlisten(id);
+    Ok((disposition, turn, value))
+}
+
+/// 这一轮还在干或者排着
+fn pending(turn: &str) -> bool {
+    SESSIONS.lock().unwrap().values().any(|state| {
+        (state.working && state.turn == turn)
+            || state.queue.iter().any(|input| input.turn == turn)
+            || state.interjections.iter().any(|input| input.turn == turn)
+    })
+}
+
+/// 等到这个会话闲下来（命令行干完一件事再退出：中途补充、排着的也干完）
+pub fn wait_idle(session: &str) {
+    while working(session).is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}

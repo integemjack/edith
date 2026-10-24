@@ -25,6 +25,11 @@ class Handler(BaseHTTPRequestHandler):
         if "只聊天" in last_user:
             events.append(chunk({"role": "assistant", "content": "你好，"}))
             events.append(chunk({"content": "我是 EDITH。"}, "stop"))
+        elif "能力" in last_user and "记" in last_user and len(tools) == 0:
+            args = json.dumps({"text": "hi"})
+            events.append(chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_c", "type": "function", "function": {"name": "cap__remember", "arguments": args}}]}, "tool_calls"))
+        elif "能力" in last_user and "记" in last_user:
+            events.append(chunk({"role": "assistant", "content": "能力说：" + tools[-1]["content"]}, "stop"))
         elif "四肢" in last_user and len(tools) == 0:
             names = [t["function"]["name"] for t in body.get("tools", [])]
             args = json.dumps({"text": "hi"})
