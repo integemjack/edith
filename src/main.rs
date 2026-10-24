@@ -275,7 +275,8 @@ fn prepare() -> Result<(), String> {
 
 /// edith run：一直开着，干活的事都由能力交来（这个目录的主会话是焦点）
 fn run(options: Options) -> Result<(), String> {
-    prepare()?;
+    home::Model::load()?;
+    // 先定好焦点会话再起能力：能力一连上就可能交话（没指明会话的交给焦点）
     let session = match options.continue_latest.then(sessions::latest).flatten() {
         Some(session) => session,
         None => {
@@ -285,6 +286,7 @@ fn run(options: Options) -> Result<(), String> {
         }
     };
     mind::set_focus(&session.id);
+    prepare()?;
     let printer = Arc::new(Mutex::new(Printer::new(options.quiet, options.verbose)));
     mind::listen(move |envelope| printer.lock().unwrap().show(envelope.kind, &envelope.session, &envelope.data, true));
     watch_interrupt(true);
@@ -329,7 +331,6 @@ fn attach_to(mut options: Options) -> Result<(), String> {
 fn work(options: Options) -> Result<(), String> {
     let task = task(&options)?;
     let model = home::Model::load()?;
-    prepare()?;
     let mut session = match (&options.resume, options.continue_latest) {
         (Some(id), _) => Session::find(id).ok_or_else(|| format!("没有会话 {id}（edith sessions 看有哪些）"))?,
         (None, true) => sessions::latest().ok_or("这个目录还没有会话")?,
@@ -339,7 +340,9 @@ fn work(options: Options) -> Result<(), String> {
         session.cwd = options.cwd.to_string_lossy().into_owned();
     }
     session.save()?;
+    // 先定好焦点会话再起能力（同 run）
     mind::set_focus(&session.id);
+    prepare()?;
     let printer = Arc::new(Mutex::new(Printer::new(options.quiet, options.verbose)));
     let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let failed = failure.clone();
