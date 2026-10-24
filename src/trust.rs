@@ -136,7 +136,7 @@ pub fn ensure() -> bool {
     }
     let commands = commands();
     let workspace = home::workspace();
-    if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+    if crate::home::stdin_is_terminal() && std::io::stderr().is_terminal() {
         eprintln!("\x1b[33m这个目录（{}）的配置要起这些程序，以你的身份运行：\x1b[0m", workspace.display());
         for line in &commands {
             eprintln!("  {line}");

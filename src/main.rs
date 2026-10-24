@@ -146,6 +146,8 @@ fn finish_worktree() {
 }
 
 fn main() {
+    // 在任何线程读标准输入之前定下来（见 home::stdin_is_terminal）
+    home::stdin_is_terminal();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if matches!(arguments.first().map(String::as_str), Some("-h" | "--help" | "help")) {
         println!("{HELP}");
@@ -287,7 +289,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
 
 /// 终端能批准：stdin、stderr 都是终端时（不是的话，要批准的事问能批准的能力，没有就不做）
 fn terminal_approves() -> bool {
-    let approves = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let approves = home::stdin_is_terminal() && std::io::stderr().is_terminal();
     if approves {
         approval::enable_terminal();
     }
@@ -352,7 +354,7 @@ fn run(options: Options) -> Result<(), String> {
 /// 要做的事：参数 + 管道送进来的
 fn task(options: &Options) -> Result<Option<String>, String> {
     let mut task = options.words.join(" ");
-    let piped = !std::io::stdin().is_terminal();
+    let piped = !home::stdin_is_terminal();
     if piped {
         // 管道送进来的也算要做的事（cat 报错.log | edith "看看怎么回事"）。给了参数时最多等 1.5 秒：
         // 从脚本、定时任务、别的智能体里起的 edith，标准输入常常是一直不关的管子，读到底会永远等下去

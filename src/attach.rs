@@ -60,7 +60,7 @@ pub fn run(entry: &Value, task: Option<String>, quiet: bool, verbose: bool, inte
         next: AtomicU64::new(1),
         working: Mutex::new(None),
         approving: Mutex::new(None),
-        approves: std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
+        approves: crate::home::stdin_is_terminal() && std::io::stderr().is_terminal(),
     });
     let printer = Arc::new(Mutex::new(Printer::new(quiet, verbose)));
     let (ready_sender, ready) = mpsc::channel::<()>();

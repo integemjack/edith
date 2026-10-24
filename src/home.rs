@@ -23,6 +23,14 @@ pub fn dir() -> PathBuf {
 }
 
 static WORKSPACE: OnceLock<PathBuf> = OnceLock::new();
+static STDIN_TERMINAL: OnceLock<bool> = OnceLock::new();
+
+/// 标准输入是不是终端（起来时看一次就记住）：Windows 上同一个句柄的同步读写排队，有线程在读标准输入时
+/// 再问 is_terminal（它会查句柄的文件名认 msys 终端）会一直等着
+pub fn stdin_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    *STDIN_TERMINAL.get_or_init(|| std::io::stdin().is_terminal())
+}
 
 /// 定下这次的工作目录（启动时一次）
 pub fn set_workspace(dir: PathBuf) {
