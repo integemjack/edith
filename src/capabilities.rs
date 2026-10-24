@@ -42,7 +42,7 @@ const DEFAULT_ACTION_TIMEOUT: u64 = 600;
 /// 动作的工具名：<能力名>__<动作名>
 pub const SEPARATOR: &str = "__";
 /// 能被订阅的事件
-pub const EVENT_TYPES: &[&str] = &["turn.started", "text", "thinking", "tool", "result", "stats", "notice", "done"];
+pub const EVENT_TYPES: &[&str] = &["turn.started", "input", "text", "thinking", "tool", "result", "stats", "notice", "done"];
 
 /// 一个连着的能力
 pub struct Capability {
@@ -78,6 +78,8 @@ static CAPABILITIES: LazyLock<RwLock<BTreeMap<String, Arc<Capability>>>> = LazyL
 /// 大脑按配置起的程序（能力名 → 进程）：退出、去掉能力时结束它
 static LAUNCHED: LazyLock<Mutex<HashMap<String, Child>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static STOPPING: AtomicBool = AtomicBool::new(false);
+/// 连接断了时请求的错误说法（批准时据此改问别人 / 等下一个连上来）
+const GONE: &str = "能力已经断开";
 
 /// 能力名只留字母、数字、-、_（动作的工具名要合 OpenAI 的规矩）
 pub fn clean_name(name: &str) -> String {
@@ -651,13 +653,13 @@ impl Capability {
         self.pending.lock().unwrap().insert(id, sender);
         if !self.send(&protocol::request(id, method, params)) {
             self.pending.lock().unwrap().remove(&id);
-            return Err(json!({ "code": protocol::INTERNAL_ERROR, "message": "能力已经断开" }));
+            return Err(json!({ "code": protocol::INTERNAL_ERROR, "message": GONE }));
         }
         let deadline = Instant::now() + timeout;
         loop {
             match receiver.recv_timeout(Duration::from_millis(100)) {
                 Ok(outcome) => return outcome,
-                Err(RecvTimeoutError::Disconnected) => return Err(json!({ "code": protocol::INTERNAL_ERROR, "message": "能力已经断开" })),
+                Err(RecvTimeoutError::Disconnected) => return Err(json!({ "code": protocol::INTERNAL_ERROR, "message": GONE })),
                 Err(RecvTimeoutError::Timeout) => {}
             }
             if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
@@ -751,7 +753,12 @@ impl Capability {
                     .filter(|session| self.full() || session.owner == self.name)
                     .map(|session| {
                         let mut summary = session.summary();
-                        summary["working"] = json!(mind::working(&session.id).is_some());
+                        let current = mind::current(&session.id);
+                        summary["working"] = json!(current.is_some());
+                        // 在干的那一轮：哪一轮、交来的原话（后连上来的客户端据此接着显示）
+                        if let Some((turn, text)) = current {
+                            summary["turn"] = json!({ "id": turn, "text": text });
+                        }
                         summary
                     })
                     .collect(),
@@ -1100,10 +1107,12 @@ pub fn ask_approval(who: Option<&str>, request: &Value, cancel: &AtomicBool) -> 
         .filter(|capability| capability.approves && capability.full() && who.is_none_or(|who| capability.name == who))
         .last()?;
     let reply = approver.request("approve", request.clone(), Duration::from_secs(600), Some(cancel));
-    Some(match reply {
-        Ok(result) => crate::approval::Decision::parse(&result),
-        Err(error) => crate::approval::Decision::Deny(format!("「{}」没答上：{}", approver.name, error_text(&error))),
-    })
+    match reply {
+        Ok(result) => Some(crate::approval::Decision::parse(&result)),
+        // 问着问着断了（Friday 客户端关了）：当没人能批，等着的会改问下一个连上来的
+        Err(error) if error_text(&error) == GONE => None,
+        Err(error) => Some(crate::approval::Decision::Deny(format!("「{}」没答上：{}", approver.name, error_text(&error)))),
+    }
 }
 
 /// 这个工具名是能力的只读动作
@@ -1156,6 +1165,12 @@ pub fn endpoints() -> Vec<Value> {
 }
 
 /// 接着的能力名（登记用）
+/// 连着的、不是按配置起的连接有几条（Friday 客户端、attach、中转进来的远程设备……）：run --linger 按它算闲着没有
+pub fn visitors() -> usize {
+    let launched = LAUNCHED.lock().unwrap();
+    native().iter().filter(|capability| !launched.contains_key(&capability.name)).count()
+}
+
 pub fn names() -> Vec<String> {
     native().iter().map(|capability| capability.name.clone()).collect()
 }

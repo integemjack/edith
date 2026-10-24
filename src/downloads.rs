@@ -1,4 +1,5 @@
-//! 共用的工具从 integemjack/edith.tools 下载（edith tools）：Release 里的 index.json 列出每个工具、每个平台的包（地址、SHA-256）。
+//! 共用的工具从 integemjack/edith.tools 下载（edith tools）：各个工具各自发版，固定的 index Release 上的 index.json 列出每个工具
+//! 最新的版本、每个平台的包（地址、SHA-256）。
 //! 装在 `~/.edith/tools/<工具>/`（程序在里面），`~/.edith/tools/installed.json` 记装了哪个版本。
 //! 能力配置里的命令是个光秃秃的名字时（`edith-connect`），先找装好的工具，再找 PATH；都没有、而 index.json 里有，就当场下载。
 //! `EDITH_TOOLS_INDEX` 可以换索引（网址或本地文件；包的地址也可以是本地路径，测试用）。
@@ -11,7 +12,12 @@ use sha2::Digest;
 
 use crate::home;
 
-const INDEX: &str = "https://github.com/integemjack/edith.tools/releases/latest/download/index.json";
+const INDEX: &str = "https://github.com/integemjack/edith.tools/releases/download/index/index.json";
+
+/// 一个工具在索引里的版本（各个工具各自发版：tools.<工具>.version；以前所有工具一个版本，在顶上的 version）
+fn version_of(index: &Value, tool: &Value) -> String {
+    tool["version"].as_str().or_else(|| index["version"].as_str()).unwrap_or("").to_string()
+}
 
 /// 这个程序编给哪个平台（和 edith.tools 的包名一样）
 pub fn platform() -> &'static str {
@@ -153,7 +159,7 @@ fn install_from(index: &Value, name: &str) -> Result<String, String> {
     }
     std::fs::rename(&program, &destination).map_err(|error| format!("装不上 {name}：{error}"))?;
     let _ = std::fs::remove_dir_all(&staging);
-    let version = index["version"].as_str().unwrap_or("").to_string();
+    let version = version_of(index, tool);
     let mut record = installed();
     record[name] = json!({ "version": version, "platform": platform(), "installed": chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false) });
     home::write_json(&tools_dir().join("installed.json"), &record)?;
@@ -195,11 +201,8 @@ pub fn list() -> Result<Vec<(String, String, String, String)>, String> {
     let mut rows = Vec::new();
     if let Ok(index) = &index {
         for (name, tool) in index["tools"].as_object().into_iter().flatten() {
-            let available = if tool["assets"].get(platform()).is_some() {
-                index["version"].as_str().unwrap_or("").to_string()
-            } else {
-                "（这个平台没有）".into()
-            };
+            let available =
+                if tool["assets"].get(platform()).is_some() { version_of(index, tool) } else { "（这个平台没有）".into() };
             let current = record[name]["version"].as_str().unwrap_or("").to_string();
             rows.push((name.clone(), current, available, tool["description"].as_str().unwrap_or("").to_string()));
         }

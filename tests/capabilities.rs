@@ -338,3 +338,79 @@ fn capability_can_approve() {
     assert!(wait_until(30, || response(&read("allow"), 1).is_some()), "{:?}", read("allow"));
     assert!(work.join("y.txt").exists(), "{:?}", read("allow"));
 }
+
+/// 像 Friday 的网关那样连进来：主令牌、说自己能批准；返回读到的消息的通道和写的一头
+fn connect_as_approver(home: &Path) -> (std::net::TcpStream, std::sync::mpsc::Receiver<Value>) {
+    use std::io::{BufRead, BufReader, Write};
+    let entry = std::fs::read_dir(home.join("instances"))
+        .unwrap()
+        .flatten()
+        .find_map(|entry| serde_json::from_slice::<Value>(&std::fs::read(entry.path()).ok()?).ok())
+        .expect("没有登记");
+    let mut stream = std::net::TcpStream::connect(entry["address"].as_str().unwrap()).unwrap();
+    writeln!(stream, "{}", json!({ "jsonrpc": "2.0", "method": "auth", "params": { "token": entry["token"] } })).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut writer = stream.try_clone().unwrap();
+    let reader = BufReader::new(stream.try_clone().unwrap());
+    std::thread::spawn(move || {
+        for line in reader.lines().map_while(Result::ok) {
+            let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
+            if message["method"] == "initialize" {
+                let reply = json!({ "jsonrpc": "2.0", "id": message["id"], "result": {
+                    "protocolVersion": "1", "name": "friday", "approves": true, "sessions": "all", "receives": ["done"] } });
+                let _ = writeln!(writer, "{reply}");
+                continue;
+            }
+            if message["method"] == "initialized" || message["method"] == "event" {
+                continue;
+            }
+            if sender.send(message).is_err() {
+                break;
+            }
+        }
+    });
+    (stream, receiver)
+}
+
+#[test]
+fn waits_for_an_approver_to_connect() {
+    use std::io::Write;
+    let (work, home) = scratch("approver-later");
+    let model = fake_model(&home.join("requests.jsonl"));
+    // 交话的能力自己不能批；一直开着的大脑没人能批时等，不马上不做
+    let write = r#"调用工具 write_file 参数 {"path":"z.txt","content":"z"}"#;
+    configure_cap(&home, json!([{ "delay": 0.3, "send": sense(write, "queue") }]), "done");
+    let _edith = command(&home, model.port, &work, &["run", "-C", work.to_str().unwrap()])
+        .env_remove("EDITH_PERMISSION_MODE")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(Running)
+        .unwrap();
+    assert!(wait_until(30, || std::fs::read_dir(home.join("instances")).is_ok_and(|mut dir| dir.next().is_some())), "大脑没登记");
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(!work.join("z.txt").exists(), "没批准就写了");
+    // 能批准的连上来：问它；会话列表报着在干的那一轮
+    let (mut stream, messages) = connect_as_approver(&home);
+    let approve = messages.recv_timeout(Duration::from_secs(10)).expect("连上来没问它批准");
+    assert_eq!(approve["method"], "approve", "{approve}");
+    assert!(approve["params"]["call"].as_str().is_some_and(|call| !call.is_empty()), "{approve}");
+    writeln!(stream, "{}", json!({ "jsonrpc": "2.0", "id": 7, "method": "sessions.list", "params": {} })).unwrap();
+    let listed = messages.recv_timeout(Duration::from_secs(10)).expect("sessions.list 没回话");
+    let working = listed["result"].as_array().unwrap().iter().find(|session| session["working"] == true).cloned().expect("没有在干的会话");
+    assert_eq!(working["turn"]["text"], write, "{working}");
+    writeln!(stream, "{}", json!({ "jsonrpc": "2.0", "id": approve["id"], "result": { "decision": "allow" } })).unwrap();
+    assert!(wait_until(30, || work.join("z.txt").exists()), "批准了没写");
+}
+
+#[test]
+fn linger_exits_when_idle() {
+    let (work, home) = scratch("linger");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let started = Instant::now();
+    let output = command(&home, model.port, &work, &["run", "--idle", "--linger", "2", "-C", work.to_str().unwrap()]).output().unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(started.elapsed() < Duration::from_secs(20), "闲着没退");
+    assert!(text(&output).contains("闲了 2 秒"), "{}", text(&output));
+    assert!(std::fs::read_dir(home.join("instances")).map_or(true, |mut dir| dir.next().is_none()), "登记没删");
+}

@@ -41,7 +41,9 @@ fn fake_index(root: &Path, corrupt: bool) -> std::path::PathBuf {
     let index = root.join(if corrupt { "bad-index.json" } else { "index.json" });
     std::fs::write(
         &index,
-        json!({ "version": "v9.9.9", "tools": { "fake-tool": { "description": "假的工具", "assets": assets } } }).to_string(),
+        // 各个工具各自发版：顶上的 version 是索引生成的时间，工具的版本在它自己下面
+        json!({ "version": "2026-10-24T00:00:00Z", "tools": { "fake-tool": { "description": "假的工具", "version": "v9.9.9", "assets": assets } } })
+            .to_string(),
     )
     .unwrap();
     index

@@ -214,7 +214,7 @@ EDITH                                  能力
 
 | 方法 | 参数 | 回话 |
 |---|---|---|
-| `sessions.list` | 无 | `[{id, title, cwd, created, updated, working}]`，新的在前 |
+| `sessions.list` | 无 | `[{id, title, cwd, created, updated, working, turn?}]`，新的在前；在干活的带 `turn: {id, text}`（哪一轮、交来的原话，后连上来的界面据此接着显示） |
 | `sessions.create` | `{cwd?, focus?, id?}` | 新会话 `{id, title, cwd, created, updated}`；`cwd` 默认焦点会话的工作目录；`focus: true` 顺便设成焦点；`id`：用这个 UUID（客户端先定好 id 再建，比如 Friday 的网关），这个 id 已经有了就回那段会话 |
 | `sessions.get` | `{id}` | 会话全文：上面的字段 + `history`（OpenAI 格式的历史）+ `working`（在干的那一轮的 id 或 `null`）+ `focus` |
 | `sessions.focus` | `{id}` | `{focus}`：设焦点 |
@@ -300,7 +300,9 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 `call` 是哪一个工具调用（同 `tool` 事件的 `id`）：界面按它把「允许 / 拒绝」放在那张工具卡片上。
 
 回话：`{"decision": "allow" | "always" | "deny", "reason"?: "…"}`。`always`：这个会话里同类的都行；`deny` 的 `reason` 交给模型。
-最多等 10 分钟，这一轮被停下就不等了。没人能批的就不做（`--auto`、`~/.edith/config.json` 的 `permissions` 见 [EDITH.md](EDITH.md#信任与审批)）。
+最多等 10 分钟，这一轮被停下就不等了。没人能批的就不做——`edith run`（一直开着的大脑）例外：等能批准的连上来再问它（同样最多 10 分钟，
+问着的那个断了也接着等下一个；开始等时推一条 `notice`），Friday 客户端关了再打开、换一台设备连上来照样能批。
+`--auto`、`~/.edith/config.json` 的 `permissions` 见 [EDITH.md](EDITH.md#信任与审批)。
 
 ## 7. 事件（`event`）
 
@@ -315,6 +317,7 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 | `type` | `data` | 什么时候 |
 |---|---|---|
 | `turn.started` | `{text, origin: {capability, kind, from}}` | 开始一轮：交来的原话、从哪来（`capability` 为空是终端里打的） |
+| `input` | `{text, origin}` | 干活时补充的话塞进了这一轮（工具跑完、下一段请求之前；原话，同 `turn.started`） |
 | `text` | `{text}` | 回答的文字，一块块到（拼起来是这一段回答） |
 | `thinking` | `{text}` | 模型的思考（模型给了才有） |
 | `tool` | `{id, name, arguments}` | 开始用一个工具（自带的、能力的动作、MCP 服务的） |
@@ -360,6 +363,7 @@ edith capabilities add <名字> <命令> [参数…]         接一个能力（�
 edith capabilities remove <名字>                     去掉
 edith run                                           一直开着，只听能力的
 edith run --idle                                    同上，但不新开会话（没有焦点会话，能力用 sessions.create 自己建；Friday 的网关这样起大脑）
+edith run --idle --linger 1800                      同上，没有连接（按配置起的不算）、没在干活半小时就退出
 ```
 
 这个目录有大脑在跑时，`edith capabilities` 不另起一份（独占的设备会撞），`add` / `remove` 只改配置，那个大脑重启后生效。
@@ -403,8 +407,9 @@ edith run --idle                                    同上，但不新开会话�
 
 ### 8.4 共用的工具（edith.tools）
 
-[integemjack/edith.tools](https://github.com/integemjack/edith.tools) 放大家共用的能力程序：`edith-websocket`（远程能力的中转）、
-`edith-connect`（共享设备）。每次发布在 Release 里放每个工具每个平台一个包和一份 `index.json`：
+[integemjack/edith.tools](https://github.com/integemjack/edith.tools) 放大家共用的程序：`edith-websocket`（远程能力的中转）、
+`edith-connect`（共享设备）、`edith-friday`（Friday 客户端的网关）。每个工具是独立的工程、各自发版（标签 `<工具>-vX.Y.N`，
+Release 上是这个工具每个平台一个包）；固定的 `index` Release 上的 `index.json` 列出每个工具最新的版本和包：
 
 ```
 edith tools                    可装的和装了的（版本、有没有新的）

@@ -157,6 +157,8 @@ struct State {
     tools: crate::permissions::Tools,
     /// 用户（或能力）最近交来的原话：交付检查、派给子智能体的背景按它（子智能体交回的不算）
     request: String,
+    /// 正在干的这一轮交来的原话（sessions.list 报给后连上来的客户端）
+    text: String,
 }
 
 /// 这个会话里最近交来的原话（子智能体交回的不算）
@@ -204,6 +206,23 @@ pub fn new_turn_id() -> String {
 /// 会话在干活吗；在干的是哪一轮
 pub fn working(session: &str) -> Option<String> {
     SESSIONS.lock().unwrap().get(session).filter(|state| state.working).map(|state| state.turn.clone())
+}
+
+/// 在干的那一轮：(轮, 交来的原话)
+pub fn current(session: &str) -> Option<(String, String)> {
+    SESSIONS.lock().unwrap().get(session).filter(|state| state.working).map(|state| (state.turn.clone(), state.text.clone()))
+}
+
+/// 有会话在干活（含派出去的子智能体）
+pub fn any_working() -> bool {
+    let sessions: Vec<String> = {
+        let all = SESSIONS.lock().unwrap();
+        if all.values().any(|state| state.working) {
+            return true;
+        }
+        all.keys().cloned().collect()
+    };
+    sessions.iter().any(|session| crate::team::busy(session))
 }
 
 /// 停下这个会话正在干的一轮（排着的也不干了，派出去的子智能体、工作流也停）；没在干返回 false
@@ -298,6 +317,7 @@ fn work(session_id: String, first: Input) {
             let mut sessions = SESSIONS.lock().unwrap();
             let state = sessions.entry(session_id.clone()).or_default();
             state.turn = input.turn.clone();
+            state.text = input.text.clone();
             state.tools = input.origin.tools.clone();
             state.cancel.clone()
         };
@@ -373,6 +393,10 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
             let mut sessions = SESSIONS.lock().unwrap();
             sessions.get_mut(session_id).map(|state| std::mem::take(&mut state.interjections)).unwrap_or_default()
         };
+        // 一条条塞进去的那一刻告诉界面（Friday 网关把它当一条用户消息接在这一轮里）
+        for item in &taken {
+            emit(session_id, &input.turn, "input", json!({ "text": item.text, "origin": item.origin.to_json() }));
+        }
         taken.iter().map(|item| item.origin.wrap("edith.interjection", &item.text)).collect::<Vec<_>>()
     };
     let mut turn = brain::run(&model, std::mem::take(&mut session.history), &text, &cwd, cancel, &context, &mut on_event, &mut interject);

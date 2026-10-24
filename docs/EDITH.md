@@ -67,7 +67,7 @@ worktree 里的会话记在仓库名下，回到仓库 `-c`、`edith sessions` �
 - **审批**（`src/approval.rs`）：写文件、改文件、跑命令、没说自己只读的能力动作和 MCP 工具；读工作目录外的、敏感的
   （`~/.ssh`、`.env`、密钥、`~/.edith`）；打开新网站（网址本身就能带数据出去）；访问本机 / 内网（防 SSRF，每一跳都看）——都先问。
   终端里打 `y` 这次行、`a` 这个会话里同类的都行、`n 原因` 不行；能力交来的那一轮问声明了 `approves` 的全权能力
-  （[协议 §6.5](CAPABILITY-PROTOCOL.md#65-approve请求)），`edith attach` 接上来的终端也能批。没人能批的就不做。
+  （[协议 §6.5](CAPABILITY-PROTOCOL.md#65-approve请求)），`edith attach` 接上来的终端也能批。没人能批的就不做（`edith run` 一直开着的大脑等能批准的连上来，最多 10 分钟）。
   `--auto`（或 `EDITH_PERMISSION_MODE=auto`）不问；`~/.edith/config.json`：
   `{"permissions": {"mode": "ask"|"auto", "allow": ["run_shell(git status*)", "fetch_url(github.com)"], "deny": ["run_shell(rm *)"], "additionalDirectories": ["~/notes"]}}`，
   deny 什么时候都挡。只认全局的 config.json：项目里的配置不能替你放开权限。
@@ -126,7 +126,7 @@ edith [目录]                            一句一句聊（新会话）；干�
 edith -c "接着把第二条做了"             接着这个目录最近的会话（-r <会话 id> 接着指定的）
 edith -w "…"                            开一个 git worktree 去那里干（没改东西退出时删掉）
 edith worktree [list | prune | remove <编号> [--force]]   看 -w 开的 worktree、清掉没改东西的（被强行结束留下的）、删掉一个
-edith run [目录]                        一直开着，只听能力的（新会话是焦点；-c / -r 同上；--idle 不新开会话）
+edith run [目录]                        一直开着，只听能力的（新会话是焦点；-c / -r 同上；--idle 不新开会话；--linger <秒> 没有连接、闲这么久就退）
 edith attach [目录] ["…"]               接到这个目录正在跑的大脑上（经套接字，自己当一个叫 terminal 的能力）
 edith sessions                          列出这个目录的会话
 edith instances                         列出这台机器上在跑的大脑、它们的能力和入口地址

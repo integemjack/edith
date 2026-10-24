@@ -31,6 +31,12 @@ use crate::permissions::Tools;
 
 /// 等批准最多多久
 const WAIT: Duration = Duration::from_secs(600);
+/// 一直开着的大脑（edith run）：没人能批时不马上不做，等能批准的连上来（Friday 客户端断了又连上、换一台设备打开），最多 WAIT
+static WAIT_FOR_APPROVER: AtomicBool = AtomicBool::new(false);
+
+pub fn wait_for_approver() {
+    WAIT_FOR_APPROVER.store(true, Ordering::Relaxed);
+}
 
 /// 怎么答的
 #[derive(Debug, Clone, PartialEq)]
@@ -360,8 +366,34 @@ pub fn check(
     }
 }
 
-/// 问谁：这一轮的来源能批就问它；不然终端；不然别的能批准的全权能力。都没有返回 None
+/// 问谁（见 ask_once）；一直开着的大脑没人能批时等一个连上来（问着的断了也接着等），等到 WAIT 或这一轮被停下
 fn ask(request: &Value, origin: &str, guest: bool, cancel: &AtomicBool) -> Option<Decision> {
+    let deadline = Instant::now() + WAIT;
+    let mut told = false;
+    loop {
+        if let Some(decision) = ask_once(request, origin, guest, cancel) {
+            return Some(decision);
+        }
+        if !WAIT_FOR_APPROVER.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            return None;
+        }
+        if !told {
+            told = true;
+            let (session, turn) = (request["session"].as_str().unwrap_or(""), request["turn"].as_str().unwrap_or(""));
+            let summary = request["summary"].as_str().unwrap_or("");
+            crate::mind::emit(
+                session,
+                turn,
+                "notice",
+                json!({ "text": format!("要批准（{summary}），等能批准的连上来（最多 {} 分钟）", WAIT.as_secs() / 60) }),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+/// 问一次：这一轮的来源能批就问它；不然终端；不然别的能批准的全权能力。都没有（或问着的断了）返回 None
+fn ask_once(request: &Value, origin: &str, guest: bool, cancel: &AtomicBool) -> Option<Decision> {
     if origin.is_empty() && terminal_ready() {
         return terminal(request, cancel);
     }

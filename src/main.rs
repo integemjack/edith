@@ -47,7 +47,7 @@ const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作�
   edith [目录]                     一句一句聊（新开一个会话；干活时再打字算补充；空行或 Ctrl+D 结束）
   edith -c [\"…\"]                   接着这个目录最近的一个会话
   edith -r <会话 id> [\"…\"]         接着某个会话（id 写开头几位就行）
-  edith run [目录]                 一直开着，只听能力的（新开一个会话；-c 接最近的；--idle 不开；Ctrl+C 退出）
+  edith run [目录]                 一直开着，只听能力的（新开一个会话；-c 接最近的；--idle 不开；--linger <秒> 闲这么久就退；Ctrl+C 退出）
   edith attach [目录] [\"…\"]        接到这个目录正在跑的大脑上（一句一句聊，或干一件事就退）
   edith sessions                   列出这个目录的会话
   edith instances                  列出这台机器上在跑的大脑
@@ -137,6 +137,8 @@ struct Options {
     auto: bool,
     /// run --idle：不开会话
     idle: bool,
+    /// run --linger <秒>：没有连接（按配置起的不算）、没在干活这么久就退出（edith-friday 起的大脑用，不然一直开着）
+    linger: Option<u64>,
     words: Vec<String>,
 }
 
@@ -261,6 +263,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         worktree: false,
         auto: false,
         idle: false,
+        linger: None,
         words: Vec::new(),
     };
     let mut rest = arguments.iter();
@@ -285,6 +288,10 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "-w" | "--worktree" => options.worktree = true,
             "--auto" => options.auto = true,
             "--idle" => options.idle = true,
+            "--linger" => {
+                let seconds = rest.next().ok_or("--linger 后面要跟秒数")?;
+                options.linger = Some(seconds.parse().map_err(|_| format!("--linger 要的是秒数，不是 {seconds}"))?);
+            }
             "-c" | "--continue" => options.continue_latest = true,
             "-r" | "--resume" => options.resume = Some(rest.next().ok_or("-r 后面要跟会话 id")?.clone()),
             "--" => options.words.extend(rest.by_ref().cloned()),
@@ -357,6 +364,8 @@ fn run(options: Options) -> Result<(), String> {
         mind::set_focus(&session.id);
     }
     prepare()?;
+    // 一直开着：要批准时没人能批就等能批准的连上来
+    approval::wait_for_approver();
     let printer = Arc::new(Mutex::new(Printer::new(options.quiet, options.verbose)));
     mind::listen(move |envelope| printer.lock().unwrap().show(envelope.kind, &envelope.session, &envelope.data, true));
     watch_interrupt(true);
@@ -369,8 +378,21 @@ fn run(options: Options) -> Result<(), String> {
         session.as_ref().map_or("没开会话".to_string(), |session| format!("会话 {}", &session.id[..8])),
         capabilities::names().len()
     );
+    let Some(linger) = options.linger else {
+        loop {
+            std::thread::park();
+        }
+    };
+    // 闲着（没有连接、没在干活）够久了就收拾好退出
+    let mut idle_since = std::time::Instant::now();
     loop {
-        std::thread::park();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if capabilities::visitors() > 0 || mind::any_working() {
+            idle_since = std::time::Instant::now();
+        } else if idle_since.elapsed().as_secs() >= linger {
+            eprintln!("闲了 {linger} 秒，没有连接：退出");
+            shutdown(0);
+        }
     }
 }
 
