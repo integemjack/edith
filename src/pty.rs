@@ -491,12 +491,11 @@ fn spawn(program: &str, args: &[String], cwd: &Path, cols: u16, rows: u16) -> Re
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     #[test]
-    #[cfg(unix)]
     fn runs_a_shell_and_replays() {
         let id = format!("test-{}", std::process::id());
         let dir = std::env::temp_dir();

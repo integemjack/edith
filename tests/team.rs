@@ -126,7 +126,8 @@ fn parallel_results_come_back_together() {
     let output = edith(&home, model.port, &work, &["并联测试"]);
     assert!(String::from_utf8_lossy(&output.stdout).contains("验收通过：2 个一起回来了"), "{}", text(&output));
     let main_turns = requests(&home).lines().filter(|line| !line.contains("你是 EDITH 派出的临时子 Agent")).count();
-    assert_eq!(main_turns, 3, "派、派完收尾、一起验收");
+    // 派、派完收尾、一起验收；交回赶上收尾那一段时并进去（机器慢时）是 2 次，一个回来开一轮才会更多
+    assert!((2..=3).contains(&main_turns), "主智能体请求了 {main_turns} 次");
     // 一批两个：同一个调用派的，排第 0、第 1
     let (_, records) = agent_records(&home, &work);
     let call = call_id(&home, &work, "run_parallel_tasks");

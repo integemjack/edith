@@ -436,8 +436,10 @@ fn session_changes_list_diff_and_revert() {
     // 工具新建 x.txt；命令往 y.txt 后面加一行
     let wrote = edith(&home, model.port, &work, &[r#"调用工具 write_file 参数 {"path":"x.txt","content":"新的\n"}"#]);
     assert!(wrote.status.success(), "{}", text(&wrote));
-    // 英文：Windows 的 cmd 写中文不是 UTF-8
-    let appended = edith(&home, model.port, &work, &["-c", r#"调用工具 run_shell 参数 {"command":"echo added >> y.txt"}"#]);
+    // 英文、Windows 上用 Add-Content（Windows PowerShell 5.1 的 >> 写的是 UTF-16，就不算文本、数不了行）
+    let command = if cfg!(windows) { "Add-Content -Encoding ascii y.txt added" } else { "echo added >> y.txt" };
+    let call = format!("调用工具 run_shell 参数 {}", json!({ "command": command }));
+    let appended = edith(&home, model.port, &work, &["-c", &call]);
     assert!(appended.status.success(), "{}", text(&appended));
     let session = common::read_sessions(&home, &work)[0]["id"].as_str().unwrap().to_string();
     let ask = |script: Value, wanted: i64| -> Vec<Value> {
