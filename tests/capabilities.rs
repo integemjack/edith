@@ -289,6 +289,11 @@ fn capability_can_approve() {
     let (work, home) = scratch("approve");
     let model = fake_model(&home.join("requests.jsonl"));
     let write = r#"调用工具 write_file 参数 {"path":"y.txt","content":"y"}"#;
+    // 两段各用各的记录文件（Windows 上前一段的能力程序可能还开着文件，删不掉）
+    let log = |decision: &str| home.join(format!("cap-{decision}.jsonl"));
+    let read = |decision: &str| -> Vec<Value> {
+        std::fs::read_to_string(log(decision)).unwrap_or_default().lines().filter_map(|line| serde_json::from_str(line).ok()).collect()
+    };
     let configure = |decision: &str| {
         let script = json!([{ "delay": 0.3, "send": request(1, "ask", json!({ "text": write })) }]);
         let config = json!({ "capabilities": [{
@@ -296,14 +301,13 @@ fn capability_can_approve() {
             "command": python(),
             "args": ["-u", fake("cap.py").to_str().unwrap()],
             "env": {
-                "CAP_LOG": home.join("cap.jsonl").to_str().unwrap(),
+                "CAP_LOG": log(decision).to_str().unwrap(),
                 "CAP_SCRIPT": script.to_string(),
                 "CAP_RECEIVES": "done",
                 "CAP_APPROVE": decision,
             },
         }]});
         std::fs::write(home.join("capabilities.json"), config.to_string()).unwrap();
-        let _ = std::fs::remove_file(home.join("cap.jsonl"));
     };
     let start = || {
         command(&home, model.port, &work, &["run"])
@@ -317,8 +321,8 @@ fn capability_can_approve() {
     // 它交来的那一轮要写文件：问它；它说不行
     configure("deny");
     let edith = start();
-    assert!(wait_until(30, || response(&received(&home), 1).is_some()), "{:?}", received(&home));
-    let messages = received(&home);
+    assert!(wait_until(30, || response(&read("deny"), 1).is_some()), "{:?}", read("deny"));
+    let messages = read("deny");
     let approve = messages.iter().find(|message| message["method"] == "approve").expect("没问它批准");
     assert!(approve["params"]["summary"].as_str().unwrap().contains("写文件"), "{approve}");
     let answer = response(&messages, 1).unwrap()["result"]["answer"].as_str().unwrap_or("").to_string();
@@ -328,6 +332,6 @@ fn capability_can_approve() {
     // 说行：写了
     configure("allow");
     let _edith = start();
-    assert!(wait_until(30, || response(&received(&home), 1).is_some()), "{:?}", received(&home));
-    assert!(work.join("y.txt").exists());
+    assert!(wait_until(30, || response(&read("allow"), 1).is_some()), "{:?}", read("allow"));
+    assert!(work.join("y.txt").exists(), "{:?}", read("allow"));
 }
