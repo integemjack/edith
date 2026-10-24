@@ -30,7 +30,7 @@ mod web;
 mod worktree;
 
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -64,6 +64,7 @@ const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作�
   edith tools                      列出 edith.tools 里的工具（装了哪个版本、有没有新的）
   edith tools install <工具>       下载、装上（edith-websocket、edith-connect……；能力要用时也会自己下）
   edith tools remove <工具>        去掉
+  edith friday install [--force]   让 Friday 客户端连这台时用 EDITH（装 edith-friday 当 ~/.friday-server/bin/friday-server；uninstall 换回去）
 
 选项：
   -C, --cwd <目录>    工作目录（默认当前目录）
@@ -194,7 +195,18 @@ fn main() {
     // --worktree：开一个 git worktree 去那里干（干活、聊天、run 才开）
     let starts_brain = !matches!(
         command.as_str(),
-        "sessions" | "instances" | "capabilities" | "caps" | "attach" | "tools" | "mcp" | "trust" | "worktree" | "worktrees" | "skills"
+        "sessions"
+            | "instances"
+            | "capabilities"
+            | "caps"
+            | "attach"
+            | "tools"
+            | "friday"
+            | "mcp"
+            | "trust"
+            | "worktree"
+            | "worktrees"
+            | "skills"
     );
     if starts_brain && options.worktree {
         match worktree::create(&workspace) {
@@ -223,6 +235,7 @@ fn main() {
             exit_on(result);
         }
         "tools" => exit_on(tools_command(&options.words[1..])),
+        "friday" => exit_on(friday_command(&options.words[1..])),
         "trust" => exit_on(trust_command(&options.words[1..])),
         "skills" => {
             let skills = skills::list();
@@ -684,6 +697,89 @@ fn tools_command(arguments: &[String]) -> Result<(), String> {
             }
         }
         _ => Err("用法：edith tools [install <工具>… | remove <工具>]".into()),
+    }
+}
+
+/// 是不是 edith-friday（跑它的 --version 看）
+fn is_gateway(path: &Path) -> bool {
+    std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).starts_with("edith-friday"))
+}
+
+/// edith friday install / uninstall / status：这台机器被 Friday 客户端连时用 EDITH——把 edith-friday（edith.tools 的网关，
+/// 本机没有就下载）装成 `~/.friday-server/bin/friday-server`，edith 自己拷一份在旁边（网关按工作目录起大脑时用它）
+fn friday_command(arguments: &[String]) -> Result<(), String> {
+    let executable = |name: &str| if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let bin = home::user_home().join(".friday-server").join("bin");
+    let target = bin.join(executable("friday-server"));
+    let brain = bin.join(executable("edith"));
+    let backup = bin.join(executable("friday-server.friday"));
+    let replace = |from: &Path, to: &Path| -> Result<(), String> {
+        // Windows 上正在跑的程序不能覆盖：先挪开
+        if to.exists() {
+            let old = to.with_extension(format!("old-{}", std::process::id()));
+            std::fs::rename(to, &old).map_err(|error| format!("挪不开 {}：{error}", to.display()))?;
+            let _ = std::fs::remove_file(&old);
+        }
+        std::fs::copy(from, to).map_err(|error| format!("拷不过去 {}：{error}", to.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o755));
+        }
+        Ok(())
+    };
+    match arguments.first().map(String::as_str) {
+        Some("install") => {
+            if target.exists() && !is_gateway(&target) {
+                if !arguments.iter().any(|argument| argument == "--force") {
+                    return Err(format!(
+                        "{} 已经是 Friday 自己的服务端：要换成 EDITH 加 --force（原来的改名成 {} 留着，edith friday uninstall 换回去）",
+                        target.display(),
+                        backup.display()
+                    ));
+                }
+                std::fs::rename(&target, &backup).map_err(|error| format!("挪不开原来的服务端：{error}"))?;
+            }
+            let gateway = downloads::locate("edith-friday")?;
+            std::fs::create_dir_all(&bin).map_err(|error| error.to_string())?;
+            replace(&gateway, &target)?;
+            let me = std::env::current_exe().map_err(|error| error.to_string())?;
+            if std::fs::canonicalize(&me).ok() != std::fs::canonicalize(&brain).ok() {
+                replace(&me, &brain)?;
+            }
+            println!("装好了：{} 是 edith-friday，{} 是 EDITH。", target.display(), brain.display());
+            println!("在 Friday 里照常添加这台机器（SSH）：连上来用的就是这台的 EDITH（模型在 ~/.edith/config.json）。");
+            println!("注意：这台装了 Friday 桌面版的话，客户端会先用桌面版自带的服务端。");
+            Ok(())
+        }
+        Some("uninstall") => {
+            if !target.exists() || !is_gateway(&target) {
+                return Err(format!("{} 不是 edith-friday，没动", target.display()));
+            }
+            std::fs::remove_file(&target).map_err(|error| error.to_string())?;
+            let _ = std::fs::remove_file(&brain);
+            if backup.exists() {
+                std::fs::rename(&backup, &target).map_err(|error| format!("换不回原来的服务端：{error}"))?;
+                println!("换回了 Friday 自己的服务端（{}）", target.display());
+            } else {
+                println!("去掉了（{}）", target.display());
+            }
+            Ok(())
+        }
+        None | Some("status") => {
+            match (target.exists(), target.exists() && is_gateway(&target)) {
+                (false, _) => {
+                    println!("{} 没有：Friday 客户端连这台时会装 Friday 自己的服务端。edith friday install 换成 EDITH", target.display())
+                }
+                (true, true) => println!("{} 是 edith-friday：Friday 客户端连这台用的是 EDITH", target.display()),
+                (true, false) => println!("{} 是 Friday 自己的服务端。edith friday install --force 换成 EDITH", target.display()),
+            }
+            Ok(())
+        }
+        _ => Err("用法：edith friday [install [--force] | uninstall | status]".into()),
     }
 }
 

@@ -208,6 +208,27 @@ pub fn working(session: &str) -> Option<String> {
     SESSIONS.lock().unwrap().get(session).filter(|state| state.working).map(|state| state.turn.clone())
 }
 
+/// 排着的（下一轮起做的）：[(轮, 原话)]
+pub fn queue_of(session: &str) -> Vec<(String, String)> {
+    SESSIONS
+        .lock()
+        .unwrap()
+        .get(session)
+        .map(|state| {
+            state.queue.iter().filter(|input| input.origin.kind != "agent").map(|input| (input.turn.clone(), input.text.clone())).collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 拿掉一段排着的（还没开始的那一轮）
+pub fn dequeue(session: &str, turn: &str) -> bool {
+    let mut sessions = SESSIONS.lock().unwrap();
+    let Some(state) = sessions.get_mut(session) else { return false };
+    let before = state.queue.len();
+    state.queue.retain(|input| input.turn != turn);
+    state.queue.len() != before
+}
+
 /// 在干的那一轮：(轮, 交来的原话)
 pub fn current(session: &str) -> Option<(String, String)> {
     SESSIONS.lock().unwrap().get(session).filter(|state| state.working).map(|state| (state.turn.clone(), state.text.clone()))
@@ -430,7 +451,13 @@ pub fn event_json(event: &Event) -> (&'static str, Value) {
         Event::Text(text) => ("text", json!({ "text": text })),
         Event::Thinking(text) => ("thinking", json!({ "text": text })),
         Event::Tool { id, name, arguments } => ("tool", json!({ "id": id, "name": name, "arguments": arguments })),
-        Event::Result { id, name, ok, text } => ("result", json!({ "id": id, "name": name, "ok": ok, "text": text })),
+        Event::Result { id, name, ok, text, lines } => {
+            let mut data = json!({ "id": id, "name": name, "ok": ok, "text": text });
+            if let Some([added, removed]) = lines {
+                data["lines"] = json!({ "added": added, "removed": removed });
+            }
+            ("result", data)
+        }
         Event::Stats(stats) => ("stats", stats.clone()),
         Event::Notice(text) => ("notice", json!({ "text": text })),
     }

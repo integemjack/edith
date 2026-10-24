@@ -729,8 +729,8 @@ impl Capability {
             "sense" => self.grant.sense,
             "ask" => self.grant.ask,
             "sessions.list" | "sessions.get" | "agents.list" | "changes.list" | "changes.diff" => self.grant.sessions >= Sessions::Read,
-            "sessions.create" | "sessions.focus" | "sessions.stop" | "sessions.remove" | "agents.stop" | "agents.send"
-            | "changes.revert" => self.grant.sessions == Sessions::All,
+            "sessions.create" | "sessions.focus" | "sessions.stop" | "sessions.remove" | "sessions.dequeue" | "agents.stop"
+            | "agents.send" | "agents.dequeue" | "changes.revert" => self.grant.sessions == Sessions::All,
             _ => true,
         };
         if allowed {
@@ -760,6 +760,11 @@ impl Capability {
                         // 在干的那一轮：哪一轮、交来的原话（后连上来的客户端据此接着显示）
                         if let Some((turn, text)) = current {
                             summary["turn"] = json!({ "id": turn, "text": text });
+                        }
+                        let queue = mind::queue_of(&session.id);
+                        if !queue.is_empty() {
+                            summary["queue"] =
+                                json!(queue.iter().map(|(turn, text)| json!({ "turn": turn, "text": text })).collect::<Vec<_>>());
                         }
                         summary
                     })
@@ -819,6 +824,14 @@ impl Capability {
                 }
                 Ok(json!({ "stopping": mind::stop(&id) }))
             }
+            "sessions.dequeue" => {
+                // 拿掉一段排着的（sense 排队时回的 turn）
+                let id = params.get("id").and_then(Value::as_str).ok_or_else(|| invalid("要给 id"))?;
+                let turn = params.get("turn").and_then(Value::as_str).ok_or_else(|| invalid("要给 turn"))?;
+                let session =
+                    Session::find(id).filter(|session| self.owns(&session.id)).ok_or((protocol::NO_SESSION, format!("没有会话 {id}")))?;
+                Ok(json!({ "removed": mind::dequeue(&session.id, turn) }))
+            }
             "sessions.remove" => {
                 // 删掉一段会话（在干活的先停下）：存档、改动基线、子 Agent 的运行记录一起删
                 let id = params.get("id").and_then(Value::as_str).ok_or_else(|| invalid("要给 id"))?;
@@ -842,7 +855,7 @@ impl Capability {
                 let agents = crate::team::list(session);
                 Ok(Value::Array(agents.into_iter().filter(|agent| self.owns(agent["session"].as_str().unwrap_or(""))).collect()))
             }
-            "agents.stop" | "agents.send" => {
+            "agents.stop" | "agents.send" | "agents.dequeue" => {
                 let id = params.get("id").and_then(Value::as_str).ok_or_else(|| invalid("要给 id"))?;
                 let session = crate::team::session_of(id).ok_or((protocol::NO_SESSION, format!("没有子 Agent {id}")))?;
                 if !self.owns(&session) {
@@ -851,13 +864,19 @@ impl Capability {
                 if method == "agents.stop" {
                     return Ok(json!({ "name": crate::team::stop(id) }));
                 }
+                if method == "agents.dequeue" {
+                    let item = params.get("item").and_then(Value::as_str).ok_or_else(|| invalid("要给 item"))?;
+                    return Ok(json!({ "removed": crate::team::dequeue(id, item) }));
+                }
                 let text = params
                     .get("text")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|text| !text.is_empty())
                     .ok_or_else(|| invalid("要给 text"))?;
-                crate::team::send(id, text).map(|name| json!({ "name": name })).map_err(|message| (protocol::INVALID_PARAMS, message))
+                crate::team::send(id, text)
+                    .map(|(name, item)| json!({ "name": name, "item": item }))
+                    .map_err(|message| (protocol::INVALID_PARAMS, message))
             }
             // 会话改动（changes.rs）：改了哪些文件、改动、撤销
             "changes.list" | "changes.diff" | "changes.revert" => {
@@ -1155,19 +1174,60 @@ pub fn is_action(full_name: &str) -> bool {
     capability.actions.iter().any(|action| action["name"].as_str() == Some(rest))
 }
 
-/// 请能力批准（approve 请求）。who：只问这一个；None：问能批准的全权能力里最后连上的那个。没人能批返回 None
+/// 这个能力能批准（声明了 approves、是全权的）
+pub fn can_approve(name: &str) -> bool {
+    native().iter().any(|capability| capability.name == name && capability.approves && capability.full())
+}
+
+/// 请能力批准（approve 请求）。who：只问这一个（交话的那个能力）；None：问全部能批准的全权能力（几个 Friday 客户端都显示待确认），
+/// 谁先答算谁的，其余的不再等、收一条 approve.cancel（界面把待确认收掉）。没人能批、问着的都断了返回 None
 pub fn ask_approval(who: Option<&str>, request: &Value, cancel: &AtomicBool) -> Option<crate::approval::Decision> {
-    let approver = native()
+    let approvers: Vec<Arc<Capability>> = native()
         .into_iter()
         .filter(|capability| capability.approves && capability.full() && who.is_none_or(|who| capability.name == who))
-        .last()?;
-    let reply = approver.request("approve", request.clone(), Duration::from_secs(600), Some(cancel));
-    match reply {
-        Ok(result) => Some(crate::approval::Decision::parse(&result)),
-        // 问着问着断了（Friday 客户端关了）：当没人能批，等着的会改问下一个连上来的
-        Err(error) if error_text(&error) == GONE => None,
-        Err(error) => Some(crate::approval::Decision::Deny(format!("「{}」没答上：{}", approver.name, error_text(&error)))),
+        .collect();
+    if approvers.is_empty() {
+        return None;
     }
+    let settled = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = mpsc::channel::<(String, Result<Value, Value>)>();
+    for approver in &approvers {
+        let (approver, request, sender, settled) = (approver.clone(), request.clone(), sender.clone(), settled.clone());
+        std::thread::spawn(move || {
+            let reply = approver.request("approve", request, Duration::from_secs(600), Some(&settled));
+            let _ = sender.send((approver.name.clone(), reply));
+        });
+    }
+    drop(sender);
+    let mut outcome = None;
+    let mut waiting = approvers.len();
+    while waiting > 0 && !cancel.load(Ordering::Relaxed) {
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok((name, reply)) => {
+                waiting -= 1;
+                match reply {
+                    Ok(result) => {
+                        outcome = Some(crate::approval::Decision::parse(&result));
+                        break;
+                    }
+                    // 问着问着断了（Friday 客户端关了）：等别的答；都断了当没人能批，等着的会改问下一个连上来的
+                    Err(error) if error_text(&error) == GONE => {}
+                    Err(error) => {
+                        outcome = Some(crate::approval::Decision::Deny(format!("「{name}」没答上：{}", error_text(&error))));
+                        break;
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    settled.store(true, Ordering::Relaxed);
+    let done = json!({ "session": request["session"], "call": request["call"], "agent": request["agent"] });
+    for approver in &approvers {
+        approver.notify("approve.cancel", done.clone());
+    }
+    outcome
 }
 
 /// 这个工具名是能力的只读动作

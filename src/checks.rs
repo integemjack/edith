@@ -259,7 +259,7 @@ mod tests {
         crate::brain::setup_prompts();
         let wrote = record(&[
             Event::Tool { id: "1".into(), name: "write_file".into(), arguments: json!({ "path": "a.py", "content": "x" }) },
-            Event::Result { id: "1".into(), name: "write_file".into(), ok: true, text: "写好了".into() },
+            Event::Result { id: "1".into(), name: "write_file".into(), ok: true, text: "写好了".into(), lines: None },
             Event::Text("写好了 a.py".into()),
         ]);
         let followup = main_followup("帮我写个脚本", &wrote.blocks, true, &HashSet::new()).unwrap();

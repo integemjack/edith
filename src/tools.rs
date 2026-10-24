@@ -43,6 +43,39 @@ pub struct Outcome {
     pub text: String,
 }
 
+thread_local! {
+    /// 这一步（write_file / edit_file / run_shell）加了几行、删了几行：brain 在发 result 事件时取走（卡片上的「+N −M」）
+    static LINES: std::cell::Cell<Option<[usize; 2]>> = const { std::cell::Cell::new(None) };
+}
+
+/// 取走这个线程上一步记下的增删行数
+pub fn take_lines() -> Option<[usize; 2]> {
+    LINES.with(|lines| lines.take())
+}
+
+fn note_lines(added: usize, removed: usize) {
+    LINES.with(|lines| lines.set(Some([added, removed])));
+}
+
+/// 去掉 Windows 的 \\?\ 前缀（UNC 的不动）
+fn strip_verbatim(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// 一个文本文件现在的全文（没有、太大、不是文字的当空）
+fn text_of(path: &str) -> String {
+    let file = Path::new(path);
+    if std::fs::metadata(file).is_ok_and(|meta| meta.len() <= 1 << 20) {
+        std::fs::read_to_string(file).unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
 impl Outcome {
     fn ok(text: impl Into<String>) -> Self {
         Outcome { ok: true, text: text.into() }
@@ -159,6 +192,9 @@ pub fn run(
     if !missing.is_empty() {
         return Some(Outcome::failed(format!("缺少参数：{}", missing.join("、"))));
     }
+    // Windows 上的工作目录可能带 \\?\ 前缀（canonicalize 出来的）：工具给模型看的、会话改动记的路径、命令前后的扫描都用不带前缀的
+    let plain = strip_verbatim(cwd);
+    let cwd = plain.as_path();
     let working = tool_files::slash(cwd);
     let path = |key: &str| tool_files::slash(&resolve(text(arguments, key).unwrap_or("."), cwd));
     let output = |result: Result<tool_files::Output, ToolError>| match result {
@@ -186,6 +222,7 @@ pub fn run(
             }
             // 会话改动：第一次动它之前的样子记成基线（changes.rs）
             crate::changes::before_write(session, &target);
+            let before = text_of(&target);
             let outcome = if name == "write_file" {
                 output(tool_files::write_file(&target, text(arguments, "content").unwrap_or("")))
             } else {
@@ -195,6 +232,8 @@ pub fn run(
                 remember(session, &target);
                 // 同时跑着的命令（并行的子智能体）不把它算成命令改的
                 friday_core::file_changes::note_written(&target, &tool_files::slash(&home::user_home()));
+                let counts = friday_core::line_diff::count_text(&before, &text_of(&target));
+                note_lines(counts.added, counts.removed);
             }
             outcome
         }
@@ -229,8 +268,11 @@ pub fn run(
             let home_dir = tool_files::slash(&home::user_home());
             let snapshot = friday_core::file_changes::before(command, &working, &home_dir, &working);
             let outcome = run_shell(command, int(arguments, "timeout_seconds"), cwd, cancel);
-            let (_, changed) = friday_core::file_changes::after(&snapshot);
+            let (counts, changed) = friday_core::file_changes::after(&snapshot);
             crate::changes::note_shell(session, &changed);
+            if let Some(counts) = counts {
+                note_lines(counts.added, counts.removed);
+            }
             outcome
         }
         _ => return None,

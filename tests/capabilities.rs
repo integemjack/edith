@@ -436,7 +436,8 @@ fn session_changes_list_diff_and_revert() {
     // 工具新建 x.txt；命令往 y.txt 后面加一行
     let wrote = edith(&home, model.port, &work, &[r#"调用工具 write_file 参数 {"path":"x.txt","content":"新的\n"}"#]);
     assert!(wrote.status.success(), "{}", text(&wrote));
-    let appended = edith(&home, model.port, &work, &["-c", r#"调用工具 run_shell 参数 {"command":"echo 加的 >> y.txt"}"#]);
+    // 英文：Windows 的 cmd 写中文不是 UTF-8
+    let appended = edith(&home, model.port, &work, &["-c", r#"调用工具 run_shell 参数 {"command":"echo added >> y.txt"}"#]);
     assert!(appended.status.success(), "{}", text(&appended));
     let session = common::read_sessions(&home, &work)[0]["id"].as_str().unwrap().to_string();
     let ask = |script: Value, wanted: i64| -> Vec<Value> {
@@ -472,8 +473,38 @@ fn session_changes_list_diff_and_revert() {
     );
     let diff = &response(&messages, 2).unwrap()["result"];
     assert_eq!(diff["old"].as_str(), Some("原来\n"), "{diff}");
-    assert!(diff["new"].as_str().unwrap().contains("加的"), "{diff}");
+    assert!(diff["new"].as_str().unwrap().contains("added"), "{diff}");
     assert_eq!(response(&messages, 3).unwrap()["result"]["failed"], json!([]));
     assert_eq!(std::fs::read_to_string(work.join("y.txt")).unwrap(), "原来\n");
     assert!(!work.join("x.txt").exists(), "新建的没删");
+}
+
+#[test]
+fn every_approver_is_asked_and_the_rest_are_told() {
+    use std::io::Write;
+    let (work, home) = scratch("approvers");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let write = r#"调用工具 write_file 参数 {"path":"w.txt","content":"w"}"#;
+    configure_cap(&home, json!([{ "delay": 2.0, "send": sense(write, "queue") }]), "done");
+    let _edith = command(&home, model.port, &work, &["run", "-C", work.to_str().unwrap()])
+        .env_remove("EDITH_PERMISSION_MODE")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(Running)
+        .unwrap();
+    assert!(wait_until(30, || std::fs::read_dir(home.join("instances")).is_ok_and(|mut dir| dir.next().is_some())), "大脑没登记");
+    // 两个客户端都连着：两边都问
+    let (mut first, first_messages) = connect_as_approver(&home);
+    let (_second, second_messages) = connect_as_approver(&home);
+    let asked = first_messages.recv_timeout(Duration::from_secs(15)).expect("第一个没被问");
+    assert_eq!(asked["method"], "approve", "{asked}");
+    let other = second_messages.recv_timeout(Duration::from_secs(15)).expect("第二个没被问");
+    assert_eq!(other["method"], "approve", "{other}");
+    // 第一个先答：第二个收到 approve.cancel
+    writeln!(first, "{}", json!({ "jsonrpc": "2.0", "id": asked["id"], "result": { "decision": "allow" } })).unwrap();
+    let cancel = second_messages.recv_timeout(Duration::from_secs(10)).expect("第二个没收到 approve.cancel");
+    assert_eq!(cancel["method"], "approve.cancel", "{cancel}");
+    assert_eq!(cancel["params"]["call"], asked["params"]["call"]);
+    assert!(wait_until(30, || work.join("w.txt").exists()), "批准了没写");
 }

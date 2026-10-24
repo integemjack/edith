@@ -31,8 +31,8 @@ pub enum Event {
     Thinking(String),
     /// 开始用一个工具
     Tool { id: String, name: String, arguments: Value },
-    /// 用完
-    Result { id: String, name: String, ok: bool, text: String },
+    /// 用完（lines：改文件、跑命令这一步加了几行、删了几行）
+    Result { id: String, name: String, ok: bool, text: String, lines: Option<[usize; 2]> },
     /// 一段请求的用量（engine_loop 的统计）
     Stats(Value),
     /// 顺带说一句（重试、压了上下文……）
@@ -401,6 +401,7 @@ pub fn run(
             let name = call["name"].as_str().unwrap_or("").to_string();
             let arguments = call["arguments"].as_object().cloned().unwrap_or_default();
             on(Event::Tool { id: id.clone(), name: name.clone(), arguments: Value::Object(arguments.clone()) });
+            crate::tools::take_lines();
             let outcome = if let Some(rejected) = call["rejected"].as_str() {
                 Outcome { ok: false, text: rejected.to_string() }
             } else if cancel.load(Ordering::Relaxed) {
@@ -408,7 +409,8 @@ pub fn run(
             } else {
                 execute(&id, &name, &arguments, cwd, cancel, context)
             };
-            on(Event::Result { id: id.clone(), name: name.clone(), ok: outcome.ok, text: outcome.text.clone() });
+            let lines = crate::tools::take_lines();
+            on(Event::Result { id: id.clone(), name: name.clone(), ok: outcome.ok, text: outcome.text.clone(), lines });
             results.push((id, name, outcome.text));
         }
         let added: Vec<Value> = interject().into_iter().map(|text| json!({ "role": "user", "content": text })).collect();

@@ -58,7 +58,12 @@ fn installed() -> Value {
 
 /// PATH 里有没有这个程序
 fn in_path(command: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else { return false };
+    find_in_path(command).is_some()
+}
+
+/// PATH 里这个程序的完整路径
+fn find_in_path(command: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
     let names: Vec<String> = if cfg!(windows) {
         let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into());
         std::iter::once(command.to_string())
@@ -67,7 +72,20 @@ fn in_path(command: &str) -> bool {
     } else {
         vec![command.to_string()]
     };
-    std::env::split_paths(&paths).any(|dir| names.iter().any(|name| dir.join(name).is_file()))
+    std::env::split_paths(&paths).find_map(|dir| names.iter().map(|name| dir.join(name)).find(|path| path.is_file()))
+}
+
+/// 一个工具程序的完整路径：装好的、PATH 里的；都没有、edith.tools 里有就下载（同 resolve，但一定回能直接打开的路径）
+pub fn locate(command: &str) -> Result<PathBuf, String> {
+    let tool = installed_path(command);
+    if tool.is_file() {
+        return Ok(tool);
+    }
+    if let Some(path) = find_in_path(command) {
+        return Ok(path);
+    }
+    install(command)?;
+    Ok(installed_path(command))
 }
 
 /// 能力配置里的命令 → 要起的程序：带路径的原样；名字：装好的工具 → PATH → 从 edith.tools 下载

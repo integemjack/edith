@@ -399,9 +399,11 @@ fn ask_once(request: &Value, origin: &str, guest: bool, cancel: &AtomicBool) -> 
     if origin.is_empty() && terminal_ready() {
         return terminal(request, cancel);
     }
+    // 交话的能力能批：问全部能批准的（同一台的几个 Friday 客户端都显示待确认，谁先答算谁的）
     if !guest
         && !origin.is_empty()
-        && let Some(decision) = crate::capabilities::ask_approval(Some(origin), request, cancel)
+        && crate::capabilities::can_approve(origin)
+        && let Some(decision) = crate::capabilities::ask_approval(None, request, cancel)
     {
         return Some(decision);
     }

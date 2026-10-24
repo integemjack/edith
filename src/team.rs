@@ -101,7 +101,8 @@ struct Agent {
     history: Mutex<Vec<Value>>,
     recorder: Mutex<Recorder>,
     cancel: Mutex<Arc<AtomicBool>>,
-    inbox: Mutex<Vec<String>>,
+    /// 等它做完当前这一步再看的话（追加指示、到时限的提醒）
+    inbox: Mutex<Vec<Inbox>>,
     /// 派它的那个工具调用（上级运行记录里的 delegate_task / run_parallel_tasks / run_workflow 的调用 id）、它是那一批里第几个、哪种派法
     call: String,
     slot: usize,
@@ -113,6 +114,19 @@ struct Agent {
     activity: Mutex<Value>,
     /// 给界面看的运行记录：[{type: text / thinking, text} | {type: tool, call, name, arguments, status, result}]
     transcript: Mutex<Vec<Value>>,
+}
+
+/// 一条等着它看的话：id（界面上拿掉用）、给模型的那段、原话（给界面看；系统自己加的提醒是空的，不列）
+struct Inbox {
+    id: String,
+    prompt: String,
+    text: String,
+}
+
+impl Inbox {
+    fn new(prompt: String, text: &str) -> Inbox {
+        Inbox { id: uuid::Uuid::new_v4().simple().to_string(), prompt, text: text.to_string() }
+    }
 }
 
 static AGENTS: LazyLock<Mutex<HashMap<String, Arc<Agent>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -369,6 +383,7 @@ fn meta(agent: &Agent) -> Value {
         "steps": agent.steps.load(Ordering::Relaxed),
         "activity": *agent.activity.lock().unwrap(),
         "reply": *agent.reply.lock().unwrap(),
+        "inbox": agent.inbox.lock().unwrap().iter().filter(|item| !item.text.is_empty()).map(|item| json!({ "id": item.id, "text": item.text })).collect::<Vec<_>>(),
     })
 }
 
@@ -406,12 +421,20 @@ fn record(agent: &Agent, event: &Event) {
                     .push(json!({ "type": "tool", "call": id, "name": name, "arguments": arguments, "status": "running", "result": "" }));
                 ("tool", json!({ "id": id, "name": name, "arguments": arguments }))
             }
-            Event::Result { id, name, ok, text } => {
+            Event::Result { id, name, ok, text, lines } => {
+                let lines = lines.map(|[added, removed]| json!({ "added": added, "removed": removed }));
                 if let Some(tool) = transcript.iter_mut().rev().find(|piece| piece["type"] == "tool" && piece["call"] == json!(id)) {
                     tool["status"] = json!(if *ok { "succeeded" } else { "failed" });
                     tool["result"] = json!(text);
+                    if let Some(lines) = &lines {
+                        tool["lines"] = lines.clone();
+                    }
                 }
-                ("result", json!({ "id": id, "name": name, "ok": ok, "text": text }))
+                let mut data = json!({ "id": id, "name": name, "ok": ok, "text": text });
+                if let Some(lines) = lines {
+                    data["lines"] = lines;
+                }
+                ("result", data)
             }
             Event::Notice(text) => ("notice", json!({ "text": text })),
             _ => return,
@@ -460,14 +483,32 @@ pub fn stop(id: &str) -> Option<String> {
     Some(agent.name.clone())
 }
 
-/// agents.send：给在做的子 Agent 追加指示（同 message_agent），它做完当前这一步就看到
-pub fn send(id: &str, message: &str) -> Result<String, String> {
+/// agents.send：给在做的子 Agent 追加指示（同 message_agent），它做完当前这一步就看到；返回 (名字, 这条的 id)
+pub fn send(id: &str, message: &str) -> Result<(String, String), String> {
     let agent = AGENTS.lock().unwrap().get(id).cloned().ok_or_else(|| format!("没有子 Agent {id}"))?;
     if !matches!(*agent.state.lock().unwrap(), State::Waiting | State::Running) {
         return Err(format!("「{}」已经交回了", agent.name));
     }
-    agent.inbox.lock().unwrap().push(text("edith.sub.message", &[("text", message.to_string())]));
-    Ok(agent.name.clone())
+    let item = Inbox::new(text("edith.sub.message", &[("text", message.to_string())]), message);
+    let item_id = item.id.clone();
+    agent.inbox.lock().unwrap().push(item);
+    publish(&agent);
+    Ok((agent.name.clone(), item_id))
+}
+
+/// agents.dequeue：拿掉一条它还没看的追加指示
+pub fn dequeue(id: &str, item: &str) -> bool {
+    let Some(agent) = AGENTS.lock().unwrap().get(id).cloned() else { return false };
+    let removed = {
+        let mut inbox = agent.inbox.lock().unwrap();
+        let before = inbox.len();
+        inbox.retain(|entry| entry.id != item);
+        inbox.len() != before
+    };
+    if removed {
+        publish(&agent);
+    }
+    removed
 }
 
 fn notice(agent: &Agent, text: String) {
@@ -505,7 +546,7 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
                 if let Some(deadline) = deadline {
                     let elapsed = started.elapsed();
                     if elapsed >= deadline && !warned {
-                        agent.inbox.lock().unwrap().push(text("edith.sub.deadline", &[]));
+                        agent.inbox.lock().unwrap().push(Inbox::new(text("edith.sub.deadline", &[]), ""));
                         warned = true;
                     }
                     if elapsed >= deadline + Duration::from_secs(60) && !cancel.load(Ordering::Relaxed) {
@@ -553,7 +594,13 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
                 agent.recorder.lock().unwrap().on(&event);
                 record(agent, &event);
             };
-            let mut interject = || std::mem::take(&mut *agent.inbox.lock().unwrap());
+            let mut interject = || {
+                let taken: Vec<String> = std::mem::take(&mut *agent.inbox.lock().unwrap()).into_iter().map(|item| item.prompt).collect();
+                if !taken.is_empty() {
+                    publish(agent);
+                }
+                taken
+            };
             let turn = brain::run(&model, history, &message, &agent.cwd, &cancel, &context, &mut on, &mut interject);
             history = turn.history;
             if turn.stopped {
@@ -831,7 +878,7 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
             if !matches!(*agent.state.lock().unwrap(), State::Waiting | State::Running) {
                 return Some(refuse(format!("「{}」已经交回了：要它改就用 rework_agent", agent.name)));
             }
-            agent.inbox.lock().unwrap().push(text("edith.sub.message", &[("text", message)]));
+            agent.inbox.lock().unwrap().push(Inbox::new(text("edith.sub.message", &[("text", message.clone())]), &message));
             Outcome { ok: true, text: format!("已经告诉「{}」，它做完当前这一步就会看到", agent.name) }
         }
         _ => {
