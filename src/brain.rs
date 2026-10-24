@@ -1,0 +1,344 @@
+//! 大脑：一轮对话——用户的话 → 调模型（流式）→ 有工具调用就用工具、把结果交回模型 → 直到给出最终回答。
+//! 决定都在 friday-core 的 engine_loop（截断续写、复读、工具轮次上限、上下文压缩、统计），这里只发请求、读流、用工具。
+
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use friday_core::chat_stream::{self, Parser, StreamError};
+use friday_core::engine_loop::{self, Loop, Settings};
+use friday_core::prompts::{self, Platform};
+use friday_core::quota::{self, Limit};
+use friday_core::{chat_request, tool_aliases};
+use serde_json::{Map, Value, json};
+
+use crate::home::{self, Model};
+use crate::http::{self, Failure};
+use crate::limbs;
+use crate::tools::{self, Outcome};
+
+/// 一轮里最多请求几次模型（到了让模型把目前的结果交出来）
+const MAX_TOOL_ROUNDS: i64 = 200;
+/// 一段请求出错（断网、繁忙、限流）最多重试几次
+const MAX_ATTEMPTS: i64 = 6;
+
+/// 干活过程中交给外面（终端、对外接口）的事
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// 回答的文字（一块块）
+    Text(String),
+    /// 思考（模型给了才有）
+    Thinking(String),
+    /// 开始用一个工具
+    Tool { id: String, name: String, arguments: Value },
+    /// 用完
+    Result { id: String, name: String, ok: bool, text: String },
+    /// 一段请求的用量（engine_loop 的统计）
+    Stats(Value),
+    /// 顺带说一句（重试、压了上下文……）
+    Notice(String),
+}
+
+/// 一轮的结果
+pub struct Turn {
+    /// 这一轮之后的历史（存进会话）
+    pub history: Vec<Value>,
+    /// 最终回答
+    pub answer: String,
+    pub error: Option<String>,
+    pub stopped: bool,
+}
+
+/// 装提示词：自带的三份 + 数据目录里可改的那份（~/.edith/Prompts）
+pub fn setup_prompts() {
+    let bundled = [
+        ("edith.md", include_str!("../prompts/edith.md")),
+        ("prompts-tools.md", include_str!("../prompts/prompts-tools.md")),
+        ("prompts-framework.md", include_str!("../prompts/prompts-framework.md")),
+    ]
+    .into_iter()
+    .map(|(name, text)| (name.to_string(), text.to_string()))
+    .collect();
+    let dir = home::dir().join("Prompts");
+    let value = |name: &str, text: String| (name.to_string(), Platform::Value(text));
+    let section = |name: &str, key: &str| (name.to_string(), Platform::Section(key.to_string()));
+    let platform = vec![
+        value("trash", if cfg!(target_os = "macos") { "废纸篓".into() } else { "回收站".into() }),
+        value("shell", tools::shell_title()),
+        if cfg!(windows) { section("shellHint", "platform.shell-hint.powershell") } else { value("shellHint", String::new()) },
+        section("speakResult", "platform.speak-result.file"),
+        section("toolCodeCwd", "platform.tool-code-cwd"),
+        section("scriptCwd", "platform.script-cwd"),
+        value("promptsDir", dir.to_string_lossy().into_owned()),
+    ];
+    prompts::setup(bundled, Some(dir), platform);
+}
+
+fn args(pairs: &[(&str, String)]) -> prompts::Args {
+    pairs.iter().map(|(name, value)| (name.to_string(), value.clone())).collect()
+}
+
+/// 系统提示
+pub fn instructions(cwd: &Path) -> String {
+    let list = limbs::summary();
+    let limbs = if list.is_empty() { String::new() } else { prompts::text("edith.limbs", &args(&[("list", list)]), None) };
+    prompts::text(
+        "edith.main",
+        &args(&[
+            ("cwd", cwd.to_string_lossy().into_owned()),
+            ("os", format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)),
+            ("shell", tools::shell_title()),
+            ("now", {
+                let now = chrono::Local::now();
+                format!("{}（{}）", now.format("%Y-%m-%d %H:%M"), tools::weekday(&now))
+            }),
+            ("limbs", limbs),
+        ]),
+        None,
+    )
+}
+
+/// 给模型的工具：自带的 + 四肢带来的
+pub fn tool_specs() -> Vec<Value> {
+    let mut specs = tools::specs();
+    specs.extend(limbs::specs());
+    specs
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn wait(seconds: f64, cancel: &AtomicBool) {
+    let until = std::time::Instant::now() + Duration::from_secs_f64(seconds.max(0.0));
+    while std::time::Instant::now() < until && !cancel.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// 用一个工具：自带的、四肢的；名字写走样的按 Friday 的别名表认回来
+fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool) -> Outcome {
+    if let Some(outcome) = tools::run(name, arguments, cwd, cancel).or_else(|| limbs::call(name, arguments)) {
+        return outcome;
+    }
+    let canonical = tool_aliases::canonical_name(name);
+    if canonical != name
+        && let Some(outcome) = tools::run(&canonical, &tool_aliases::canonical_arguments(&canonical, arguments), cwd, cancel)
+    {
+        return outcome;
+    }
+    Outcome { ok: false, text: format!("没有这个工具：{name}") }
+}
+
+enum Request {
+    Done { pass: engine_loop::Pass, started: i64, finished: i64, first: Option<i64> },
+    Retry,
+    Failed(String),
+}
+
+/// 发一段请求、读完流
+fn request(
+    brain: &mut Loop,
+    model: &Model,
+    include_tools: bool,
+    show_reasoning: bool,
+    attempt: i64,
+    cancel: &AtomicBool,
+    on: &mut dyn FnMut(Event),
+) -> Request {
+    let url = format!("{}/chat/completions", model.base_url);
+    let body = brain.body(include_tools, None);
+    let mut parser = Parser::new(show_reasoning, true);
+    let started = now_ms();
+    let mut first: Option<i64> = None;
+    let mut stream_error: Option<StreamError> = None;
+    let mut in_reasoning = false;
+    let outcome = http::post_sse(&url, &model.api_key, &body, |data| {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        let Ok(chunk) = serde_json::from_str::<Value>(data) else { return true };
+        let feed = parser.feed(&chunk, chrono::Utc::now());
+        if feed.first_token {
+            first = Some(now_ms());
+        }
+        for piece in feed.chunks {
+            match piece.as_str() {
+                "<think>" => in_reasoning = true,
+                "</think>" => in_reasoning = false,
+                _ => on(if in_reasoning { Event::Thinking(piece) } else { Event::Text(piece) }),
+            }
+        }
+        if let Some(error) = feed.error {
+            stream_error = Some(error);
+            return false;
+        }
+        !feed.looped
+    });
+    let retry = |message: String, delay: f64, on: &mut dyn FnMut(Event)| {
+        if attempt >= MAX_ATTEMPTS {
+            return Request::Failed(message);
+        }
+        on(Event::Notice(format!("{message}——{delay:.0} 秒后重试（第 {attempt} 次）")));
+        wait(delay, cancel);
+        Request::Retry
+    };
+    match outcome {
+        Ok(saw_done) => {
+            match stream_error {
+                Some(StreamError::RateLimit { message }) => return retry(message, chat_request::retry_delay(attempt, None), on),
+                Some(StreamError::Quota { message, .. }) => return Request::Failed(format!("额度用完了：{message}")),
+                Some(StreamError::Failed { message }) => return Request::Failed(message),
+                None => {}
+            }
+            let result = parser.result();
+            let empty = Map::new();
+            let object = result.as_object().unwrap_or(&empty);
+            if !cancel.load(Ordering::Relaxed)
+                && let Some((transient, message)) = chat_stream::interrupted(
+                    object.get("finishReason").and_then(Value::as_str),
+                    saw_done || object.get("loop").is_some_and(|found| !found.is_null()),
+                )
+            {
+                // 一个字都还没出来就断了：重发；出了一半的照收（模型下一段会接着做）
+                if !transient {
+                    return Request::Failed(message);
+                }
+                if first.is_none() {
+                    return retry(message, chat_request::retry_delay(attempt, None), on);
+                }
+                on(Event::Notice(message));
+            }
+            Request::Done { pass: engine_loop::pass_from(object), started, finished: now_ms(), first }
+        }
+        Err(Failure::Network(message)) if first.is_none() => {
+            retry(format!("网络出错：{message}"), chat_request::retry_delay(attempt, None), on)
+        }
+        Err(failure @ Failure::Network(_)) => Request::Failed(failure.message()),
+        Err(Failure::Status { status, body, retry_after }) => {
+            let status_code = status as i64;
+            if let Some((prompt_tokens, context_tokens)) = chat_request::context_overflow(status_code, &body) {
+                let decision = brain.overflow(prompt_tokens, context_tokens);
+                if decision["retry"].as_bool() == Some(true) && attempt < MAX_ATTEMPTS {
+                    on(Event::Notice("上下文太长，压短了重发".into()));
+                    return Request::Retry;
+                }
+                return Request::Failed(format!("上下文超过了模型的上限（{context_tokens}）：开个新会话，或把要做的拆小"));
+            }
+            let unsupported = chat_request::unsupported_parameters(status_code, &body);
+            if !unsupported.is_empty() && attempt < MAX_ATTEMPTS {
+                chat_request::remember_unsupported(&model.engine_id(), &unsupported);
+                on(Event::Notice(format!("模型不接受参数 {}，去掉重发", unsupported.join("、"))));
+                return Request::Retry;
+            }
+            match quota::classify(status_code, &body) {
+                Some(Limit::Usage | Limit::Balance | Limit::Denied) => {
+                    return Request::Failed(Failure::Status { status, body, retry_after }.message());
+                }
+                Some(Limit::RateLimit) => {
+                    return retry(format!("限流（HTTP {status}）"), chat_request::retry_delay(attempt, retry_after), on);
+                }
+                _ => {}
+            }
+            if status == 429 || status >= 500 {
+                return retry(format!("服务繁忙（HTTP {status}）"), chat_request::retry_delay(attempt, retry_after), on);
+            }
+            Request::Failed(Failure::Status { status, body, retry_after }.message())
+        }
+    }
+}
+
+/// 干一轮
+pub fn run(model: &Model, history: Vec<Value>, user_text: &str, cwd: &Path, cancel: &AtomicBool, on: &mut dyn FnMut(Event)) -> Turn {
+    let config = engine_loop::Config {
+        engine_id: model.engine_id(),
+        model: model.model.clone(),
+        base_url: model.base_url.clone(),
+        supports_vision: model.supports_vision,
+        supports_tools: true,
+        thinking: model.thinking.clone(),
+        extra_body: model.extra_body.clone(),
+    };
+    let mut brain = Loop::new(config, history);
+    brain.begin(Settings {
+        instructions: instructions(cwd),
+        tools: tool_specs(),
+        temperature: model.temperature,
+        enable_thinking: model.enable_thinking,
+        max_tool_rounds: MAX_TOOL_ROUNDS,
+        continues_when_truncated: true,
+        has_dispatch: true,
+        ..Settings::default()
+    });
+    brain.append(vec![json!({ "role": "user", "content": user_text })]);
+    let finish = |brain: &Loop, answer: String, error: Option<String>, stopped: bool| Turn {
+        history: brain.history().to_vec(),
+        answer,
+        error,
+        stopped,
+    };
+    let mut answer = String::new();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return finish(&brain, answer, None, true);
+        }
+        let mut prepared = brain.prepare(None, None);
+        if prepared["probe"].as_bool() == Some(true) {
+            // 本地大模型先问上下文上限：EDITH 不问，按记下的 / 报错里的算
+            prepared = brain.prepare(Some(None), None);
+        }
+        for key in ["fitted", "folded"] {
+            if prepared[key].is_object() {
+                on(Event::Notice("历史太长，压短了较早的部分".into()));
+            }
+        }
+        let include_tools = prepared["includeTools"].as_bool().unwrap_or(true);
+        let show_reasoning = prepared["showReasoning"].as_bool().unwrap_or(true);
+        let mut attempt = 1;
+        let (pass, started, finished, first) = loop {
+            match request(&mut brain, model, include_tools, show_reasoning, attempt, cancel, on) {
+                Request::Done { pass, started, finished, first } => break (pass, started, finished, first),
+                Request::Retry => attempt += 1,
+                Request::Failed(message) => {
+                    if prepared["wrapUp"].as_bool() == Some(true) {
+                        let text = brain.wrap_up_failed();
+                        on(Event::Text(text.clone()));
+                        return finish(&brain, text, None, false);
+                    }
+                    return finish(&brain, answer, Some(message), false);
+                }
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return finish(&brain, answer, None, true);
+            }
+        };
+        answer = pass.content.clone();
+        on(Event::Stats(brain.pass_done(pass, started, finished, first, 1_000_000)));
+        let decision = brain.decide(!cancel.load(Ordering::Relaxed), None);
+        for chunk in decision["chunks"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            on(Event::Text(chunk.to_string()));
+        }
+        match decision["next"].as_str() {
+            Some("prepare") => continue,
+            Some("tools") => {}
+            _ => return finish(&brain, answer, None, cancel.load(Ordering::Relaxed)),
+        }
+        let mut results = Vec::new();
+        for call in decision["calls"].as_array().into_iter().flatten() {
+            let id = call["id"].as_str().unwrap_or("").to_string();
+            let name = call["name"].as_str().unwrap_or("").to_string();
+            let arguments = call["arguments"].as_object().cloned().unwrap_or_default();
+            on(Event::Tool { id: id.clone(), name: name.clone(), arguments: Value::Object(arguments.clone()) });
+            let outcome = if let Some(rejected) = call["rejected"].as_str() {
+                Outcome { ok: false, text: rejected.to_string() }
+            } else if cancel.load(Ordering::Relaxed) {
+                Outcome { ok: false, text: "（用户停下了，没有执行）".into() }
+            } else {
+                execute(&name, &arguments, cwd, cancel)
+            };
+            on(Event::Result { id: id.clone(), name: name.clone(), ok: outcome.ok, text: outcome.text.clone() });
+            results.push((id, name, outcome.text));
+        }
+        brain.tool_results(results, 0, None, Vec::new(), None);
+    }
+}

@@ -1,0 +1,31 @@
+[package]
+name = "edith"
+description = "EDITH：下一代的大脑——自己调模型、用内置工具把事做完；四肢（MCP 能力、客户端、渠道）经对外接口挂上来（docs/EDITH.md）"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "edith"
+path = "src/main.rs"
+
+# 自己是一个工作区（core/ 是 friday.core 子模块，它有自己的工作区）
+[workspace]
+exclude = ["core"]
+
+[dependencies]
+# 规则都在 friday.core（Friday 的 Swift / Qt 两端也用它）
+friday-core = { path = "core/crates/friday-core" }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+ureq = "3"
+tiny_http = "0.12"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "debuginfo"
