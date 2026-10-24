@@ -362,11 +362,12 @@ fn inline_images(mut body: Value, vision: bool) -> Value {
 
 /// 模型的真地址：http 的照用；别的（Friday 本地模型的 power://llm）问管它的能力（model.endpoint，可能要先拉起模型服务），
 /// 它回的 body 并进请求体
-fn endpoint(model: &Model, session: &str) -> Result<(String, String, Map<String, Value>), String> {
+fn endpoint(model: &Model, context: &Context) -> Result<(String, String, Map<String, Value>), String> {
     if model.base_url.starts_with("http://") || model.base_url.starts_with("https://") {
         return Ok((model.base_url.clone(), model.api_key.clone(), Map::new()));
     }
-    let endpoint = capabilities::model_endpoint(&model.base_url, &model.model, session)?;
+    let agent = context.me.as_ref().map(|me| me.id.as_str());
+    let endpoint = capabilities::model_endpoint(&model.base_url, &model.model, &context.session, agent)?;
     let base = endpoint["baseURL"].as_str().filter(|base| !base.is_empty()).ok_or("能力回的模型地址是空的")?;
     let key = endpoint["apiKey"].as_str().map(str::to_string).unwrap_or_else(|| model.api_key.clone());
     Ok((base.trim_end_matches('/').to_string(), key, endpoint["body"].as_object().cloned().unwrap_or_default()))
@@ -376,14 +377,14 @@ fn endpoint(model: &Model, session: &str) -> Result<(String, String, Map<String,
 fn request(
     brain: &mut Loop,
     model: &Model,
-    session: &str,
+    context: &Context,
     include_tools: bool,
     show_reasoning: bool,
     attempt: i64,
     cancel: &AtomicBool,
     on: &mut dyn FnMut(Event),
 ) -> Request {
-    let (base, api_key, extra) = match endpoint(model, session) {
+    let (base, api_key, extra) = match endpoint(model, context) {
         Ok(endpoint) => endpoint,
         Err(message) => return Request::Failed(message),
     };
@@ -573,7 +574,7 @@ pub fn run(
         let show_reasoning = prepared["showReasoning"].as_bool().unwrap_or(true);
         let mut attempt = 1;
         let (pass, started, finished, first) = loop {
-            match request(&mut brain, model, &context.session, include_tools, show_reasoning, attempt, cancel, on) {
+            match request(&mut brain, model, context, include_tools, show_reasoning, attempt, cancel, on) {
                 Request::Done { pass, started, finished, first } => break (pass, started, finished, first),
                 Request::Retry => attempt += 1,
                 Request::Failed(message) => {

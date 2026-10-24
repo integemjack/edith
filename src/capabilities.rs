@@ -1321,13 +1321,18 @@ pub fn is_action(full_name: &str) -> bool {
 
 /// 模型的真地址（model.endpoint）：`{baseURL, apiKey?, body?}`——body 并进请求体（如 Friday 本地模型的 x_friday）。
 /// 能力可能要先拉起模型服务（下好的模型、friday-llm），最多等 3 分钟
-pub fn model_endpoint(base_url: &str, model: &str, session: &str) -> Result<Value, String> {
+pub fn model_endpoint(base_url: &str, model: &str, session: &str, agent: Option<&str>) -> Result<Value, String> {
     let capability = native()
         .into_iter()
         .find(|capability| capability.full() && capability.models.iter().any(|prefix| base_url.starts_with(prefix.as_str())))
         .ok_or_else(|| format!("模型地址 {base_url} 要由能力提供（Friday 的本地模型要 edith-friday 常驻的那份连着），现在没有能力管它"))?;
     capability
-        .request("model.endpoint", json!({ "baseURL": base_url, "model": model, "session": session }), Duration::from_secs(180), None)
+        .request(
+            "model.endpoint",
+            json!({ "baseURL": base_url, "model": model, "session": session, "agent": agent }),
+            Duration::from_secs(180),
+            None,
+        )
         .map_err(|error| format!("「{}」给不出模型地址：{}", capability.name, error_text(&error)))
 }
 

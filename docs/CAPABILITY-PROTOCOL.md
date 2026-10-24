@@ -343,10 +343,10 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 模型的 `baseURL` 不是 `http(s)://`、又有全权的能力在 `models` 里报了它的前缀（Friday 的本地模型 `power://llm`）：每段请求前问一次，
 
 ```json
-{"jsonrpc": "2.0", "id": 31, "method": "model.endpoint", "params": {"baseURL": "power://llm", "model": "Qwen/Qwen3-8B-GGUF:Q4_K_M", "session": "…"}}
+{"jsonrpc": "2.0", "id": 31, "method": "model.endpoint", "params": {"baseURL": "power://llm", "model": "Qwen/Qwen3-8B-GGUF:Q4_K_M", "session": "…", "agent": null}}
 ```
 
-回 `{baseURL, apiKey?, body?}`：真地址（OpenAI 兼容，EDITH 往 `<baseURL>/chat/completions` 发）、密钥（不给用配置里的）、要并进请求体的字段
+`agent` 是子 Agent 要的（它的 id；主智能体的是 `null`）。回 `{baseURL, apiKey?, body?}`：真地址（OpenAI 兼容，EDITH 往 `<baseURL>/chat/completions` 发）、密钥（不给用配置里的）、要并进请求体的字段
 （Friday 本地模型的 `x_friday`）。能力可以先拉起模型服务再回，最多等 3 分钟；回错误这一轮就失败，`error.message` 给用户看。
 
 ### 6.7 `hook`（请求）
