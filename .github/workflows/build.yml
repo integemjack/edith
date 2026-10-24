@@ -31,7 +31,7 @@ jobs:
           - { key: windows-x86, os: windows-2022, target: i686-pc-windows-msvc, test: true }
           - { key: windows-arm64, os: windows-11-arm, target: aarch64-pc-windows-msvc, test: true }
           - { key: linux-x64, os: ubuntu-22.04, target: x86_64-unknown-linux-musl, zig: true, test: true }
-          - { key: linux-x86, os: ubuntu-22.04, target: i686-unknown-linux-musl, zig: true, test: true }
+          - { key: linux-x86, os: ubuntu-22.04, target: i686-unknown-linux-musl, zig: true }
           - { key: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, zig: true, test: true }
           - { key: linux-armv7, os: ubuntu-22.04, target: armv7-unknown-linux-musleabihf, zig: true }
           - { key: linux-armv6, os: ubuntu-22.04, target: arm-unknown-linux-musleabihf, zig: true }
@@ -42,7 +42,7 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       BUILD_TARGET: ${{ matrix.zig_target || matrix.target }}
-      CARGO: ${{ matrix.zig && 'cargo zigbuild' || 'cargo' }}
+      BUILD: ${{ matrix.zig && 'cargo zigbuild' || 'cargo build' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -89,14 +89,16 @@ jobs:
           key: cargo-${{ matrix.key }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ steps.core.outputs.sha }}
           restore-keys: cargo-${{ matrix.key }}-
 
+      # zig 编的（musl 静态）测试在这台机器原生的 glibc 目标上跑，打出来的程序再跑一下 --version
       - name: Test
         if: matrix.test
         shell: bash
-        run: $CARGO test --locked --release --target "$BUILD_TARGET"
+        run: |
+          if [ -n "${{ matrix.zig }}" ]; then cargo test --locked --release; else cargo test --locked --release --target "$TARGET"; fi
 
       - name: Build
         shell: bash
-        run: $CARGO build --locked --release --target "$BUILD_TARGET"
+        run: $BUILD --locked --release --target "$BUILD_TARGET"
 
       - name: Package (macOS / Linux)
         if: runner.os != 'Windows'
