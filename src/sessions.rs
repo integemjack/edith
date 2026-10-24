@@ -1,6 +1,8 @@
 //! 会话：`~/.edith/projects/<工作目录>/sessions/<id>.json`（不放在项目目录里：同一个目录几个大脑各写各的文件），存 OpenAI 格式的历史（不含 system）和几项元数据
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 
 use serde_json::{Value, json};
 
@@ -14,6 +16,19 @@ pub struct Session {
     pub created: String,
     pub updated: String,
     pub history: Vec<Value>,
+    /// 谁的会话：空是主人的（终端、全权的能力）；权限不全的连接（中转的远程设备、收窄过的能力）只能用自己名下的
+    pub owner: String,
+}
+
+/// 会话 → 主人（事件按它分给能力，不每次读文件）
+static OWNERS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 这个会话是谁的（空：主人的）
+pub fn owner_of(id: &str) -> String {
+    if let Some(owner) = OWNERS.lock().unwrap().get(id) {
+        return owner.clone();
+    }
+    Session::load(id).map(|session| session.owner).unwrap_or_default()
 }
 
 fn dir() -> PathBuf {
@@ -39,6 +54,7 @@ impl Session {
             created: now.clone(),
             updated: now,
             history: Vec::new(),
+            owner: String::new(),
         }
     }
 
@@ -55,6 +71,10 @@ impl Session {
             created: text("created"),
             updated: text("updated"),
             history: value.get("history").and_then(Value::as_array).cloned().unwrap_or_default(),
+            owner: text("owner"),
+        })
+        .inspect(|session| {
+            OWNERS.lock().unwrap().insert(session.id.clone(), session.owner.clone());
         })
     }
 
@@ -72,11 +92,16 @@ impl Session {
         if self.title.is_empty() {
             self.title = first_user_text(&self.history).chars().take(40).collect();
         }
+        OWNERS.lock().unwrap().insert(self.id.clone(), self.owner.clone());
         home::write_json(&dir().join(format!("{}.json", self.id)), &self.to_json())
     }
 
     pub fn summary(&self) -> Value {
-        json!({ "id": self.id, "title": self.title, "cwd": self.cwd, "created": self.created, "updated": self.updated })
+        let mut value = json!({ "id": self.id, "title": self.title, "cwd": self.cwd, "created": self.created, "updated": self.updated });
+        if !self.owner.is_empty() {
+            value["owner"] = json!(self.owner);
+        }
+        value
     }
 
     pub fn to_json(&self) -> Value {
@@ -113,7 +138,7 @@ pub fn list() -> Vec<Session> {
     sessions
 }
 
-/// 这个工作目录最近的一个会话（-c / --continue 接它）
+/// 这个工作目录最近的一个会话（-c / --continue 接它；只看主人的）
 pub fn latest() -> Option<Session> {
-    list().first().and_then(|session| Session::load(&session.id))
+    list().iter().find(|session| session.owner.is_empty()).and_then(|session| Session::load(&session.id))
 }

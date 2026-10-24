@@ -55,6 +55,8 @@ pub struct Capability {
     pub receives: Vec<String>,
     /// 这条连接能做什么（令牌定的）
     pub grant: Grant,
+    /// 它能批准（initialize 回了 approves: true；只有全权的才问它）
+    approves: bool,
     /// 只要焦点会话的事件（sessions: "focus"）
     focus_only: bool,
     /// 握手做完了（之前它发来的请求一律回 NOT_INITIALIZED）
@@ -117,14 +119,17 @@ fn layer_path(layer: Layer) -> PathBuf {
     }
 }
 
-/// 用到的层（工作目录就是家目录时项目层就是全局那个文件，只算一次）
+/// 用到的层（工作目录就是家目录时项目层就是全局那个文件，只算一次）；项目、本地两层要这个目录的配置被信任（trust.rs）
 fn layers() -> Vec<Layer> {
     let canonical = |path: PathBuf| std::fs::canonicalize(&path).unwrap_or(path);
-    if canonical(home::dir()) == canonical(home::workspace_data()) {
-        vec![Layer::Global, Layer::Local]
-    } else {
-        vec![Layer::Global, Layer::Project, Layer::Local]
+    let mut layers = vec![Layer::Global];
+    if crate::trust::allowed() {
+        if canonical(home::dir()) != canonical(home::workspace_data()) {
+            layers.push(Layer::Project);
+        }
+        layers.push(Layer::Local);
     }
+    layers
 }
 
 fn read_layer(layer: Layer) -> Vec<Value> {
@@ -227,10 +232,13 @@ pub fn save(config: Value, layer: Layer) -> Result<(), String> {
     if name.is_empty() {
         return Err("能力要有名字（name：字母、数字、-、_）".into());
     }
+    let was_trusted = crate::trust::trusted();
     let mut items = read_layer(layer);
     items.retain(|item| name_of(item) != name);
     items.push(config);
-    save_layer(layer, &items)
+    save_layer(layer, &items)?;
+    crate::trust::after_own_write(was_trusted);
+    Ok(())
 }
 
 /// 去掉一个能力（断开、结束它的程序，并从那一层的配置删掉）；没有这个返回 false
@@ -241,7 +249,9 @@ pub fn remove(name: &str, layer: Layer) -> bool {
     items.retain(|item| name_of(item) != name);
     let removed = items.len() != before;
     if removed {
+        let was_trusted = crate::trust::trusted();
         let _ = save_layer(layer, &items);
+        crate::trust::after_own_write(was_trusted);
     }
     let stopped = stop(&name);
     if enabled_config(&name).is_none() {
@@ -450,6 +460,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
         actions: Vec::new(),
         receives: Vec::new(),
         grant: authority.grant.clone(),
+        approves: false,
         focus_only: false,
         ready: false,
         endpoints: Vec::new(),
@@ -517,6 +528,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
         actions,
         receives,
         grant: authority.grant,
+        approves: reply.get("approves").and_then(Value::as_bool) == Some(true),
         focus_only: reply.get("sessions").and_then(Value::as_str) == Some("focus"),
         ready: true,
         endpoints: reply.get("endpoints").and_then(Value::as_array).cloned().unwrap_or_default(),
@@ -653,7 +665,8 @@ impl Capability {
         let asked = self.asked.lock().unwrap().contains(&envelope.turn);
         let subscribed = self.grant.events
             && self.receives.iter().any(|kind| kind == envelope.kind)
-            && (!self.focus_only || envelope.session == mind::focus());
+            && (!self.focus_only || envelope.session == mind::focus())
+            && self.owns(&envelope.session);
         if asked || subscribed {
             self.notify("event", envelope.to_json());
         }
@@ -669,6 +682,25 @@ impl Capability {
             from: params.get("from").and_then(Value::as_str).unwrap_or("").to_string(),
             tools: self.grant.tools.clone(),
         }
+    }
+
+    /// 权限全开（主人、没收窄的能力）：和终端共用会话。不全的是「客人」：只能用自己名下的会话、只收自己会话的事件——
+    /// 不然它交来的话进了主人的会话历史，之后全权的那一轮照样看得到（借权注入），它也能看主人的全部对话
+    fn full(&self) -> bool {
+        self.grant.tools == permissions::Tools::All && self.grant.sessions == Sessions::All
+    }
+
+    /// 客人能不能碰这个会话
+    fn owns(&self, session: &str) -> bool {
+        self.full() || sessions::owner_of(session) == self.name
+    }
+
+    /// 客人的新会话（记在它名下）
+    fn guest_session(&self) -> Result<String, Failure> {
+        let mut session = Session::new(&focus_cwd());
+        session.owner = self.name.clone();
+        session.save().map_err(|message| (protocol::INTERNAL_ERROR, message))?;
+        Ok(session.id)
     }
 
     /// 这条连接能不能做这件事
@@ -699,6 +731,7 @@ impl Capability {
             "sessions.list" => Ok(Value::Array(
                 sessions::list()
                     .iter()
+                    .filter(|session| self.full() || session.owner == self.name)
                     .map(|session| {
                         let mut summary = session.summary();
                         summary["working"] = json!(mind::working(&session.id).is_some());
@@ -715,15 +748,19 @@ impl Capability {
                     return Err(invalid(format!("工作目录不存在：{cwd}")));
                 }
                 let mut session = Session::new(&cwd);
+                if !self.full() {
+                    session.owner = self.name.clone();
+                }
                 session.save().map_err(|message| (protocol::INTERNAL_ERROR, message))?;
-                if params.get("focus").and_then(Value::as_bool) == Some(true) {
+                if params.get("focus").and_then(Value::as_bool) == Some(true) && self.full() {
                     mind::set_focus(&session.id);
                 }
                 Ok(session.summary())
             }
             "sessions.get" => {
                 let id = params.get("id").and_then(Value::as_str).ok_or_else(|| invalid("要给 id"))?;
-                let session = Session::find(id).ok_or((protocol::NO_SESSION, format!("没有会话 {id}")))?;
+                let session =
+                    Session::find(id).filter(|session| self.owns(&session.id)).ok_or((protocol::NO_SESSION, format!("没有会话 {id}")))?;
                 let mut value = session.to_json();
                 value["working"] = json!(mind::working(&session.id));
                 value["focus"] = json!(session.id == mind::focus());
@@ -732,11 +769,17 @@ impl Capability {
             "sessions.focus" => {
                 let id = params.get("id").and_then(Value::as_str).ok_or_else(|| invalid("要给 id"))?;
                 let session = Session::find(id).ok_or((protocol::NO_SESSION, format!("没有会话 {id}")))?;
+                if !self.full() {
+                    return Err((protocol::NOT_PERMITTED, "没有权限：焦点是主人的，权限不全的连接不能换".into()));
+                }
                 mind::set_focus(&session.id);
                 Ok(json!({ "focus": session.id }))
             }
             "sessions.stop" => {
                 let id = params.get("id").and_then(Value::as_str).map(str::to_string).unwrap_or_else(mind::focus);
+                if !self.owns(&id) {
+                    return Err((protocol::NOT_PERMITTED, "没有权限：只能停下自己名下的会话".into()));
+                }
                 Ok(json!({ "stopping": mind::stop(&id) }))
             }
             "initialize" => Err((protocol::INVALID_REQUEST, "握手由 EDITH 发起：等 EDITH 的 initialize，回话就行".into())),
@@ -759,6 +802,16 @@ impl Capability {
                 .ok_or_else(|| invalid(format!("urgency 只能是 interrupt / interject / queue / note，不是 {value}")))?,
         };
         let session = match params.get("session").and_then(Value::as_str) {
+            // 客人：没指明的、focus 都是它自己名下最近的会话（没有就新开）；指明的要是它名下的
+            None | Some("focus") if !self.full() => match sessions::list().into_iter().find(|session| session.owner == self.name) {
+                Some(session) => session.id,
+                None => self.guest_session()?,
+            },
+            Some("new") if !self.full() => self.guest_session()?,
+            Some(id) if !self.full() => Session::find(id)
+                .filter(|session| session.owner == self.name)
+                .map(|session| session.id)
+                .ok_or((protocol::NO_SESSION, format!("没有会话 {id}（权限不全的连接只能用自己名下的会话）")))?,
             None | Some("focus") => {
                 let focus = mind::focus();
                 if focus.is_empty() {
@@ -1003,6 +1056,26 @@ pub fn summary() -> String {
 /// 动作说自己只读（不改东西）
 fn read_only(action: &Value) -> bool {
     action.get("readOnly").and_then(Value::as_bool) == Some(true)
+}
+
+/// 这个工具名是能力的动作
+pub fn is_action(full_name: &str) -> bool {
+    let Some((name, rest)) = full_name.split_once(SEPARATOR) else { return false };
+    let Some(capability) = CAPABILITIES.read().unwrap().get(name).cloned() else { return false };
+    capability.actions.iter().any(|action| action["name"].as_str() == Some(rest))
+}
+
+/// 请能力批准（approve 请求）。who：只问这一个；None：问能批准的全权能力里最后连上的那个。没人能批返回 None
+pub fn ask_approval(who: Option<&str>, request: &Value, cancel: &AtomicBool) -> Option<crate::approval::Decision> {
+    let approver = native()
+        .into_iter()
+        .filter(|capability| capability.approves && capability.full() && who.is_none_or(|who| capability.name == who))
+        .last()?;
+    let reply = approver.request("approve", request.clone(), Duration::from_secs(600), Some(cancel));
+    Some(match reply {
+        Ok(result) => crate::approval::Decision::parse(&result),
+        Err(error) => crate::approval::Decision::Deny(format!("「{}」没答上：{}", approver.name, error_text(&error))),
+    })
 }
 
 /// 这个工具名是能力的只读动作

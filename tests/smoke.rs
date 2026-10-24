@@ -48,6 +48,8 @@ fn mcp_servers_come_from_config() {
     // 项目的 .mcp.json（和 Claude Code 一样的写法）：大脑直接连，不用做成能力
     let config = serde_json::json!({ "mcpServers": { "demo": { "command": python(), "args": ["-u", limb.to_str().unwrap()] } } });
     std::fs::write(work.join(".mcp.json"), config.to_string()).unwrap();
+    // 项目的配置要先信任（里面的命令会被起）
+    assert!(edith(&home, model.port, &work, &["trust", "--yes"]).status.success());
     let listed = edith(&home, model.port, &work, &["mcp"]);
     let stdout = String::from_utf8_lossy(&listed.stdout);
     assert!(stdout.contains("demo（项目）") && stdout.contains("工具：echo"), "{}", text(&listed));

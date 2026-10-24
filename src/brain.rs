@@ -45,6 +45,8 @@ pub struct Context {
     pub session: String,
     pub turn: String,
     pub tools: crate::permissions::Tools,
+    /// 话是谁交来的：能力名，终端里打的是空（审批问谁看它）
+    pub origin: String,
 }
 
 /// 一轮的结果
@@ -133,7 +135,14 @@ fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &Atom
     if !context.tools.allows(name, read_only) && !context.tools.allows(&canonical, read_only) {
         return Outcome { ok: false, text: format!("没有权限用 {name}：这一轮的话来自的连接{}", context.tools.describe()) };
     }
-    if let Some(outcome) = tools::run(name, arguments, cwd, cancel, &context.session)
+    // 改东西、往外发、碰敏感的：先批准（approval.rs）；名字写走样的按认回来的那个审
+    let checked = if tools::BUILTINS.contains(&name) { name } else { canonical.as_str() };
+    let checked_arguments = if checked == name { arguments.clone() } else { tool_aliases::canonical_arguments(checked, arguments) };
+    let private_ok = match crate::approval::check(checked, &checked_arguments, cwd, context, cancel) {
+        Ok(private_ok) => private_ok,
+        Err(text) => return Outcome { ok: false, text },
+    };
+    if let Some(outcome) = tools::run(name, arguments, cwd, cancel, &context.session, private_ok)
         .or_else(|| capabilities::call(name, arguments, context, cancel))
         .or_else(|| crate::mcp::call(name, arguments))
     {
@@ -141,7 +150,7 @@ fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &Atom
     }
     if canonical != name
         && let Some(outcome) =
-            tools::run(&canonical, &tool_aliases::canonical_arguments(&canonical, arguments), cwd, cancel, &context.session)
+            tools::run(&canonical, &tool_aliases::canonical_arguments(&canonical, arguments), cwd, cancel, &context.session, private_ok)
     {
         return outcome;
     }

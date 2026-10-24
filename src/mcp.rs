@@ -47,7 +47,9 @@ fn read_layer(layer: Layer) -> Map<String, Value> {
 /// 合并后的配置（名字 → 设置，多一个 scope）
 pub fn configs() -> BTreeMap<String, Value> {
     let mut merged: BTreeMap<String, Value> = BTreeMap::new();
-    for layer in [Layer::Global, Layer::Project, Layer::Local] {
+    // 项目、本地两层要这个目录的配置被信任（trust.rs）
+    let layers: &[Layer] = if crate::trust::allowed() { &[Layer::Global, Layer::Project, Layer::Local] } else { &[Layer::Global] };
+    for &layer in layers {
         for (name, mut item) in read_layer(layer) {
             let name = crate::capabilities::clean_name(&name);
             if name.is_empty() || !item.is_object() {
@@ -86,7 +88,10 @@ pub fn save(name: &str, config: Value, layer: Layer) -> Result<(), String> {
         file["mcpServers"] = json!({});
     }
     file["mcpServers"][&name] = config;
-    home::write_json(&path, &file)
+    let was_trusted = crate::trust::trusted();
+    home::write_json(&path, &file)?;
+    crate::trust::after_own_write(was_trusted);
+    Ok(())
 }
 
 /// 从那一层去掉；没有返回 false
@@ -95,7 +100,9 @@ pub fn remove(name: &str, layer: Layer) -> bool {
     let Some(mut file) = home::read_json(&path) else { return false };
     let removed = file["mcpServers"].as_object_mut().and_then(|servers| servers.remove(name)).is_some();
     if removed {
+        let was_trusted = crate::trust::trusted();
         let _ = home::write_json(&path, &file);
+        crate::trust::after_own_write(was_trusted);
     }
     detach(name);
     removed
@@ -269,6 +276,11 @@ fn find(full_name: &str) -> Option<(Arc<Limb>, Value)> {
         })?
         .clone();
     Some((limb, tool))
+}
+
+/// 这个工具名是 MCP 服务的工具
+pub fn is_tool(full_name: &str) -> bool {
+    find(full_name).is_some()
 }
 
 /// 这个工具名是 MCP 服务的只读工具

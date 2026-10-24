@@ -26,6 +26,18 @@ static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
     ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(TIMEOUT)).user_agent(BROWSER).build().into()
 });
 
+/// 看网页用的：不自动跟跳转（每一跳都要看是不是跳到本机 / 内网）
+static PAGE_AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(TIMEOUT))
+        .user_agent(BROWSER)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .build()
+        .into()
+});
+
 fn regex(pattern: &str) -> Regex {
     Regex::new(pattern).unwrap()
 }
@@ -654,15 +666,33 @@ fn render(url: &str) -> Option<String> {
     (!html.trim().is_empty()).then_some(html)
 }
 
-/// fetch_url：看网页
-pub fn fetch(url: &str, offset: Option<i64>) -> Outcome {
+/// fetch_url：看网页。private_ok：许不许访问本机 / 内网（审批定的；每一跳都看，防跳到内网）
+pub fn fetch(url: &str, offset: Option<i64>, private_ok: bool) -> Outcome {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Outcome { ok: false, text: "url 要以 http:// 或 https:// 开头".into() };
     }
-    let mut response = match AGENT.get(url).header("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8").call() {
-        Ok(response) => response,
-        Err(error) => return Outcome { ok: false, text: format!("打不开 {url}：{error}") },
+    let mut current = url.to_string();
+    let mut hops = 0;
+    let mut response = loop {
+        if !private_ok && crate::approval::private_url(&current) {
+            return Outcome { ok: false, text: format!("不许访问本机 / 内网地址：{current}") };
+        }
+        let mut response =
+            match PAGE_AGENT.get(&current).header("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8").call() {
+                Ok(response) => response,
+                Err(error) => return Outcome { ok: false, text: format!("打不开 {current}：{error}") },
+            };
+        let location = response.headers().get("location").and_then(|value| value.to_str().ok()).map(str::to_string);
+        match location {
+            Some(location) if response.status().is_redirection() && hops < 8 => {
+                let _ = response.body_mut().read_to_vec();
+                current = absolute(&current, &location);
+                hops += 1;
+            }
+            _ => break response,
+        }
     };
+    let url = current.as_str();
     let status = response.status().as_u16();
     let content_type = response.headers().get("content-type").and_then(|value| value.to_str().ok()).unwrap_or("").to_lowercase();
     let bytes = match response.body_mut().with_config().limit(10 * 1024 * 1024).read_to_vec() {
@@ -765,9 +795,9 @@ mod live {
         println!("{}", found.text);
         let found = super::search("北京天气", "week", "", 5);
         println!("{}", found.text);
-        let page = super::fetch("https://www.rust-lang.org/", None);
+        let page = super::fetch("https://www.rust-lang.org/", None, false);
         println!("{}", page.text.chars().take(1500).collect::<String>());
-        let page = super::fetch("https://www.sina.com.cn/", None);
+        let page = super::fetch("https://www.sina.com.cn/", None, false);
         println!("{}", page.text.chars().take(600).collect::<String>());
     }
 }

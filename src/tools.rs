@@ -137,7 +137,19 @@ fn stale(session: &str, path: &str) -> Option<String> {
 }
 
 /// 跑一个自带工具（不是自带的返回 None）。session：这一轮在哪个会话（记它读过哪些文件）
-pub fn run(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, session: &str) -> Option<Outcome> {
+/// 路径写成正斜杠的文字（Windows 也是）
+pub fn slash_path(path: &Path) -> String {
+    tool_files::slash(path)
+}
+
+pub fn run(
+    name: &str,
+    arguments: &Map<String, Value>,
+    cwd: &Path,
+    cancel: &AtomicBool,
+    session: &str,
+    private_ok: bool,
+) -> Option<Outcome> {
     if !BUILTINS.contains(&name) {
         return None;
     }
@@ -206,7 +218,7 @@ pub fn run(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &Atom
             text(arguments, "language").unwrap_or(""),
             int(arguments, "count").unwrap_or(8).max(1) as usize,
         ),
-        "fetch_url" => crate::web::fetch(text(arguments, "url").unwrap_or(""), int(arguments, "offset")),
+        "fetch_url" => crate::web::fetch(text(arguments, "url").unwrap_or(""), int(arguments, "offset"), private_ok),
         "run_shell" => run_shell(text(arguments, "command").unwrap_or(""), int(arguments, "timeout_seconds"), cwd, cancel),
         _ => return None,
     })

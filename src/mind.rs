@@ -315,7 +315,12 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
     };
     let cwd = PathBuf::from(&session.cwd);
     let cwd = if cwd.is_dir() { cwd } else { crate::home::user_home() };
-    let context = brain::Context { session: session_id.to_string(), turn: input.turn.clone(), tools: input.origin.tools.clone() };
+    let context = brain::Context {
+        session: session_id.to_string(),
+        turn: input.turn.clone(),
+        tools: input.origin.tools.clone(),
+        origin: input.origin.capability.clone(),
+    };
     let text = input.origin.wrap(if input.interjected { "edith.interjection" } else { "edith.input" }, &input.text);
     let mut on_event = |event: Event| {
         let (kind, data) = event_json(&event);

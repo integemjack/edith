@@ -186,6 +186,8 @@ fn three_config_layers() {
         json!({ "capabilities": [{ "name": "cap", "disabled": true }] }).to_string(),
     )
     .unwrap();
+    // 项目那层的配置要先信任
+    assert!(edith(&home, model.port, &a, &["trust", "--yes"]).status.success());
     let listed = edith(&home, model.port, &a, &["capabilities"]);
     assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（项目）：关掉了"), "{}", text(&listed));
     // 本地那层再打开
@@ -194,6 +196,7 @@ fn three_config_layers() {
         json!({ "capabilities": [{ "name": "cap", "disabled": false }] }).to_string(),
     )
     .unwrap();
+    assert!(edith(&home, model.port, &a, &["trust", "--yes"]).status.success());
     let listed = edith(&home, model.port, &a, &["capabilities"]);
     assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（本地） 测试能力"), "{}", text(&listed));
     let listed = edith(&home, model.port, &b, &["capabilities"]);
@@ -230,4 +233,64 @@ fn edits_need_a_fresh_read() {
     let output = edith(&home, model.port, &work, &["-c", write]);
     assert!(String::from_utf8_lossy(&output.stdout).contains("被改过"), "{}", text(&output));
     assert_eq!(std::fs::read_to_string(work.join("notes.txt")).unwrap(), "别人改的\n");
+}
+
+#[test]
+fn project_config_needs_trust() {
+    let (work, home) = scratch("trust");
+    let model = fake_model(&home.join("requests.jsonl"));
+    std::fs::create_dir_all(work.join(".edith")).unwrap();
+    let marker = home.join("ran.txt");
+    // 别人的仓库里写的能力：一跑就会起
+    let config = |text: &str| {
+        // 写个记号就退出（退出码不是 0：大脑不用等它连进来）
+        let script = format!("import sys; open({:?}, 'a').write({text:?}); sys.exit(3)", marker.to_str().unwrap());
+        json!({ "capabilities": [{ "name": "evil", "command": python(), "args": ["-c", script] }] }).to_string()
+    };
+    std::fs::write(work.join(".edith").join("capabilities.json"), config("1")).unwrap();
+    // 没信任：不起，告诉怎么信任
+    let output = edith(&home, model.port, &work, &["只聊天"]);
+    assert!(output.status.success() && String::from_utf8_lossy(&output.stderr).contains("edith trust"), "{}", text(&output));
+    assert!(!marker.exists(), "没信任就起了");
+    let shown = edith(&home, model.port, &work, &["trust"]);
+    assert!(String::from_utf8_lossy(&shown.stdout).contains("能力 evil："), "{}", text(&shown));
+    // 信任了才起
+    assert!(edith(&home, model.port, &work, &["trust", "--yes"]).status.success());
+    let _ = edith(&home, model.port, &work, &["只聊天"]);
+    assert!(marker.exists(), "信任了没起");
+    // 内容变了（git pull 拉来新命令）：又要信任
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::write(work.join(".edith").join("capabilities.json"), config("2")).unwrap();
+    let _ = edith(&home, model.port, &work, &["只聊天"]);
+    assert!(!marker.exists(), "改过的配置没信任就起了");
+}
+
+#[test]
+fn risky_tools_need_approval() {
+    let (work, home) = scratch("approval");
+    let model = fake_model(&home.join("requests.jsonl"));
+    std::fs::write(work.join(".env"), "KEY=secret").unwrap();
+    std::fs::write(work.join("notes.txt"), "hi").unwrap();
+    // 不在终端里、没有能批准的能力、没 --auto：要批准的都不做
+    let ask = |task: &str| command(&home, model.port, &work, &[task]).env_remove("EDITH_PERMISSION_MODE").output().unwrap();
+    let output = ask(r#"调用工具 write_file 参数 {"path":"x.txt","content":"x"}"#);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("没人能批"), "{}", text(&output));
+    assert!(!work.join("x.txt").exists());
+    let output = ask(r#"调用工具 read_file 参数 {"path":".env"}"#);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("读敏感的"), "{}", text(&output));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("secret"), "{}", text(&output));
+    // 工作目录里普通的读不用问
+    let output = ask(r#"调用工具 list_directory 参数 {"path":"."}"#);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("notes.txt"), "{}", text(&output));
+    // --auto：不问
+    let output = command(&home, model.port, &work, &["--auto", r#"调用工具 write_file 参数 {"path":"x.txt","content":"x"}"#])
+        .env_remove("EDITH_PERMISSION_MODE")
+        .output()
+        .unwrap();
+    assert!(output.status.success() && work.join("x.txt").exists(), "{}", text(&output));
+    // config.json 的 permissions.deny：--auto 也挡
+    std::fs::write(home.join("config.json"), json!({ "permissions": { "deny": ["run_shell(rm *)"] } }).to_string()).unwrap();
+    let output = command(&home, model.port, &work, &[r#"调用工具 run_shell 参数 {"command":"rm x.txt"}"#]).output().unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("permissions.deny"), "{}", text(&output));
+    assert!(work.join("x.txt").exists());
 }

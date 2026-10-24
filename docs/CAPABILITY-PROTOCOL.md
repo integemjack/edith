@@ -122,6 +122,7 @@ EDITH                                  能力
 | `receives` | 否 | 要收哪些事件（[§7](#7-事件event)）；`["*"]` 是全部，不写是都不要 |
 | `sessions` | 否 | `"all"`（默认）：所有会话的事件；`"focus"`：只要焦点会话的 |
 | `name` | 否 | 叫什么：只对主令牌的连接有用（不写是 `client`；重名的、和配置里能力重名的 EDITH 加 `-2`、`-3`……）；专用令牌、中转的名字由大脑定，这里写的不管 |
+| `approves` | 否 | `true`：它能替用户批准（[§6.5](#65-approve请求)）。只有全权的连接会被问 |
 | `endpoints` | 否 | 它对外开的入口：`[{kind, url}]`（比如 `{"kind": "websocket", "url": "ws://127.0.0.1:52731"}`），EDITH 登记进 `instances/`，`edith instances` 列得出来 |
 
 模型的系统提示里会列出每个能力：名字、标题、有哪些动作、会主动传来什么。
@@ -236,6 +237,10 @@ EDITH                                  能力
 
 - **按目录工作**：一个大脑管一个目录（工作目录），会话存在 `~/.edith/projects/<工作目录的路径，非字母数字换成 ->/sessions/<id>.json`
   （不放进项目目录：同一个目录开几个大脑各写各的文件，worktree 删了对话也不丢）。工具的相对路径按会话的工作目录算。
+- **客人只用自己名下的会话**：权限不全的连接（中转的远程设备、`permissions` 收窄过的能力，[§8.1](#81-权限permissions)）是客人。
+  它交来的话进**它自己名下**的会话（会话的 `owner` 是它的名字；没指明会话、`focus` 都是它名下最近的一个，没有就新开），
+  `sessions.list` / `sessions.get` 只看得到自己名下的，事件也只收自己会话的，不能换焦点、不能停下别人的会话。
+  不然它的话进了主人的会话历史，之后全权的那一轮照样看得到（借权注入），它也能看主人的全部对话。
 - **焦点会话**：没指明会话的话交给它。`edith "…"` / `edith` / `edith run` 时是这次新开的会话；`-c` 接着这个目录最近的会话，
   `-r <id>` 接着指定的。能力可以用 `sessions.focus` 换焦点。
 
@@ -279,6 +284,21 @@ EDITH                                  能力
 ### 6.4 `shutdown`（通知）
 
 EDITH 要它退出（[§3.3](#33-结束)）。
+
+### 6.5 `approve`（请求）
+
+模型要做要批准的事（改文件、跑命令、打开新网站、读工作目录外或敏感的文件、访问本机 / 内网、没说自己只读的动作和 MCP 工具）时，
+EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `approves`、又是全权的，问它；不然问终端或别的能批准的全权能力。
+
+```json
+{"jsonrpc": "2.0", "id": 30, "method": "approve", "params": {
+  "session": "…", "turn": "…", "tool": "run_shell", "target": "rm -rf build", "summary": "跑命令：rm -rf build（在 /w）",
+  "arguments": {"command": "rm -rf build"}, "origin": "phone"
+}}
+```
+
+回话：`{"decision": "allow" | "always" | "deny", "reason"?: "…"}`。`always`：这个会话里同类的都行；`deny` 的 `reason` 交给模型。
+最多等 10 分钟，这一轮被停下就不等了。没人能批的就不做（`--auto`、`~/.edith/config.json` 的 `permissions` 见 [EDITH.md](EDITH.md#信任与审批)）。
 
 ## 7. 事件（`event`）
 
@@ -351,10 +371,13 @@ edith run                                           一直开着，只听能力�
 | `ask` | `true` / `false` | `true` | 能不能 `ask` |
 | `sessions` | `"none"` / `"read"` / `"all"` | `"all"` | `read`：`sessions.list`、`sessions.get`；`all` 再加 `sessions.create`、`sessions.focus`、`sessions.stop` |
 | `events` | `true` / `false` | `true` | 收不收订阅的事件（自己 `ask` 的那几轮总能收到） |
-| `tools` | `"all"` / `"read"` / `"none"` / `["名字", "前缀*", …]` | `"all"` | 它交来的话，那一轮能用哪些工具。`read`：只读的——自带的看、找、搜、搜网页、看网页，能力写了 `readOnly` 的动作，MCP 写了 `readOnlyHint` 的工具；不许的工具不交给模型，硬调也拒绝 |
+| `tools` | `"all"` / `"read"` / `"none"` / `["名字", "前缀*", …]` | `"all"` | 它交来的话，那一轮能用哪些工具。`read`：只读的——自带的看、找、搜、搜网页、看网页，能力写了 `readOnly` 的动作，MCP 写了 `readOnlyHint` 的工具；不许的工具不交给模型，硬调也拒绝。许了的照样要过审批（[§6.5](#65-approve请求)）；不是 `all` 的那一轮不能访问本机 / 内网 |
 | `relay` | 上面几项 | `{sense, ask, events: true, sessions: "read", tools: "read"}` | 它替别人开的中转连接（`as`）的权限；不会比它自己的大 |
 
-主令牌的连接（终端、桌面端）全部都能。越权的请求回 `-32006`。
+主令牌的连接（终端、桌面端）全部都能。越权的请求回 `-32006`。`tools` 不是 `all` 或 `sessions` 不是 `all` 的是**客人**，只用自己名下的会话（[§5](#5-会话与焦点)）。
+
+项目、本地两层的配置（这里的和 [§9](#9-mcp-服务) 的）会起程序，要先**信任这个目录**才读：终端里起 edith 时列出要起的命令问一句，
+或 `edith trust` 看过再信任；按内容的哈希记在 `~/.edith/trust.json`，内容变了（git pull 拉来新命令）要再信任。没信任时只用全局那层。
 
 ### 8.2 在跑的大脑（`instances/`）
 

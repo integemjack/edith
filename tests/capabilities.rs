@@ -223,6 +223,7 @@ fn permissions_limit_what_a_connection_can_do() {
         { "delay": 0.3, "send": request(1, "sessions.create", json!({})) },
         { "delay": 0.3, "send": request(2, "ask", json!({ "text": write })) },
         { "delay": 0.3, "send": request(3, "ask", json!({ "text": "调用工具 get_current_time" })) },
+        { "delay": 0.3, "send": request(4, "ask", json!({ "text": format!(r#"调用工具 fetch_url 参数 {{"url":"http://127.0.0.1:{}/page"}}"#, model.port) })) },
     ]);
     // 能看会话、不能建；它交来的话只能用只读的工具；它替「my phone」开的中转连接权限更窄
     let config = json!({ "capabilities": [{
@@ -244,7 +245,7 @@ fn permissions_limit_what_a_connection_can_do() {
     assert!(
         wait_until(30, || {
             let messages = received(&home);
-            response(&messages, 3).is_some() && relayed(&messages, 901).is_some()
+            response(&messages, 4).is_some() && relayed(&messages, 901).is_some()
         }),
         "{:?}",
         received(&home)
@@ -270,4 +271,67 @@ fn permissions_limit_what_a_connection_can_do() {
     // 主连接的握手也带着
     assert_eq!(messages[0]["params"]["name"], "cap");
     assert_eq!(messages[0]["params"]["grant"]["sessions"], "read");
+    // 权限不全的是客人：话进它自己名下的会话（不进主人的），只看得到自己名下的
+    let sessions: Vec<Value> = std::fs::read_dir(common::project_dir(&home, &work).join("sessions"))
+        .unwrap()
+        .flatten()
+        .map(|entry| serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap())
+        .collect();
+    let owned: Vec<&Value> = sessions.iter().filter(|session| session["owner"] == "cap").collect();
+    assert_eq!(owned.len(), 1, "{sessions:?}");
+    assert!(owned[0]["history"].to_string().contains("x.txt"));
+    let owner_session = sessions.iter().find(|session| session.get("owner").is_none()).expect("主人的会话");
+    assert!(!owner_session["history"].to_string().contains("x.txt"), "客人的话进了主人的会话");
+    assert_eq!(relayed(&messages, 901).unwrap()["result"].as_array().unwrap().len(), 0, "中转的看到了别人的会话");
+    // 客人交来的那一轮不能访问本机 / 内网
+    let answer = response(&messages, 4).unwrap()["result"]["answer"].as_str().unwrap_or("").to_string();
+    assert!(answer.contains("本机 / 内网"), "{answer}");
+}
+
+#[test]
+fn capability_can_approve() {
+    let (work, home) = scratch("approve");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let write = r#"调用工具 write_file 参数 {"path":"y.txt","content":"y"}"#;
+    let configure = |decision: &str| {
+        let script = json!([{ "delay": 0.3, "send": request(1, "ask", json!({ "text": write })) }]);
+        let config = json!({ "capabilities": [{
+            "name": "cap",
+            "command": python(),
+            "args": ["-u", fake("cap.py").to_str().unwrap()],
+            "env": {
+                "CAP_LOG": home.join("cap.jsonl").to_str().unwrap(),
+                "CAP_SCRIPT": script.to_string(),
+                "CAP_RECEIVES": "done",
+                "CAP_APPROVE": decision,
+            },
+        }]});
+        std::fs::write(home.join("capabilities.json"), config.to_string()).unwrap();
+        let _ = std::fs::remove_file(home.join("cap.jsonl"));
+    };
+    let start = || {
+        command(&home, model.port, &work, &["run"])
+            .env_remove("EDITH_PERMISSION_MODE")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(Running)
+            .unwrap()
+    };
+    // 它交来的那一轮要写文件：问它；它说不行
+    configure("deny");
+    let edith = start();
+    assert!(wait_until(30, || response(&received(&home), 1).is_some()), "{:?}", received(&home));
+    let messages = received(&home);
+    let approve = messages.iter().find(|message| message["method"] == "approve").expect("没问它批准");
+    assert!(approve["params"]["summary"].as_str().unwrap().contains("写文件"), "{approve}");
+    let answer = response(&messages, 1).unwrap()["result"]["answer"].as_str().unwrap_or("").to_string();
+    assert!(answer.contains("用户没批准") && answer.contains("先别动"), "{answer}");
+    assert!(!work.join("y.txt").exists());
+    drop(edith);
+    // 说行：写了
+    configure("allow");
+    let _edith = start();
+    assert!(wait_until(30, || response(&received(&home), 1).is_some()), "{:?}", received(&home));
+    assert!(work.join("y.txt").exists());
 }

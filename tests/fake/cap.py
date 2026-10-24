@@ -2,6 +2,7 @@
 - 回 initialize：一个动作 remember、一种感知 speech；订哪些事件看环境变量 CAP_RECEIVES（逗号分开，默认 done,turn.started）
 - 回 act：remember → 「记住了：<text>」（先等 CAP_ACT_DELAY 秒）
 - 握手后按 CAP_SCRIPT（JSON 数组：[{"delay": 秒, "send": 一条消息}]）按时发消息给 EDITH
+- CAP_APPROVE=allow|always|deny：声明能批准（approves），大脑问 approve 时这样答（deny 带原因「先别动」）
 - CAP_RELAY=<名字>：握手后再开一条中转连接（auth 带 as），它收到的记进 CAP_LOG 时包在 {"relay": …} 里
 - 收到的每一条都记进 CAP_LOG（一行一条）；大脑断开或发 shutdown 就退出"""
 import json
@@ -73,6 +74,7 @@ for line in reader:
             "actions": [{"name": "remember", "description": "记住一句话",
                          "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}],
             "receives": receives,
+            "approves": bool(os.environ.get("CAP_APPROVE")),
         }})
     elif method == "initialized":
         threading.Thread(target=script, daemon=True).start()
@@ -83,6 +85,8 @@ for line in reader:
         send({"jsonrpc": "2.0", "method": "act.progress", "params": {"call": params["call"], "text": "在记", "fraction": 0.5}})
         time.sleep(float(os.environ.get("CAP_ACT_DELAY", "0")))
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"text": "记住了：" + params["arguments"].get("text", "")}})
+    elif method == "approve":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"decision": os.environ["CAP_APPROVE"], "reason": "先别动"}})
     elif method == "ping" and "id" in message:
         send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
     elif method == "shutdown":

@@ -4,6 +4,7 @@
 //! 按目录工作（`edith .`）：数据在 <目录>/.edith；目录不加锁——这个目录已经有大脑在干活时，新起的大脑自动开一个
 //! git worktree 去那里干（worktree.rs，`--here` 不开）；想接到一个正在跑的大脑上用 `edith attach`。
 
+mod approval;
 mod attach;
 mod brain;
 mod capabilities;
@@ -18,6 +19,7 @@ mod protocol;
 mod sessions;
 mod terminal;
 mod tools;
+mod trust;
 mod web;
 mod worktree;
 
@@ -50,6 +52,7 @@ const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作�
   edith mcp                        列出 MCP 服务（.mcp.json、~/.edith/mcp.json）和它们的工具
   edith mcp add <名字> <命令> [参数…] | add-url <名字> <地址>   加一个 MCP 服务（记进本地；--project、--global 同上）
   edith mcp remove <名字>          去掉
+  edith trust [--yes | revoke]     看这个目录的项目 / 本地配置要起哪些程序、信任它（内容变了要再信任）
   edith tools                      列出 edith.tools 里的工具（装了哪个版本、有没有新的）
   edith tools install <工具>       下载、装上（edith-websocket、edith-connect……；能力要用时也会自己下）
   edith tools remove <工具>        去掉
@@ -57,6 +60,7 @@ const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作�
 选项：
   -C, --cwd <目录>    工作目录（默认当前目录）
   -w, --worktree      开一个 git worktree 去那里干（.edith/worktrees/，分支 edith/<编号>）；退出时没改东西就自动清掉
+  --auto              不问就做：改文件、跑命令、打开新网站这些不再等批准（~/.edith/config.json 的 permissions.deny 照样挡）
   -q, --quiet         只打最终回答，不打过程
   -v, --verbose       也打思考、每段请求的用量、能力的日志
 
@@ -122,6 +126,8 @@ struct Options {
     /// 能力、MCP 配置改哪一层
     layer: capabilities::Layer,
     worktree: bool,
+    /// --auto：不问就做（审批全放开，deny 规则照样挡）
+    auto: bool,
     words: Vec<String>,
 }
 
@@ -172,7 +178,8 @@ fn main() {
     }
     let mut workspace = if options.explicit { options.cwd.clone() } else { home::find_workspace(&options.cwd) };
     // --worktree：开一个 git worktree 去那里干（干活、聊天、run 才开）
-    let starts_brain = !matches!(command.as_str(), "sessions" | "instances" | "capabilities" | "caps" | "attach" | "tools" | "mcp");
+    let starts_brain =
+        !matches!(command.as_str(), "sessions" | "instances" | "capabilities" | "caps" | "attach" | "tools" | "mcp" | "trust");
     if starts_brain && options.worktree {
         match worktree::create(&workspace) {
             Ok(tree) => {
@@ -197,6 +204,7 @@ fn main() {
             exit_on(result);
         }
         "tools" => exit_on(tools_command(&options.words[1..])),
+        "trust" => exit_on(trust_command(&options.words[1..])),
         "mcp" => {
             let rest: Vec<String> = options.words[1..].to_vec();
             exit_on(mcp_command(&rest, options.layer));
@@ -225,6 +233,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         continue_latest: false,
         layer: capabilities::Layer::Local,
         worktree: false,
+        auto: false,
         words: Vec::new(),
     };
     let mut rest = arguments.iter();
@@ -247,6 +256,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "--project" => options.layer = capabilities::Layer::Project,
             "--local" => options.layer = capabilities::Layer::Local,
             "-w" | "--worktree" => options.worktree = true,
+            "--auto" => options.auto = true,
             "-c" | "--continue" => options.continue_latest = true,
             "-r" | "--resume" => options.resume = Some(rest.next().ok_or("-r 后面要跟会话 id")?.clone()),
             "--" => options.words.extend(rest.by_ref().cloned()),
@@ -255,11 +265,35 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         }
     }
     options.cwd = std::fs::canonicalize(&options.cwd).map_err(|_| format!("工作目录不存在：{}", options.cwd.display()))?;
+    if options.auto {
+        approval::set_auto(true);
+    }
     if options.verbose {
         // capabilities.rs 看它决定要不要把能力的日志也打到终端
         unsafe { std::env::set_var("EDITH_VERBOSE", "1") };
     }
     Ok(options)
+}
+
+/// 终端能批准：stdin、stderr 都是终端时（不是的话，要批准的事问能批准的能力，没有就不做）
+fn terminal_approves() -> bool {
+    let approves = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    if approves {
+        approval::enable_terminal();
+    }
+    approves
+}
+
+/// 只有批准要从终端读：另开一个线程读（干一件事就退、edith run 时主线程不读终端）
+fn read_approvals() {
+    std::thread::spawn(|| {
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        while stdin.lock().read_line(&mut line).unwrap_or(0) > 0 {
+            approval::answer_terminal(&line);
+            line.clear();
+        }
+    });
 }
 
 /// 起这个目录的大脑：接能力、开本机接入
@@ -268,6 +302,7 @@ fn prepare() -> Result<(), String> {
     brain::setup_prompts();
     install_interrupt();
     instance::serve()?;
+    trust::ensure();
     capabilities::start_all(&mut |message| eprintln!("\x1b[33m{message}\x1b[0m"));
     mcp::start_all(&mut |message| eprintln!("\x1b[33m{message}\x1b[0m"));
     Ok(())
@@ -290,6 +325,9 @@ fn run(options: Options) -> Result<(), String> {
     let printer = Arc::new(Mutex::new(Printer::new(options.quiet, options.verbose)));
     mind::listen(move |envelope| printer.lock().unwrap().show(envelope.kind, &envelope.session, &envelope.data, true));
     watch_interrupt(true);
+    if terminal_approves() {
+        read_approvals();
+    }
     eprintln!(
         "EDITH 在 {} 开着（会话 {}，{} 个能力）。Ctrl+C 退出。",
         home::workspace().display(),
@@ -357,7 +395,11 @@ fn work(options: Options) -> Result<(), String> {
         printer.lock().unwrap().show(envelope.kind, &envelope.session, &envelope.data, false);
     });
     watch_interrupt(false);
+    let approves = terminal_approves();
     if let Some(task) = task {
+        if approves {
+            read_approvals();
+        }
         mind::submit(&session.id, &task, Origin::terminal(), Urgency::Queue, None)?;
         // 干完（中途能力补充、排着的也干完）再退出
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -379,7 +421,12 @@ fn work(options: Options) -> Result<(), String> {
             let _ = std::io::stderr().flush();
         }
         let mut line = String::new();
-        if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+        let read = stdin.lock().read_line(&mut line).unwrap_or(0);
+        // 在等批准：这一行是回答
+        if read > 0 && approval::answer_terminal(&line) {
+            continue;
+        }
+        if read == 0 || line.trim().is_empty() {
             break;
         }
         let urgency = if mind::working(&session.id).is_some() { Urgency::Interject } else { Urgency::Queue };
@@ -454,6 +501,9 @@ fn capabilities_command(arguments: &[String], layer: capabilities::Layer) -> Res
     let layer_title = layer.title();
     match arguments.first().map(String::as_str) {
         None | Some("list") => {
+            if !trust::ensure() {
+                println!("（项目 / 本地配置没信任，下面只列全局的：edith trust）");
+            }
             if running.is_none() {
                 // 能力的程序起来后要连进套接字：先开
                 instance::serve()?;
@@ -565,6 +615,45 @@ fn tools_command(arguments: &[String]) -> Result<(), String> {
     }
 }
 
+fn trust_command(arguments: &[String]) -> Result<(), String> {
+    let workspace = home::workspace();
+    match arguments.first().map(String::as_str) {
+        Some("revoke") => {
+            if trust::revoke()? {
+                println!("不再信任 {} 的配置", workspace.display());
+            } else {
+                println!("{} 本来就没信任", workspace.display());
+            }
+            Ok(())
+        }
+        None | Some("--yes" | "-y") => {
+            let commands = trust::commands();
+            if trust::files().is_empty() {
+                println!("{} 没有项目 / 本地配置，不用信任", workspace.display());
+                return Ok(());
+            }
+            println!("{} 的项目 / 本地配置（{}）：", workspace.display(), if trust::trusted() { "已经信任" } else { "没信任" });
+            for line in &commands {
+                println!("  {line}");
+            }
+            if commands.is_empty() {
+                println!("  （没有要起的程序）");
+            }
+            if !arguments.is_empty() {
+                trust::grant()?;
+                println!("信任了；内容再变要重新信任");
+            } else if !trust::trusted() {
+                if !trust::ensure() {
+                    return Err("没信任".into());
+                }
+                println!("信任了；内容再变要重新信任");
+            }
+            Ok(())
+        }
+        _ => Err("用法：edith trust [--yes | revoke]".into()),
+    }
+}
+
 fn mcp_command(arguments: &[String], layer: capabilities::Layer) -> Result<(), String> {
     let running = instance::running_in(&home::workspace()).into_iter().next();
     let restart_hint = |done: &str| {
@@ -577,6 +666,9 @@ fn mcp_command(arguments: &[String], layer: capabilities::Layer) -> Result<(), S
     let layer_title = layer.title();
     match arguments.first().map(String::as_str) {
         None | Some("list") => {
+            if !trust::ensure() {
+                println!("（项目 / 本地配置没信任，下面只列全局的：edith trust）");
+            }
             let configs = mcp::configs();
             if configs.is_empty() {
                 println!("还没有 MCP 服务（edith mcp add <名字> <命令> [参数…]，或写 .mcp.json）");

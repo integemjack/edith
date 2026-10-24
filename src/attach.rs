@@ -1,5 +1,6 @@
 //! 接到这个目录正在跑的大脑上（同一个目录第二次 `edith .` / `edith "…"`）：经它的本机接入连上，自己当一个能力
 //! （名字 terminal、订焦点会话的全部事件），终端里打的字用 ask / sense 交过去，过程照常打出来。
+//! 在终端里时它也能批准（approves）：大脑要批准时打出来问，打的下一行就是回答。
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
@@ -19,6 +20,10 @@ struct Link {
     next: AtomicU64,
     /// 焦点会话在干的那一轮（干活时打的字算补充）
     working: Mutex<Option<String>>,
+    /// 在等回答的批准（approve 请求的 id）
+    approving: Mutex<Option<Value>>,
+    /// 终端能批准
+    approves: bool,
 }
 
 impl Link {
@@ -26,6 +31,14 @@ impl Link {
         let mut stream = self.stream.lock().unwrap();
         let _ = writeln!(stream, "{message}");
         let _ = stream.flush();
+    }
+
+    /// 终端打的一行：在等批准就是回答
+    fn answer(&self, line: &str) -> bool {
+        let Some(id) = self.approving.lock().unwrap().take() else { return false };
+        let decision = crate::approval::Decision::from_line(line);
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "result": decision.to_json() }));
+        true
     }
 
     fn request(&self, method: &str, params: Value) -> Value {
@@ -46,6 +59,8 @@ pub fn run(entry: &Value, task: Option<String>, quiet: bool, verbose: bool, inte
         pending: Mutex::new(HashMap::new()),
         next: AtomicU64::new(1),
         working: Mutex::new(None),
+        approving: Mutex::new(None),
+        approves: std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
     });
     let printer = Arc::new(Mutex::new(Printer::new(quiet, verbose)));
     let (ready_sender, ready) = mpsc::channel::<()>();
@@ -86,6 +101,18 @@ pub fn run(entry: &Value, task: Option<String>, quiet: bool, verbose: bool, inte
         if !quiet {
             eprintln!("\x1b[2m（接到 {workspace} 正在跑的大脑上）\x1b[0m");
         }
+        // 只有批准要从终端读
+        if link.approves {
+            let link = link.clone();
+            std::thread::spawn(move || {
+                let stdin = std::io::stdin();
+                let mut line = String::new();
+                while stdin.lock().read_line(&mut line).unwrap_or(0) > 0 {
+                    link.answer(&line);
+                    line.clear();
+                }
+            });
+        }
         // 和本机干一件事一样：新开一个会话
         let reply = link.request("ask", json!({ "text": task, "session": "new" }));
         if let Some(error) = reply["error"]["message"].as_str() {
@@ -101,7 +128,11 @@ pub fn run(entry: &Value, task: Option<String>, quiet: bool, verbose: bool, inte
             let _ = std::io::stderr().flush();
         }
         let mut line = String::new();
-        if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+        let read = stdin.lock().read_line(&mut line).unwrap_or(0);
+        if read > 0 && link.answer(&line) {
+            continue;
+        }
+        if read == 0 || line.trim().is_empty() {
             break;
         }
         let urgency = if link.working.lock().unwrap().is_some() { "interject" } else { "queue" };
@@ -129,7 +160,13 @@ fn handle(link: &Link, printer: &Mutex<Printer>, message: &Value, ready: &Sender
             "actions": [],
             "receives": ["*"],
             "sessions": "focus",
+            "approves": link.approves,
         }})),
+        (Some("approve"), Some(id)) => {
+            *link.approving.lock().unwrap() = Some(id.clone());
+            eprint!("\n{}", crate::approval::prompt_text(message["params"]["summary"].as_str().unwrap_or("")));
+            let _ = std::io::stderr().flush();
+        }
         (Some("initialized"), None) => {
             let _ = ready.send(());
         }

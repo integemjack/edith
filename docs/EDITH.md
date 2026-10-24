@@ -54,6 +54,23 @@
 就把 worktree 和分支删掉；改了的留着，告诉你怎么合并。`.edith/worktrees/`、`.edith/*.local.json` 自动写进仓库的 `info/exclude`。
 想接到正在跑的那个大脑上（共用它的会话和能力）用 `edith attach`。
 
+## 信任与审批
+
+照 Claude Code 的做法：
+
+- **信任目录**（`src/trust.rs`）：项目、本地两层的能力和 MCP 配置会起程序，别人的仓库里写什么命令一跑就以你的身份执行。
+  所以先信任才读：终端里起的会列出要起的命令问一句，不在终端里的只提醒；`edith trust` 看、`edith trust --yes` 信任、
+  `edith trust revoke` 收回。按这几个文件内容的哈希记在 `~/.edith/trust.json`，内容变了要再信任；自己用 `edith capabilities add`、
+  `edith mcp add` 改的照旧信任。
+- **审批**（`src/approval.rs`）：写文件、改文件、跑命令、没说自己只读的能力动作和 MCP 工具；读工作目录外的、敏感的
+  （`~/.ssh`、`.env`、密钥、`~/.edith`）；打开新网站（网址本身就能带数据出去）；访问本机 / 内网（防 SSRF，每一跳都看）——都先问。
+  终端里打 `y` 这次行、`a` 这个会话里同类的都行、`n 原因` 不行；能力交来的那一轮问声明了 `approves` 的全权能力
+  （[协议 §6.5](CAPABILITY-PROTOCOL.md#65-approve请求)），`edith attach` 接上来的终端也能批。没人能批的就不做。
+  `--auto`（或 `EDITH_PERMISSION_MODE=auto`）不问；`~/.edith/config.json`：
+  `{"permissions": {"mode": "ask"|"auto", "allow": ["run_shell(git status*)", "fetch_url(github.com)"], "deny": ["run_shell(rm *)"], "additionalDirectories": ["~/notes"]}}`，
+  deny 什么时候都挡。只认全局的 config.json：项目里的配置不能替你放开权限。
+- **客人的会话**：权限不全的连接只用自己名下的会话，话不进主人的会话（防借权注入），也看不到主人的对话。
+
 ## 用法
 
 ```
@@ -77,9 +94,10 @@ edith tools [install | remove]          共用的工具（edith.tools）
 
 | 文件 | 内容 |
 |---|---|
-| `config.json` | 模型；`searxng`（可选，搜网页用自己的 SearXNG） |
+| `config.json` | 模型；`searxng`（可选，搜网页用自己的 SearXNG）；`permissions`（审批：mode、allow、deny、additionalDirectories） |
+| `trust.json` | 信任了哪些目录的项目 / 本地配置（按内容哈希） |
 | `capabilities.json`、`mcp.json` | 全局那层的能力、MCP 服务（[协议 §8](CAPABILITY-PROTOCOL.md#8-配置capabilitiesjson)、[§9](CAPABILITY-PROTOCOL.md#9-mcp-服务)） |
-| `projects/<工作目录的路径，非字母数字换成 ->/` | 这个目录的数据：`sessions/<id>.json` 会话、`reads/<id>.json` 会话读过的文件（先读后改用）、`logs/<能力名>.log` 能力的日志 |
+| `projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希前 8 位>/` | 这个目录的数据：`sessions/<id>.json` 会话、`reads/<id>.json` 会话读过的文件（先读后改用）、`logs/<能力名>.log` 能力的日志 |
 | `Prompts/` | 提示词（`edith.md` 是 EDITH 自己的；改了下一轮生效，改坏的段自动用自带的；friday-core 的 prompts 管合并） |
 | `instances/<目录的键>-<进程号>.json` | 在跑的大脑：目录、进程、套接字的地址和主令牌、能力、入口（[协议 §8.2](CAPABILITY-PROTOCOL.md#82-在跑的大脑instances)） |
 | `tools/<工具>/` | 从 edith.tools 下的工具；`tools/installed.json` 记版本 |

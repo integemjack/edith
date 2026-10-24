@@ -60,6 +60,8 @@ pub fn command(home: &Path, port: u16, cwd: &Path, args: &[&str]) -> Command {
         .env("EDITH_MODEL", "fake")
         .env("EDITH_API_KEY", "none")
         .env("NO_PROXY", "127.0.0.1,localhost")
+        // 测试默认不问（审批另有测试：env_remove 掉它）
+        .env("EDITH_PERMISSION_MODE", "auto")
         .stdin(Stdio::null());
     command
 }
@@ -68,12 +70,15 @@ pub fn edith(home: &Path, port: u16, cwd: &Path, args: &[&str]) -> Output {
     command(home, port, cwd, args).output().unwrap()
 }
 
-/// 这个工作目录的数据在 EDITH_HOME 下的哪（同 home::project_dir：路径里非字母数字换成 -）
+/// 这个工作目录的数据在 EDITH_HOME 下的哪（同 home::project_key：可读的名字 + 路径哈希前 8 位）
 pub fn project_dir(home: &Path, workspace: &Path) -> PathBuf {
+    use sha2::Digest;
     let path = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf()).to_string_lossy().into_owned();
     let path = path.strip_prefix(r"\\?\").unwrap_or(&path).to_string();
-    let encoded: String = path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    home.join("projects").join(encoded)
+    let readable: Vec<char> = path.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
+    let readable: String = readable[readable.len().saturating_sub(60)..].iter().collect();
+    let hash: String = sha2::Sha256::digest(path.as_bytes()).iter().take(4).map(|byte| format!("{byte:02x}")).collect();
+    home.join("projects").join(format!("{}-{hash}", readable.trim_matches('-')))
 }
 
 /// 这个工作目录有几个会话文件

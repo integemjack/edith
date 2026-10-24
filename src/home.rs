@@ -1,6 +1,6 @@
 //! 数据和配置（同 Claude Code 的做法）：
 //! - 全局 `~/.edith`（`EDITH_HOME` 换地方）：模型、提示词、全局配置、在跑的大脑登记（instances/）、下载的工具（tools/）；
-//! - 每个工作目录的**数据**也在全局：`~/.edith/projects/<工作目录的路径，非字母数字换成 ->/`（会话 sessions/、日志 logs/），
+//! - 每个工作目录的**数据**也在全局：`~/.edith/projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希前 8 位>/`（会话 sessions/、日志 logs/），
 //!   项目目录里不放会话——同一个目录开几个大脑各写各的会话文件，worktree 删了对话也不丢；
 //! - 项目目录 `<工作目录>/.edith` 只放**配置**：`*.json` 提交进仓库大家共用，`*.local.json` 只给自己（不提交）。
 
@@ -39,12 +39,22 @@ pub fn workspace_data() -> PathBuf {
     workspace().join(".edith")
 }
 
-/// 这个工作目录的数据（会话、日志）：`~/.edith/projects/<路径里非字母数字换成 ->`
+/// 这个工作目录的数据（会话、日志）：`~/.edith/projects/<可读的名字>-<哈希>`。
+/// 可读的名字：路径里不是字母数字的换成 -（中文等字母照留），太长的留后面 60 个字；
+/// 哈希：完整路径的 SHA-256 前 8 位——只换字符会撞（`/x/项目 一` 和 `/x/项目-一`、`a/b-c` 和 `a/b/c`）
 pub fn project_dir() -> PathBuf {
-    let path = workspace().to_string_lossy().into_owned();
+    dir().join("projects").join(project_key(&workspace()))
+}
+
+pub fn project_key(workspace: &Path) -> String {
+    use sha2::Digest;
+    let path = workspace.to_string_lossy().into_owned();
     let path = path.strip_prefix(r"\\?\").unwrap_or(&path).to_string();
-    let encoded: String = path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    dir().join("projects").join(encoded)
+    let readable: Vec<char> = path.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
+    let readable: String = readable[readable.len().saturating_sub(60)..].iter().collect();
+    let digest = sha2::Sha256::digest(path.as_bytes());
+    let hash: String = digest.iter().take(4).map(|byte| format!("{byte:02x}")).collect();
+    format!("{}-{hash}", readable.trim_matches('-'))
 }
 
 /// 从 start 往上找工作目录：先碰到有 .edith/ 的目录就是它（全局数据目录那个不算）；碰到 git 仓库的根（有 .git，
@@ -145,5 +155,21 @@ impl Model {
     /// 记「不接受的参数」、上下文上限用的键
     pub fn engine_id(&self) -> String {
         format!("edith|{}|{}", self.base_url, self.model)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn project_keys_do_not_collide() {
+        let a = super::project_key(Path::new("/Users/x/项目一"));
+        let b = super::project_key(Path::new("/Users/x/项目二"));
+        assert!(a.starts_with("Users-x-项目一-") && a != b, "{a} {b}");
+        assert_ne!(super::project_key(Path::new("/a/b-c")), super::project_key(Path::new("/a/b/c")));
+        assert_eq!(super::project_key(Path::new("/a/b")), super::project_key(Path::new("/a/b")));
+        let long = super::project_key(Path::new(&format!("/{}", "长".repeat(200))));
+        assert!(long.chars().count() <= 60 + 9, "{long}");
     }
 }
