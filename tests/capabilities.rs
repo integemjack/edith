@@ -205,6 +205,27 @@ fn hook_denies_and_describes_approval() {
 }
 
 #[test]
+fn capability_updates_its_actions() {
+    let (work, home) = scratch("cap-update");
+    let model = fake_model(&home.join("requests.jsonl"));
+    // 握手后换一份动作（Friday 的脚本工具加了）：工具清单跟着变
+    let update = json!({ "jsonrpc": "2.0", "method": "capability.update", "params": { "actions": [
+        { "name": "forget", "description": "忘掉一句话", "parameters": { "type": "object", "properties": {} }, "readOnly": true },
+        { "name": "bad name", "description": "名字不合规的不收" },
+    ] } });
+    configure_cap(&home, json!([{ "delay": 0.3, "send": update }, { "delay": 0.5, "send": request(5, "tools.list", json!({})) }]), "done");
+    let _edith = run(&home, model.port, &work);
+    assert!(wait_until(30, || response(&received(&home), 5).is_some()), "tools.list 没回话");
+    let messages = received(&home);
+    let listed = response(&messages, 5).unwrap();
+    let names: Vec<&str> = listed["result"]["tools"].as_array().unwrap().iter().filter_map(|tool| tool["name"].as_str()).collect();
+    assert!(names.contains(&"cap__forget") && !names.contains(&"cap__remember"), "{names:?}");
+    assert!(!names.iter().any(|name| name.contains(' ')), "{names:?}");
+    let forget = listed["result"]["tools"].as_array().unwrap().iter().find(|tool| tool["name"] == "cap__forget").unwrap();
+    assert_eq!(forget["readOnly"], true, "{forget}");
+}
+
+#[test]
 fn sense_starts_a_turn_and_notes() {
     let (work, home) = scratch("sense");
     let model = fake_model(&home.join("requests.jsonl"));

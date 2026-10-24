@@ -51,8 +51,8 @@ pub struct Capability {
     /// initialize 回的 capability（title、version、description）
     pub info: Value,
     pub senses: Vec<Value>,
-    /// {name, description, parameters, timeoutSeconds?, exclusive?, holds?, releases?}
-    pub actions: Vec<Value>,
+    /// {name, description, parameters, timeoutSeconds?, exclusive?, holds?, releases?}；它可以随时用 capability.update 换一份
+    actions: RwLock<Vec<Value>>,
     pub receives: Vec<String>,
     /// 这条连接能做什么（令牌定的）
     pub grant: Grant,
@@ -462,6 +462,17 @@ fn strings(value: Option<&Value>) -> Vec<String> {
     value.and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
 }
 
+/// 回话里的 actions（名字只能是字母、数字、-、_，不合规的忽略）
+fn parse_actions(value: Option<&Value>) -> Vec<Value> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|action| action.get("name").and_then(Value::as_str).is_some_and(|name| !name.is_empty() && clean_name(name) == name))
+        .cloned()
+        .collect()
+}
+
 /// 取名到登记那一段一次只走一条连接（handshake）
 static NAMING: Mutex<()> = Mutex::new(());
 
@@ -486,7 +497,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
         name: "connecting".into(),
         info: Value::Null,
         senses: Vec::new(),
-        actions: Vec::new(),
+        actions: RwLock::new(Vec::new()),
         receives: Vec::new(),
         grant: authority.grant.clone(),
         approves: false,
@@ -539,14 +550,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
         None => unique_name(reply.get("name").and_then(Value::as_str).unwrap_or("client"), true),
     };
     let name = name.as_str();
-    let actions: Vec<Value> = reply
-        .get("actions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|action| action.get("name").and_then(Value::as_str).is_some_and(|name| !name.is_empty() && clean_name(name) == name))
-        .cloned()
-        .collect();
+    let actions = parse_actions(reply.get("actions"));
     let receives: Vec<String> = reply
         .get("receives")
         .and_then(Value::as_array)
@@ -559,7 +563,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
         name: name.to_string(),
         info: reply.get("capability").cloned().unwrap_or(Value::Null),
         senses: reply.get("senses").and_then(Value::as_array).cloned().unwrap_or_default(),
-        actions,
+        actions: RwLock::new(actions),
         receives,
         grant: authority.grant,
         approves: reply.get("approves").and_then(Value::as_bool) == Some(true),
@@ -593,7 +597,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, author
         name,
         &format!(
             "连上了：{} 个动作，感知 {} 种，订了 {} 种事件",
-            capability.actions.len(),
+            capability.actions().len(),
             capability.senses.len(),
             capability.receives.len()
         ),
@@ -658,6 +662,11 @@ fn invalid(message: impl Into<String>) -> Failure {
 }
 
 impl Capability {
+    /// 现在的动作
+    fn actions(&self) -> Vec<Value> {
+        self.actions.read().unwrap().clone()
+    }
+
     fn send(&self, message: &Value) -> bool {
         let mut writer = self.writer.lock().unwrap();
         let Some(pipe) = writer.as_mut() else { return false };
@@ -1095,6 +1104,14 @@ impl Capability {
                 }
                 mind::emit(&session, &turn, "notice", json!({ "text": format!("能力「{}」：{}", self.name, text.trim()), "call": call }));
             }
+            // 动作变了（Friday 的脚本工具加了、改了）：换一份，下一段请求就按新的给模型
+            "capability.update" => {
+                if let Some(actions) = params.get("actions") {
+                    let actions = parse_actions(Some(actions));
+                    log_line(&self.name, &format!("动作换成了 {} 个", actions.len()));
+                    *self.actions.write().unwrap() = actions;
+                }
+            }
             "log" => {
                 let level = params.get("level").and_then(Value::as_str).unwrap_or("info");
                 log_line(&self.name, &format!("[{level}] {}", params.get("text").and_then(Value::as_str).unwrap_or("")));
@@ -1267,7 +1284,7 @@ fn tools_listing() -> Value {
 pub fn specs(tools: &permissions::Tools) -> Vec<Value> {
     let mut specs = Vec::new();
     for capability in native() {
-        for action in &capability.actions {
+        for action in &capability.actions() {
             let name = action["name"].as_str().unwrap_or("");
             if !tools.allows(&format!("{}{SEPARATOR}{name}", capability.name), read_only(action)) {
                 continue;
@@ -1291,7 +1308,8 @@ pub fn summary() -> String {
     native()
         .iter()
         .map(|capability| {
-            let actions: Vec<&str> = capability.actions.iter().filter_map(|action| action["name"].as_str()).collect();
+            let list = capability.actions();
+            let actions: Vec<&str> = list.iter().filter_map(|action| action["name"].as_str()).collect();
             let senses: Vec<&str> = capability.senses.iter().filter_map(|sense| sense.get("kind").and_then(Value::as_str)).collect();
             let title = capability.info.get("title").and_then(Value::as_str).map(|title| format!("（{title}）")).unwrap_or_default();
             let mut parts = Vec::new();
@@ -1316,7 +1334,7 @@ fn read_only(action: &Value) -> bool {
 pub fn is_action(full_name: &str) -> bool {
     let Some((name, rest)) = full_name.split_once(SEPARATOR) else { return false };
     let Some(capability) = CAPABILITIES.read().unwrap().get(name).cloned() else { return false };
-    capability.actions.iter().any(|action| action["name"].as_str() == Some(rest))
+    capability.actions().iter().any(|action| action["name"].as_str() == Some(rest))
 }
 
 // MARK: - 两个口子：模型地址、钩子
@@ -1467,20 +1485,16 @@ pub fn ask_approval(who: Option<&str>, request: &Value, cancel: &AtomicBool) -> 
 pub fn is_read_only(full_name: &str) -> bool {
     let Some((name, rest)) = full_name.split_once(SEPARATOR) else { return false };
     let Some(capability) = CAPABILITIES.read().unwrap().get(name).cloned() else { return false };
-    capability.actions.iter().any(|action| action["name"].as_str() == Some(rest) && read_only(action))
+    capability.actions().iter().any(|action| action["name"].as_str() == Some(rest) && read_only(action))
 }
 
 /// 调能力的动作（名字不是它们的返回 None）
 pub fn call(full_name: &str, arguments: &Map<String, Value>, context: &Context, cancel: &AtomicBool) -> Option<Outcome> {
     let (name, rest) = full_name.split_once(SEPARATOR)?;
     let capability = CAPABILITIES.read().unwrap().get(name).cloned()?;
-    let action = capability
-        .actions
-        .iter()
-        .find(|action| {
-            action["name"].as_str().is_some_and(|action| action == rest || (full_name.chars().count() == 64 && action.starts_with(rest)))
-        })?
-        .clone();
+    let action = capability.actions().into_iter().find(|action| {
+        action["name"].as_str().is_some_and(|action| action == rest || (full_name.chars().count() == 64 && action.starts_with(rest)))
+    })?;
     Some(capability.act(&action, arguments, context, cancel))
 }
 
@@ -1491,7 +1505,7 @@ pub fn describe(name: &str) -> Option<Value> {
         "name": capability.name,
         "info": capability.info,
         "senses": capability.senses,
-        "actions": capability.actions.iter().map(|action| action["name"].clone()).collect::<Vec<_>>(),
+        "actions": capability.actions().iter().map(|action| action["name"].clone()).collect::<Vec<_>>(),
         "receives": capability.receives,
         "grant": capability.grant.to_json(),
     }))

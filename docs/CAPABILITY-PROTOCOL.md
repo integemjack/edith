@@ -264,6 +264,15 @@ run_shell 执行前后各看一遍工作目录和命令里写到的路径，新�
 - `log {level?, text}`：记进这个能力的日志（和写标准错误一样）。
 - `ping`：回 `{}`。两边都可以发，用来探活。
 
+### 4.7 `capability.update`（通知）
+
+握手以后动作变了（Friday 的脚本工具加了、改了、开关了）：发一份新的 `actions`（格式同 `initialize` 回话里的），EDITH 整份换掉，
+下一段请求就按新的给模型。
+
+```json
+{"jsonrpc": "2.0", "method": "capability.update", "params": {"actions": [{"name": "get_weather", "description": "…", "parameters": {…}}]}}
+```
+
 ## 5. 会话与焦点
 
 - **按目录工作**：一个大脑管一个目录（工作目录），会话存在 `~/.edith/projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希>/sessions/<id>.jsonl`（只追加，一行一条）
