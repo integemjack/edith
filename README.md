@@ -19,7 +19,7 @@ edith serve --listen 127.0.0.1:7788   # 开对外接口（HTTP + SSE）
 ```
 src/            main（命令行）、brain（一轮对话）、tools（自带工具）、limbs（MCP 四肢）、server（对外接口）、sessions、http、home
 prompts/        提示词：edith.md 是 EDITH 自己的；prompts-tools.md、prompts-framework.md 抄自 Friday（工具说明、循环里的提醒）
-core/           子模块 integemjack/friday.core：对话循环、请求体、流式解析、文件工具、MCP 客户端等规则
+core/           子模块 integemjack/friday.core（Friday 的 Swift / Qt 两端也用它）：对话循环、请求体、流式解析、文件工具、MCP 客户端等规则
 tests/          端到端冒烟测试：tests/fake/ 里的假模型（OpenAI 流式）和假四肢（stdio MCP）
 ```
 
@@ -34,5 +34,4 @@ cargo build --release
 每次推送 GitHub Actions 编全平台、全架构的包：macOS（arm64、x64）、Windows（x64、x86、arm64）、Linux（x64、x86、arm64、armv7、
 armv6、riscv64、loong64、ppc64le、s390x；zig 编成 musl 静态程序，不挑发行版），能在运行器上原生跑的同时跑端到端测试；
 推到 `main` 的发一个 Release（`v<版本前两位>.<序号>`，只留最新一个）。
-
-`core/` 是私有仓库 integemjack/friday.core：下载 Release 里的包直接能用；从源码编要有它的读权限。改 friday.core：在 `core/` 里拉新提交，提交子模块指针。
+改 friday.core：在 `core/` 里拉新提交，提交子模块指针。
