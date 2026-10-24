@@ -309,6 +309,10 @@ fn work(session_id: String, first: Input) {
 fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value {
     let failed = |message: String| json!({ "answer": "", "stopped": false, "error": message });
     let Some(mut session) = Session::load(session_id) else { return failed(format!("没有会话 {session_id}")) };
+    // 标题用原话（交给模型的那段带着来源说明）
+    if session.title.is_empty() {
+        session.title = input.text.replace('\n', " ").chars().take(40).collect();
+    }
     let model = match Model::load() {
         Ok(model) => model,
         Err(message) => return failed(message),

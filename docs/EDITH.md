@@ -52,7 +52,8 @@
 要并行又互不干扰时，**自己选** `-w`（`--worktree`）：开一个 git worktree（`<仓库根>/.edith/worktrees/<编号>`，分支 `edith/<编号>`，
 从 HEAD 开）去那里干；在子目录里起的对应到 worktree 的同一个子目录。退出时没改东西（没有没提交的改动、分支上没有新提交）
 就把 worktree 和分支删掉；改了的留着，告诉你怎么合并。`.edith/worktrees/`、`.edith/*.local.json` 自动写进仓库的 `info/exclude`。
-想接到正在跑的那个大脑上（共用它的会话和能力）用 `edith attach`。
+worktree 里的会话记在仓库名下，回到仓库 `-c`、`edith sessions` 都找得到，worktree 删了也还在。被强行结束（没机会清）留下的，
+`edith worktree` 看、`edith worktree prune` 清掉没改东西的。想接到正在跑的那个大脑上（共用它的会话和能力）用 `edith attach`。
 
 ## 信任与审批
 
@@ -71,6 +72,12 @@
   deny 什么时候都挡。只认全局的 config.json：项目里的配置不能替你放开权限。
 - **客人的会话**：权限不全的连接只用自己名下的会话，话不进主人的会话（防借权注入），也看不到主人的对话。
 
+## 升级
+
+起来时看一眼老的数据、配置（`src/migrate.rs`）：v0.1.9 及以前放在项目里的会话（`<目录>/.edith/sessions/*.json`）挪到
+`~/.edith/projects/` 下换成 `.jsonl`，`main-session` 删掉；能力配置里经 `edith-mcp` 接的 MCP 服务（edith.tools 已经没有它了）、
+更早的 `"protocol": "mcp"` 项，挪进同一层的 MCP 配置。
+
 ## 用法
 
 ```
@@ -78,6 +85,7 @@ edith "把 src 里的 TODO 列成清单"        在这个目录干一件事（�
 edith [目录]                            一句一句聊（新会话）；干活时再打字算补充；Ctrl+C 停下这一轮
 edith -c "接着把第二条做了"             接着这个目录最近的会话（-r <会话 id> 接着指定的）
 edith -w "…"                            开一个 git worktree 去那里干（没改东西退出时删掉）
+edith worktree [list | prune | remove <编号> [--force]]   看 -w 开的 worktree、清掉没改东西的（被强行结束留下的）、删掉一个
 edith run [目录]                        一直开着，只听能力的（新会话是焦点；-c / -r 同上）
 edith attach [目录] ["…"]               接到这个目录正在跑的大脑上（经套接字，自己当一个叫 terminal 的能力）
 edith sessions                          列出这个目录的会话
@@ -97,7 +105,7 @@ edith tools [install | remove]          共用的工具（edith.tools）
 | `config.json` | 模型；`searxng`（可选，搜网页用自己的 SearXNG）；`permissions`（审批：mode、allow、deny、additionalDirectories） |
 | `trust.json` | 信任了哪些目录的项目 / 本地配置（按内容哈希） |
 | `capabilities.json`、`mcp.json` | 全局那层的能力、MCP 服务（[协议 §8](CAPABILITY-PROTOCOL.md#8-配置capabilitiesjson)、[§9](CAPABILITY-PROTOCOL.md#9-mcp-服务)） |
-| `projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希前 8 位>/` | 这个目录的数据：`sessions/<id>.json` 会话、`reads/<id>.json` 会话读过的文件（先读后改用）、`logs/<能力名>.log` 能力的日志 |
+| `projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希前 8 位>/` | 这个目录的数据：`sessions/<id>.jsonl` 会话（只追加，一行一条；同一个会话几个大脑接着写也不互相盖掉）、`reads/<id>.json` 会话读过的文件（先读后改用）、`logs/<能力名>.log` 能力的日志 |
 | `Prompts/` | 提示词（`edith.md` 是 EDITH 自己的；改了下一轮生效，改坏的段自动用自带的；friday-core 的 prompts 管合并） |
 | `instances/<目录的键>-<进程号>.json` | 在跑的大脑：目录、进程、套接字的地址和主令牌、能力、入口（[协议 §8.2](CAPABILITY-PROTOCOL.md#82-在跑的大脑instances)） |
 | `tools/<工具>/` | 从 edith.tools 下的工具；`tools/installed.json` 记版本 |

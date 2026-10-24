@@ -42,8 +42,25 @@ pub fn workspace_data() -> PathBuf {
 /// 这个工作目录的数据（会话、日志）：`~/.edith/projects/<可读的名字>-<哈希>`。
 /// 可读的名字：路径里不是字母数字的换成 -（中文等字母照留），太长的留后面 60 个字；
 /// 哈希：完整路径的 SHA-256 前 8 位——只换字符会撞（`/x/项目 一` 和 `/x/项目-一`、`a/b-c` 和 `a/b/c`）
+/// `edith -w` 开的 worktree（`<仓库>/.edith/worktrees/<编号>`）的数据记在仓库那里：回到仓库 -c、edith sessions 都找得到，
+/// worktree 删了对话也还在
 pub fn project_dir() -> PathBuf {
-    dir().join("projects").join(project_key(&workspace()))
+    dir().join("projects").join(project_key(&data_workspace()))
+}
+
+/// 数据算在哪个目录名下：edith 开的 worktree 算它的仓库，别的就是工作目录
+pub fn data_workspace() -> PathBuf {
+    let workspace = workspace();
+    let worktrees = workspace.parent();
+    let edith = worktrees.and_then(Path::parent);
+    match (worktrees, edith, edith.and_then(Path::parent)) {
+        (Some(worktrees), Some(edith), Some(repository))
+            if worktrees.file_name().is_some_and(|name| name == "worktrees") && edith.file_name().is_some_and(|name| name == ".edith") =>
+        {
+            repository.to_path_buf()
+        }
+        _ => workspace,
+    }
 }
 
 pub fn project_key(workspace: &Path) -> String {

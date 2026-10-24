@@ -172,6 +172,16 @@ fn save_layer(layer: Layer, items: &[Value]) -> Result<(), String> {
     home::write_json(&layer_path(layer), &json!({ "capabilities": items }))
 }
 
+/// 一层原样的配置（不管信任；升级迁移用）
+pub fn raw_layer(layer: Layer) -> Vec<Value> {
+    read_layer(layer)
+}
+
+/// 原样写回一层（升级迁移用）
+pub fn write_raw_layer(layer: Layer, items: &[Value]) -> Result<(), String> {
+    save_layer(layer, items)
+}
+
 /// 能力的日志：`<项目数据>/logs/<名字>.log`
 pub fn log_file(name: &str) -> PathBuf {
     home::project_dir().join("logs").join(format!("{name}.log"))

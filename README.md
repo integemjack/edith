@@ -14,7 +14,7 @@ MCP 服务（直接读 `.mcp.json`）把事做完、存好会话。
 ```bash
 edith "把 src 里的 TODO 列成清单"      # 在这个目录干一件事（会话在 ~/.edith/projects/ 下；目录不加锁，可以开几个）
 edith -c "接着做第二条"                # 接着最近的会话（-r <id> 接着指定的）
-edith -w "重构登录"                    # 开一个 git worktree 去那里干，没改东西退出时删掉
+edith -w "重构登录"                    # 开一个 git worktree 去那里干，没改东西退出时删掉（edith worktree 看、prune 清）
 edith .                               # 一句一句聊（干活时再打字算补充；改文件、跑命令前问你批不批）
 edith trust                           # 看这个目录的配置要起哪些程序、信任它（别人的仓库先看再信）
 edith attach                          # 接到这个目录正在跑的大脑上

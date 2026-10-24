@@ -6,7 +6,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::{command, edith, fake, fake_model, project_dir, python, scratch, session_files, text};
+use common::{command, edith, fake, fake_model, python, scratch, session_files, text};
 use serde_json::{Value, json};
 
 fn wait_until(seconds: u64, mut condition: impl FnMut() -> bool) -> bool {
@@ -31,9 +31,7 @@ fn registry(home: &Path) -> Vec<Value> {
 
 /// 这个目录唯一的会话（id、历史里用户说了几句）
 fn only_session(home: &Path, workspace: &Path) -> (String, usize) {
-    let dir = project_dir(home, workspace).join("sessions");
-    let entry = std::fs::read_dir(&dir).unwrap().flatten().next().unwrap();
-    let session: Value = serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
+    let session = common::read_sessions(home, workspace).remove(0);
     let users = session["history"].as_array().unwrap().iter().filter(|message| message["role"] == "user").count();
     (session["id"].as_str().unwrap().to_string(), users)
 }
@@ -144,6 +142,18 @@ fn worktree_only_when_asked_and_cleaned_when_unchanged() {
     assert!(git(&repo, &["worktree", "list"]).contains("edith/"));
     // .edith/worktrees 不进 git
     assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+    // worktree 里的会话记在仓库名下：worktree 删了也找得到（run 的、在这里聊的、-w 的两个）
+    assert_eq!(session_files(&home, &repo), 4);
+    // 被强行结束留下的 worktree：edith worktree 看得到，prune 清掉没改东西的，改了的留着
+    let leftover = worktrees.join("left00");
+    git(&repo, &["worktree", "add", "-q", "-b", "edith/left00", &leftover.to_string_lossy(), "HEAD"]);
+    let listed = edith(&home, model.port, &repo, &["worktree"]);
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains("left00  edith/left00  没改东西") && stdout.contains("有没提交的改动"), "{}", text(&listed));
+    let pruned = edith(&home, model.port, &repo, &["worktree", "prune"]);
+    assert!(String::from_utf8_lossy(&pruned.stdout).contains("清掉了 1 个"), "{}", text(&pruned));
+    assert!(!leftover.exists() && trees[0].exists());
+    assert!(!git(&repo, &["branch"]).contains("edith/left00"));
     // attach：接到在跑的那个上
     let output = edith(&home, model.port, &repo, &["attach", "只聊天"]);
     assert!(output.status.success() && String::from_utf8_lossy(&output.stderr).contains("正在跑的大脑上"), "{}", text(&output));
@@ -293,4 +303,38 @@ fn risky_tools_need_approval() {
     let output = command(&home, model.port, &work, &[r#"调用工具 run_shell 参数 {"command":"rm x.txt"}"#]).output().unwrap();
     assert!(String::from_utf8_lossy(&output.stdout).contains("permissions.deny"), "{}", text(&output));
     assert!(work.join("x.txt").exists());
+}
+
+#[test]
+fn upgrades_old_data() {
+    let (work, home) = scratch("upgrade");
+    let model = fake_model(&home.join("requests.jsonl"));
+    // v0.1.9 的样子：会话在项目里、主会话、经 edith-mcp 接的 MCP 服务
+    let old = work.join(".edith").join("sessions");
+    std::fs::create_dir_all(&old).unwrap();
+    let id = "1234abcd-0000-0000-0000-000000000000";
+    let session =
+        json!({ "id": id, "title": "老会话", "cwd": work.to_str().unwrap(), "history": [{ "role": "user", "content": "以前说的" }] });
+    std::fs::write(old.join(format!("{id}.json")), session.to_string()).unwrap();
+    std::fs::write(work.join(".edith").join("main-session"), id).unwrap();
+    let capabilities = json!({ "capabilities": [
+        { "name": "fs", "command": "edith-mcp", "args": [python(), "-u", fake("limb.py").to_str().unwrap()] },
+        { "name": "keep", "command": "something-else" },
+    ]});
+    std::fs::write(home.join("capabilities.json"), capabilities.to_string()).unwrap();
+    let listed = edith(&home, model.port, &work, &["sessions"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("老会话"), "{}", text(&listed));
+    assert!(String::from_utf8_lossy(&listed.stderr).contains("升级"), "{}", text(&listed));
+    assert!(!old.exists() && !work.join(".edith").join("main-session").exists());
+    let output = edith(&home, model.port, &work, &["-r", "1234abcd", "只聊天"]);
+    assert!(output.status.success(), "{}", text(&output));
+    let history = common::read_sessions(&home, &work).remove(0)["history"].to_string();
+    assert!(history.contains("以前说的") && history.contains("我是 EDITH"), "{history}");
+    // MCP 挪进 mcp.json，别的能力留着
+    let mcp = std::fs::read_to_string(home.join("mcp.json")).unwrap();
+    assert!(mcp.contains("limb.py") && !mcp.contains("edith-mcp"), "{mcp}");
+    let left = std::fs::read_to_string(home.join("capabilities.json")).unwrap();
+    assert!(left.contains("something-else") && !left.contains("edith-mcp"), "{left}");
+    let tools = edith(&home, model.port, &work, &["mcp"]);
+    assert!(String::from_utf8_lossy(&tools.stdout).contains("工具：echo"), "{}", text(&tools));
 }

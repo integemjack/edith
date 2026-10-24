@@ -79,6 +79,63 @@ pub fn finish(tree: &Worktree) -> String {
     format!("改动在 worktree {}、分支 {}{hint}：合并用 git merge {}", tree.path.display(), tree.branch, tree.branch)
 }
 
+/// 仓库里 edith 开的一个 worktree 现在的样子
+pub struct Status {
+    pub path: PathBuf,
+    pub branch: String,
+    /// 有没提交的改动
+    pub dirty: bool,
+    /// 分支上有几个仓库现在的 HEAD 里没有的提交
+    pub ahead: usize,
+    /// 有大脑正在里面干活
+    pub in_use: bool,
+}
+
+/// 仓库根（在 worktree 里也找主仓库）
+fn repository(workspace: &Path) -> Result<PathBuf, String> {
+    let common = git(workspace, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).map_err(|_| "不是 git 仓库".to_string())?;
+    let common = PathBuf::from(common);
+    Ok(common.parent().map(Path::to_path_buf).unwrap_or(common))
+}
+
+/// edith 开的 worktree（`<仓库>/.edith/worktrees/`）
+pub fn list(workspace: &Path) -> Result<(PathBuf, Vec<Status>), String> {
+    let top = repository(workspace)?;
+    let _ = git(&top, &["worktree", "prune"]);
+    let ours = plain(&top.join(".edith").join("worktrees"));
+    let ours = std::fs::canonicalize(&ours).unwrap_or(ours);
+    let running: Vec<PathBuf> = crate::instance::list().iter().filter_map(|entry| entry["workspace"].as_str().map(PathBuf::from)).collect();
+    let mut found = Vec::new();
+    let porcelain = git(&top, &["worktree", "list", "--porcelain"])?;
+    for block in porcelain.split("\n\n") {
+        let field = |key: &str| block.lines().find_map(|line| line.strip_prefix(key)).map(str::to_string);
+        let Some(path) = field("worktree ").map(PathBuf::from) else { continue };
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if !path.starts_with(&ours) {
+            continue;
+        }
+        let branch = field("branch refs/heads/").unwrap_or_default();
+        let dirty = git(&path, &["status", "--porcelain"]).map(|status| !status.is_empty()).unwrap_or(true);
+        let ahead = if branch.is_empty() {
+            0
+        } else {
+            git(&top, &["rev-list", "--count", &format!("HEAD..{branch}")]).ok().and_then(|count| count.parse().ok()).unwrap_or(0)
+        };
+        let in_use = running.iter().any(|workspace| std::fs::canonicalize(workspace).unwrap_or(workspace.clone()) == path);
+        found.push(Status { path, branch, dirty, ahead, in_use });
+    }
+    Ok((top, found))
+}
+
+/// 删掉一个（worktree 和它的分支）
+pub fn remove(top: &Path, status: &Status) -> Result<(), String> {
+    git(top, &["worktree", "remove", "--force", &plain(&status.path).to_string_lossy()])?;
+    if !status.branch.is_empty() {
+        git(top, &["branch", "-D", &status.branch])?;
+    }
+    Ok(())
+}
+
 /// 原来目录里的 cwd 对应到 worktree 里（同一个子目录；没有就用 worktree 根）
 pub fn map_cwd(cwd: &Path, workspace: &Path, worktree: &Path) -> PathBuf {
     let top = git(workspace, &["rev-parse", "--show-toplevel"]).map(PathBuf::from).unwrap_or_else(|_| workspace.to_path_buf());

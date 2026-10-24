@@ -81,6 +81,42 @@ pub fn project_dir(home: &Path, workspace: &Path) -> PathBuf {
     home.join("projects").join(format!("{}-{hash}", readable.trim_matches('-')))
 }
 
+/// 读一个会话文件（只追加的 .jsonl，同 sessions.rs 放一遍）：{id, owner?（不是空才有）, title, history}
+pub fn read_session(path: &Path) -> serde_json::Value {
+    use serde_json::{Value, json};
+    let mut session = json!({ "history": [] });
+    for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+        match entry["type"].as_str() {
+            Some("meta") => {
+                session["id"] = entry["id"].clone();
+                match entry["owner"].as_str() {
+                    Some(owner) if !owner.is_empty() => session["owner"] = json!(owner),
+                    Some(_) => {
+                        session.as_object_mut().unwrap().remove("owner");
+                    }
+                    None => {}
+                }
+            }
+            Some("message") => session["history"].as_array_mut().unwrap().push(entry["message"].clone()),
+            Some("reset") => session["history"] = json!([]),
+            Some("title") => session["title"] = entry["title"].clone(),
+            _ => {}
+        }
+    }
+    session
+}
+
+/// 这个工作目录的全部会话
+pub fn read_sessions(home: &Path, workspace: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_dir(project_dir(home, workspace).join("sessions"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| read_session(&entry.path()))
+        .collect()
+}
+
 /// 这个工作目录有几个会话文件
 pub fn session_files(home: &Path, workspace: &Path) -> usize {
     std::fs::read_dir(project_dir(home, workspace).join("sessions")).map(|entries| entries.count()).unwrap_or(0)

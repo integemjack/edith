@@ -13,6 +13,7 @@ mod home;
 mod http;
 mod instance;
 mod mcp;
+mod migrate;
 mod mind;
 mod permissions;
 mod protocol;
@@ -52,6 +53,7 @@ const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作�
   edith mcp                        列出 MCP 服务（.mcp.json、~/.edith/mcp.json）和它们的工具
   edith mcp add <名字> <命令> [参数…] | add-url <名字> <地址>   加一个 MCP 服务（记进本地；--project、--global 同上）
   edith mcp remove <名字>          去掉
+  edith worktree [list | prune | remove <编号> [--force]]   edith -w 开的 worktree：看、清掉没改东西的、删掉一个
   edith trust [--yes | revoke]     看这个目录的项目 / 本地配置要起哪些程序、信任它（内容变了要再信任）
   edith tools                      列出 edith.tools 里的工具（装了哪个版本、有没有新的）
   edith tools install <工具>       下载、装上（edith-websocket、edith-connect……；能力要用时也会自己下）
@@ -178,8 +180,10 @@ fn main() {
     }
     let mut workspace = if options.explicit { options.cwd.clone() } else { home::find_workspace(&options.cwd) };
     // --worktree：开一个 git worktree 去那里干（干活、聊天、run 才开）
-    let starts_brain =
-        !matches!(command.as_str(), "sessions" | "instances" | "capabilities" | "caps" | "attach" | "tools" | "mcp" | "trust");
+    let starts_brain = !matches!(
+        command.as_str(),
+        "sessions" | "instances" | "capabilities" | "caps" | "attach" | "tools" | "mcp" | "trust" | "worktree" | "worktrees"
+    );
     if starts_brain && options.worktree {
         match worktree::create(&workspace) {
             Ok(tree) => {
@@ -192,6 +196,9 @@ fn main() {
         }
     }
     home::set_workspace(workspace);
+    for note in migrate::run() {
+        eprintln!("\x1b[2m（升级：{note}）\x1b[0m");
+    }
     match command.as_str() {
         "sessions" if options.words.len() == 1 => list_sessions(),
         "instances" if options.words.len() == 1 => list_instances(),
@@ -205,6 +212,7 @@ fn main() {
         }
         "tools" => exit_on(tools_command(&options.words[1..])),
         "trust" => exit_on(trust_command(&options.words[1..])),
+        "worktree" | "worktrees" => exit_on(worktree_command(&options.words[1..])),
         "mcp" => {
             let rest: Vec<String> = options.words[1..].to_vec();
             exit_on(mcp_command(&rest, options.layer));
@@ -612,6 +620,63 @@ fn tools_command(arguments: &[String]) -> Result<(), String> {
             }
         }
         _ => Err("用法：edith tools [install <工具>… | remove <工具>]".into()),
+    }
+}
+
+fn worktree_command(arguments: &[String]) -> Result<(), String> {
+    let (top, all) = worktree::list(&home::workspace())?;
+    let state = |status: &worktree::Status| {
+        let mut parts = Vec::new();
+        if status.in_use {
+            parts.push("有大脑在里面干活".to_string());
+        }
+        if status.dirty {
+            parts.push("有没提交的改动".to_string());
+        }
+        if status.ahead > 0 {
+            parts.push(format!("{} 个没合并的提交（git merge {}）", status.ahead, status.branch));
+        }
+        if parts.is_empty() { "没改东西".to_string() } else { parts.join("，") }
+    };
+    let name = |status: &worktree::Status| status.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    match arguments.first().map(String::as_str) {
+        None | Some("list") => {
+            if all.is_empty() {
+                println!("{} 没有 edith 开的 worktree", top.display());
+            }
+            for status in &all {
+                println!("{}  {}  {}", name(status), status.branch, state(status));
+            }
+            Ok(())
+        }
+        // 清掉没改东西、没人在用的（被强行结束留下的）
+        Some("prune") => {
+            let mut removed = 0;
+            for status in &all {
+                if status.in_use || status.dirty || status.ahead > 0 {
+                    println!("留着 {}：{}", name(status), state(status));
+                    continue;
+                }
+                worktree::remove(&top, status)?;
+                removed += 1;
+            }
+            println!("清掉了 {removed} 个");
+            Ok(())
+        }
+        Some("remove") if arguments.len() >= 2 => {
+            let force = arguments.iter().any(|argument| argument == "--force");
+            let status = all.iter().find(|status| name(status) == arguments[1]).ok_or(format!("没有 worktree {}", arguments[1]))?;
+            if status.in_use {
+                return Err(format!("{} 里有大脑在干活，先让它退出", name(status)));
+            }
+            if (status.dirty || status.ahead > 0) && !force {
+                return Err(format!("{}：{}。确定不要了加 --force", name(status), state(status)));
+            }
+            worktree::remove(&top, status)?;
+            println!("删掉了 {}（分支 {}）", name(status), status.branch);
+            Ok(())
+        }
+        _ => Err("用法：edith worktree [list | prune | remove <编号> [--force]]".into()),
     }
 }
 

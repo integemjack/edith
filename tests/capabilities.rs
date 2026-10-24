@@ -134,7 +134,7 @@ fn sense_starts_a_turn_and_notes() {
     let requests = std::fs::read_to_string(home.join("requests.jsonl")).unwrap();
     assert!(requests.contains("由能力「cap」（speech）传来，说话的是 小明"), "{requests}");
     let id = sessions[0]["id"].as_str().unwrap();
-    let stored = std::fs::read_to_string(common::project_dir(&home, &work).join("sessions").join(format!("{id}.json"))).unwrap();
+    let stored = common::read_session(&common::project_dir(&home, &work).join("sessions").join(format!("{id}.jsonl"))).to_string();
     assert!(stored.contains("明天下雨") && stored.contains("不用回复"), "{stored}");
 }
 
@@ -272,11 +272,7 @@ fn permissions_limit_what_a_connection_can_do() {
     assert_eq!(messages[0]["params"]["name"], "cap");
     assert_eq!(messages[0]["params"]["grant"]["sessions"], "read");
     // 权限不全的是客人：话进它自己名下的会话（不进主人的），只看得到自己名下的
-    let sessions: Vec<Value> = std::fs::read_dir(common::project_dir(&home, &work).join("sessions"))
-        .unwrap()
-        .flatten()
-        .map(|entry| serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap())
-        .collect();
+    let sessions: Vec<Value> = common::read_sessions(&home, &work);
     let owned: Vec<&Value> = sessions.iter().filter(|session| session["owner"] == "cap").collect();
     assert_eq!(owned.len(), 1, "{sessions:?}");
     assert!(owned[0]["history"].to_string().contains("x.txt"));

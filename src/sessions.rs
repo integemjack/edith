@@ -1,7 +1,14 @@
-//! 会话：`~/.edith/projects/<工作目录>/sessions/<id>.json`（不放在项目目录里：同一个目录几个大脑各写各的文件），存 OpenAI 格式的历史（不含 system）和几项元数据
+//! 会话：`~/.edith/projects/<工作目录>/sessions/<id>.jsonl`（不放在项目目录里：同一个目录几个大脑各写各的文件），
+//! 存 OpenAI 格式的历史（不含 system）和几项元数据。
+//!
+//! **只追加**（同 Claude Code）：一行一条——`{"type":"meta",…}`（id、cwd、created、owner，后面的盖前面的）、
+//! `{"type":"message","message":{…}}`、`{"type":"title","title":…}`、`{"type":"reset"}`（上下文压缩后历史整个换了：
+//! 之前的作废，后面跟着新的全部）。两个大脑用 -c 接着同一个会话也不会互相盖掉，写到一半断电只丢最后半行。
+//! 老的 `<id>.json`（整个文件重写的那种）读到时换成 `.jsonl`。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use serde_json::{Value, json};
@@ -18,6 +25,17 @@ pub struct Session {
     pub history: Vec<Value>,
     /// 谁的会话：空是主人的（终端、全权的能力）；权限不全的连接（中转的远程设备、收窄过的能力）只能用自己名下的
     pub owner: String,
+    /// 文件里已经有的（这个进程看到的）：存的时候只追加多出来的
+    saved: Saved,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Saved {
+    exists: bool,
+    history: Vec<Value>,
+    title: String,
+    cwd: String,
+    owner: String,
 }
 
 /// 会话 → 主人（事件按它分给能力，不每次读文件）
@@ -35,6 +53,10 @@ fn dir() -> PathBuf {
     home::project_dir().join("sessions")
 }
 
+fn file(id: &str) -> PathBuf {
+    dir().join(format!("{id}.jsonl"))
+}
+
 /// 会话 id 只认 uuid 的字符（防止拼出别的路径）
 fn valid(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
@@ -42,6 +64,11 @@ fn valid(id: &str) -> bool {
 
 fn now() -> String {
     chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+}
+
+fn modified(path: &Path) -> Option<String> {
+    let time = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(chrono::DateTime::<chrono::Local>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Secs, false))
 }
 
 impl Session {
@@ -55,6 +82,7 @@ impl Session {
             updated: now,
             history: Vec::new(),
             owner: String::new(),
+            saved: Saved::default(),
         }
     }
 
@@ -62,20 +90,73 @@ impl Session {
         if !valid(id) {
             return None;
         }
-        let value = home::read_json(&dir().join(format!("{id}.json")))?;
+        let path = file(id);
+        let session = match std::fs::read_to_string(&path) {
+            Ok(text) => Session::replay(id, &text, modified(&path)),
+            Err(_) => Session::convert_legacy(id)?,
+        };
+        OWNERS.lock().unwrap().insert(session.id.clone(), session.owner.clone());
+        Some(session)
+    }
+
+    /// 一行行放一遍（坏的行跳过：多半是写到一半断了的最后一行）
+    fn replay(id: &str, text: &str, updated: Option<String>) -> Session {
+        let mut session = Session::new("");
+        session.id = id.to_string();
+        session.created.clear();
+        for line in text.lines() {
+            let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+            let field = |key: &str| entry.get(key).and_then(Value::as_str).map(str::to_string);
+            match entry["type"].as_str() {
+                Some("meta") => {
+                    if let Some(cwd) = field("cwd") {
+                        session.cwd = cwd;
+                    }
+                    if let Some(created) = field("created").filter(|_| session.created.is_empty()) {
+                        session.created = created;
+                    }
+                    if let Some(owner) = field("owner") {
+                        session.owner = owner;
+                    }
+                }
+                Some("message") => session.history.push(entry["message"].clone()),
+                Some("reset") => session.history.clear(),
+                Some("title") => session.title = field("title").unwrap_or_default(),
+                _ => {}
+            }
+        }
+        session.updated = updated.unwrap_or_else(|| session.created.clone());
+        session.saved = Saved {
+            exists: true,
+            history: session.history.clone(),
+            title: session.title.clone(),
+            cwd: session.cwd.clone(),
+            owner: session.owner.clone(),
+        };
+        session
+    }
+
+    /// 老的整个文件那种（`<id>.json`）：读出来、换成只追加的
+    fn convert_legacy(id: &str) -> Option<Session> {
+        let legacy = dir().join(format!("{id}.json"));
+        let value = home::read_json(&legacy)?;
+        let mut session = Session::from_legacy(id, &value);
+        session.save().ok()?;
+        let _ = std::fs::remove_file(&legacy);
+        Some(session)
+    }
+
+    /// 老格式的一个会话（整个 JSON）
+    pub fn from_legacy(id: &str, value: &Value) -> Session {
         let text = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("").to_string();
-        Some(Session {
-            id: id.to_string(),
-            title: text("title"),
-            cwd: text("cwd"),
-            created: text("created"),
-            updated: text("updated"),
-            history: value.get("history").and_then(Value::as_array).cloned().unwrap_or_default(),
-            owner: text("owner"),
-        })
-        .inspect(|session| {
-            OWNERS.lock().unwrap().insert(session.id.clone(), session.owner.clone());
-        })
+        let mut session = Session::new(&text("cwd"));
+        session.id = id.to_string();
+        session.title = text("title");
+        session.created = text("created");
+        session.updated = text("updated");
+        session.owner = text("owner");
+        session.history = value.get("history").and_then(Value::as_array).cloned().unwrap_or_default();
+        session
     }
 
     /// id 可以只给开头几位（命令行里方便）：唯一对得上就是它
@@ -87,13 +168,57 @@ impl Session {
         if matches.len() == 1 { Session::load(&matches[0]) } else { None }
     }
 
+    /// 存：只把文件里还没有的追加上（历史整个换了的——上下文压缩——记一个 reset 再写全部）
     pub fn save(&mut self) -> Result<(), String> {
         self.updated = now();
         if self.title.is_empty() {
             self.title = first_user_text(&self.history).chars().take(40).collect();
         }
+        let mut lines: Vec<Value> = Vec::new();
+        if !self.saved.exists || self.saved.cwd != self.cwd || self.saved.owner != self.owner {
+            let mut meta = json!({ "type": "meta", "id": self.id, "cwd": self.cwd, "created": self.created });
+            if !self.owner.is_empty() || self.saved.exists {
+                meta["owner"] = json!(self.owner);
+            }
+            lines.push(meta);
+        }
+        if self.saved.title != self.title {
+            lines.push(json!({ "type": "title", "title": self.title }));
+        }
+        let known = self.saved.history.len();
+        let appended = self.history.len() >= known && self.history[..known] == self.saved.history[..];
+        let fresh: &[Value] = if appended {
+            &self.history[known..]
+        } else {
+            lines.push(json!({ "type": "reset" }));
+            &self.history
+        };
+        lines.extend(fresh.iter().map(|message| json!({ "type": "message", "message": message })));
+        if !lines.is_empty() {
+            let mut text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            // 上次写到一半断了（最后没有换行）：先换行，别接在那半行后面
+            if !ends_with_newline(&file(&self.id)) {
+                text.insert(0, '\n');
+            }
+            std::fs::create_dir_all(dir()).map_err(|error| format!("建不了 {}：{error}", dir().display()))?;
+            let path = file(&self.id);
+            // 一次写完一整段（O_APPEND：几个进程一起追加也不会交错在一行里）
+            let mut handle = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|error| format!("写不了 {}：{error}", path.display()))?;
+            handle.write_all(text.as_bytes()).map_err(|error| format!("写不了 {}：{error}", path.display()))?;
+        }
+        self.saved = Saved {
+            exists: true,
+            history: self.history.clone(),
+            title: self.title.clone(),
+            cwd: self.cwd.clone(),
+            owner: self.owner.clone(),
+        };
         OWNERS.lock().unwrap().insert(self.id.clone(), self.owner.clone());
-        home::write_json(&dir().join(format!("{}.json", self.id)), &self.to_json())
+        Ok(())
     }
 
     pub fn summary(&self) -> Value {
@@ -111,6 +236,17 @@ impl Session {
     }
 }
 
+/// 文件是空的、不存在，或者最后一个字节是换行
+fn ends_with_newline(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut handle) = std::fs::File::open(path) else { return true };
+    if handle.seek(SeekFrom::End(-1)).is_err() {
+        return true;
+    }
+    let mut last = [0u8; 1];
+    handle.read_exact(&mut last).is_err() || last[0] == b'\n'
+}
+
 fn first_user_text(history: &[Value]) -> String {
     history
         .iter()
@@ -122,13 +258,20 @@ fn first_user_text(history: &[Value]) -> String {
 
 /// 所有会话（新的在前），只有元数据
 pub fn list() -> Vec<Session> {
-    let mut sessions: Vec<Session> = std::fs::read_dir(dir())
+    let mut ids: Vec<String> = std::fs::read_dir(dir())
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let id = name.strip_suffix(".json")?;
+            name.strip_suffix(".jsonl").or_else(|| name.strip_suffix(".json")).map(str::to_string)
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    let mut sessions: Vec<Session> = ids
+        .iter()
+        .filter_map(|id| {
             let mut session = Session::load(id)?;
             session.history.clear();
             Some(session)
@@ -141,4 +284,50 @@ pub fn list() -> Vec<Session> {
 /// 这个工作目录最近的一个会话（-c / --continue 接它；只看主人的）
 pub fn latest() -> Option<Session> {
     list().iter().find(|session| session.owner.is_empty()).and_then(|session| Session::load(&session.id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appends_and_resets() {
+        let home = std::env::temp_dir().join(format!("edith-sessions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        unsafe { std::env::set_var("EDITH_HOME", &home) };
+        home::set_workspace(home.join("work"));
+        let mut session = Session::new("/w");
+        session.history.push(json!({ "role": "user", "content": "一" }));
+        session.save().unwrap();
+        // 另一个进程也接着它（各自从同一个样子开始）
+        let mut other = Session::load(&session.id).unwrap();
+        session.history.push(json!({ "role": "assistant", "content": "A" }));
+        session.save().unwrap();
+        other.history.push(json!({ "role": "assistant", "content": "B" }));
+        other.save().unwrap();
+        let both = Session::load(&session.id).unwrap();
+        assert_eq!(both.history.len(), 3, "两边写的都留着：{:?}", both.history);
+        assert_eq!(both.title, "一");
+        // 压缩：历史整个换了
+        let mut compacted = Session::load(&session.id).unwrap();
+        compacted.history = vec![json!({ "role": "user", "content": "摘要" })];
+        compacted.save().unwrap();
+        assert_eq!(Session::load(&session.id).unwrap().history, compacted.history);
+        // 写到一半断了的最后一行不影响
+        let mut handle = std::fs::OpenOptions::new().append(true).open(file(&session.id)).unwrap();
+        handle.write_all(b"{\"type\":\"message\",\"mess").unwrap();
+        let mut after = Session::load(&session.id).unwrap();
+        assert_eq!(after.history.len(), 1);
+        after.history.push(json!({ "role": "assistant", "content": "接着" }));
+        after.save().unwrap();
+        assert_eq!(Session::load(&session.id).unwrap().history.len(), 2, "断了的半行后面接着写坏了");
+        // 老格式：读到就换
+        let legacy = dir().join("0000aaaa-0000-0000-0000-000000000000.json");
+        std::fs::write(&legacy, json!({ "title": "老", "cwd": "/old", "history": [{ "role": "user", "content": "x" }] }).to_string())
+            .unwrap();
+        let old = Session::load("0000aaaa-0000-0000-0000-000000000000").unwrap();
+        assert_eq!((old.title.as_str(), old.history.len()), ("老", 1));
+        assert!(!legacy.exists() && file(&old.id).exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }
