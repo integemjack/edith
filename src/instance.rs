@@ -1,5 +1,6 @@
 //! 在跑的大脑实例（按目录工作：`edith .`；目录不加锁——要并行又互不干扰就用 git worktree 各开一个目录）：
-//! - 本机接入：127.0.0.1 上随机端口，自己打开的程序（终端 `edith attach`、桌面端……）连上来先报令牌（`auth`），
+//! - 本机接入：127.0.0.1 上随机端口，连上来先报令牌（`auth`），令牌定了是谁、能做什么（permissions.rs）：
+//!   登记里的主令牌给本用户自己开的程序（终端 `edith attach`、桌面端……），配置里的能力各有专用令牌；
 //!   之后讲能力协议，一条连接就是一个能力（capabilities::accept）；
 //! - 登记：`~/.edith/instances/<目录的键>-<进程号>.json`：哪个目录、哪个进程、接入地址和令牌、接着哪些能力、
 //!   能力对外开的入口（WebSocket 地址等）。只有本用户能读；进程没了的登记在列出时清掉。
@@ -51,23 +52,29 @@ pub fn serve() -> Result<(), String> {
     Ok(())
 }
 
-/// 连进来的一条：第一行要是 auth（令牌对），之后交给 capabilities::accept 握手
+/// 连进来的一条：第一行要是 auth（令牌认得出），之后交给 capabilities::accept 握手
 fn accept(stream: TcpStream, token: &str) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let Ok(reading) = stream.try_clone() else { return };
     let mut reader = BufReader::new(reading);
     let mut line = String::new();
-    let authorized = reader.read_line(&mut line).is_ok()
-        && serde_json::from_str::<Value>(&line).is_ok_and(|message| message["method"] == "auth" && message["params"]["token"] == token);
-    if !authorized {
+    let authority = (reader.read_line(&mut line).is_ok())
+        .then(|| serde_json::from_str::<Value>(&line).ok())
+        .flatten()
+        .filter(|message| message["method"] == "auth")
+        .and_then(|message| {
+            let params = &message["params"];
+            crate::permissions::identify(params["token"].as_str().unwrap_or(""), token, params["as"].as_str())
+        });
+    let Some(authority) = authority else {
         let refusal =
             crate::protocol::error(&Value::Null, crate::protocol::INVALID_REQUEST, "先发 auth（令牌在 ~/.edith/instances/ 的登记里）");
         let _ = writeln!(&stream, "{refusal}");
         let _ = stream.shutdown(Shutdown::Both);
         return;
-    }
+    };
     let _ = stream.set_read_timeout(None);
-    if let Err(error) = capabilities::accept(Box::new(reader), Box::new(SocketWriter(stream))) {
+    if let Err(error) = capabilities::accept(Box::new(reader), Box::new(SocketWriter(stream)), authority) {
         eprintln!("\x1b[33m连进来的没握上手：{error}\x1b[0m");
     }
 }

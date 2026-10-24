@@ -1,6 +1,8 @@
-//! 数据目录分两层，和大脑用的模型（`config.json` + 环境变量）：
-//! - 全局 `~/.edith`（`EDITH_HOME` 换地方）：模型、提示词、所有目录都要的能力、在跑的大脑登记（instances/）、本机套接字（run/）；
-//! - 目录 `<工作目录>/.edith`：这个目录的会话、主会话、能力、日志、锁。一个目录一个大脑（`edith .`）。
+//! 数据和配置（同 Claude Code 的做法）：
+//! - 全局 `~/.edith`（`EDITH_HOME` 换地方）：模型、提示词、全局配置、在跑的大脑登记（instances/）、下载的工具（tools/）；
+//! - 每个工作目录的**数据**也在全局：`~/.edith/projects/<工作目录的路径，非字母数字换成 ->/`（会话 sessions/、日志 logs/），
+//!   项目目录里不放会话——同一个目录开几个大脑各写各的会话文件，worktree 删了对话也不丢；
+//! - 项目目录 `<工作目录>/.edith` 只放**配置**：`*.json` 提交进仓库大家共用，`*.local.json` 只给自己（不提交）。
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -32,9 +34,17 @@ pub fn workspace() -> PathBuf {
     WORKSPACE.get().cloned().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-/// 目录这一层的数据：`<工作目录>/.edith`
+/// 项目这一层的配置：`<工作目录>/.edith`
 pub fn workspace_data() -> PathBuf {
     workspace().join(".edith")
+}
+
+/// 这个工作目录的数据（会话、日志）：`~/.edith/projects/<路径里非字母数字换成 ->`
+pub fn project_dir() -> PathBuf {
+    let path = workspace().to_string_lossy().into_owned();
+    let path = path.strip_prefix(r"\\?\").unwrap_or(&path).to_string();
+    let encoded: String = path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    dir().join("projects").join(encoded)
 }
 
 /// 从 start 往上找工作目录：先碰到有 .edith/ 的目录就是它（全局数据目录那个不算）；碰到 git 仓库的根（有 .git，

@@ -2,14 +2,19 @@
 //! 大脑能让它做动作（act）、把干活的过程推给它（event）。
 //!
 //! 大脑只有一个接口：本机套接字（instance.rs）。**所有能力都从它连进来，都是一级能力**：
-//! - 配置里的：大脑起它的程序（给 EDITH_ACCESS / EDITH_ACCESS_TOKEN / EDITH_CAPABILITY），程序自己连进来，用配置里的名字；
-//!   它那条连接断了，过一会儿再起它（restart 不是 false 时）；
-//! - 自己打开的：终端（edith attach）、桌面端、edith.tools 里的工具替远程设备开的连接……用它回的名字，断开就摘掉。
+//! - 配置里的：大脑起它的程序（给 EDITH_ACCESS / 它专用的 EDITH_ACCESS_TOKEN / EDITH_CAPABILITY），程序自己连进来，
+//!   名字就是配置里的（令牌定的，别人抢不走）；它那条连接断了，过一会儿再起它（restart 不是 false 时）；
+//! - 它替别人开的（edith-websocket 替远程设备）：同一个令牌加 `as`，名字 `<能力>-<as>`，权限收窄（permissions.relay）；
+//! - 自己打开的：终端（edith attach）、桌面端……拿登记里的主令牌，用它回的名字（配置里的名字不给），断开就摘掉。
+//!
+//! 每条连接能做什么由令牌定（permissions.rs），越权的回 NOT_PERMITTED；它交来的话那一轮只能用它许可的工具。
 //!
 //! 共用的工具（WebSocket 中转、共享设备、MCP 桥）在 integemjack/edith.tools，本机没有就下载（downloads.rs）。
 //!
-//! 配置两层：全局 `~/.edith/capabilities.json` + 目录 `<工作目录>/.edith/capabilities.json`（同名的以目录为准）：
-//! `{"capabilities": [{name, command, args?, env?, cwd?, disabled?, restart?}]}`。
+//! 配置三层（同名的后面盖前面）：全局 `~/.edith/capabilities.json` → 项目 `<工作目录>/.edith/capabilities.json`（提交进仓库）
+//! → 本地 `<工作目录>/.edith/capabilities.local.json`（只给自己）：
+//! `{"capabilities": [{name, command, args?, env?, cwd?, disabled?, restart?, permissions?}]}`，
+//! permissions：`{sense?, ask?, sessions?: "none"|"read"|"all", events?, tools?: "all"|"read"|"none"|[名字…], relay?: {同样几项}}`。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -25,6 +30,7 @@ use serde_json::{Map, Value, json};
 use crate::brain::Context;
 use crate::home;
 use crate::mind::{self, Disposition, Origin, Urgency};
+use crate::permissions::{self, Authority, Grant, Sessions};
 use crate::protocol::{self, Message};
 use crate::sessions::{self, Session};
 use crate::tools::Outcome;
@@ -47,6 +53,8 @@ pub struct Capability {
     /// {name, description, parameters, timeoutSeconds?, exclusive?, holds?, releases?}
     pub actions: Vec<Value>,
     pub receives: Vec<String>,
+    /// 这条连接能做什么（令牌定的）
+    pub grant: Grant,
     /// 只要焦点会话的事件（sessions: "focus"）
     focus_only: bool,
     /// 握手做完了（之前它发来的请求一律回 NOT_INITIALIZED）
@@ -75,40 +83,72 @@ pub fn clean_name(name: &str) -> String {
     cleaned.trim_matches('_').chars().take(24).collect()
 }
 
-fn layer_path(global: bool) -> PathBuf {
-    if global { home::dir() } else { home::workspace_data() }.join("capabilities.json")
+/// 配置在哪一层
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    Global,
+    Project,
+    Local,
 }
 
-/// 两层是不是同一个文件（工作目录就是家目录时 .edith 就是全局的那个）
-fn single_layer() -> bool {
+impl Layer {
+    pub fn title(self) -> &'static str {
+        match self {
+            Layer::Global => "全局",
+            Layer::Project => "项目",
+            Layer::Local => "本地",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Layer::Global => "global",
+            Layer::Project => "project",
+            Layer::Local => "local",
+        }
+    }
+}
+
+fn layer_path(layer: Layer) -> PathBuf {
+    match layer {
+        Layer::Global => home::dir().join("capabilities.json"),
+        Layer::Project => home::workspace_data().join("capabilities.json"),
+        Layer::Local => home::workspace_data().join("capabilities.local.json"),
+    }
+}
+
+/// 用到的层（工作目录就是家目录时项目层就是全局那个文件，只算一次）
+fn layers() -> Vec<Layer> {
     let canonical = |path: PathBuf| std::fs::canonicalize(&path).unwrap_or(path);
-    canonical(home::dir()) == canonical(home::workspace_data())
+    if canonical(home::dir()) == canonical(home::workspace_data()) {
+        vec![Layer::Global, Layer::Local]
+    } else {
+        vec![Layer::Global, Layer::Project, Layer::Local]
+    }
 }
 
-fn read_layer(global: bool) -> Vec<Value> {
-    home::read_json(&layer_path(global)).and_then(|value| value.get("capabilities").and_then(Value::as_array).cloned()).unwrap_or_default()
+fn read_layer(layer: Layer) -> Vec<Value> {
+    home::read_json(&layer_path(layer)).and_then(|value| value.get("capabilities").and_then(Value::as_array).cloned()).unwrap_or_default()
 }
 
 fn name_of(config: &Value) -> String {
     clean_name(config.get("name").and_then(Value::as_str).unwrap_or(""))
 }
 
-/// 合并后的配置：全局的 + 目录的（同名的以目录为准：目录里写 `{"name": "x", "disabled": true}` 就关掉全局的 x）；
-/// 每项多一个 "scope"：global / workspace
+/// 合并后的配置：全局 → 项目 → 本地，同名的后面盖前面（只写 `{"name": "x", "disabled": true}` 就是关掉前面那层的 x）；
+/// 每项多一个 "scope"：global / project / local
 pub fn configs() -> Vec<Value> {
     let mut merged: Vec<Value> = Vec::new();
-    let layers: &[bool] = if single_layer() { &[false] } else { &[true, false] };
-    for &global in layers {
-        for mut item in read_layer(global) {
-            item["scope"] = json!(if global { "global" } else { "workspace" });
+    for layer in layers() {
+        for mut item in read_layer(layer) {
+            item["scope"] = json!(layer.key());
             let name = name_of(&item);
             match merged.iter_mut().find(|existing| name_of(existing) == name) {
-                // 只写了 disabled 的：关掉全局那个，别的照旧
+                // 只写了 disabled 之类的：改前面那层的，别的照旧
                 Some(existing) if item.get("command").is_none() => {
-                    if let Some(disabled) = item.get("disabled") {
-                        existing["disabled"] = disabled.clone();
+                    for (key, value) in item.as_object().unwrap() {
+                        existing[key] = value.clone();
                     }
-                    existing["scope"] = item["scope"].clone();
                 }
                 Some(existing) => *existing = item,
                 None => merged.push(item),
@@ -123,14 +163,21 @@ fn enabled_config(name: &str) -> Option<Value> {
     configs().into_iter().find(|item| name_of(item) == name && item.get("disabled").and_then(Value::as_bool) != Some(true))
 }
 
-fn save_layer(global: bool, items: &[Value]) -> Result<(), String> {
-    home::write_json(&layer_path(global), &json!({ "capabilities": items }))
+fn save_layer(layer: Layer, items: &[Value]) -> Result<(), String> {
+    home::write_json(&layer_path(layer), &json!({ "capabilities": items }))
+}
+
+/// 能力的日志：`<项目数据>/logs/<名字>.log`
+pub fn log_file(name: &str) -> PathBuf {
+    home::project_dir().join("logs").join(format!("{name}.log"))
 }
 
 fn log_line(name: &str, text: &str) {
-    let dir = home::workspace_data().join("logs");
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{name}.log"))) {
+    let path = log_file(name);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(file, "{} {text}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
     }
     if std::env::var_os("EDITH_VERBOSE").is_some() {
@@ -163,42 +210,44 @@ pub fn start_all(report: &mut dyn FnMut(String)) {
     }
 }
 
-/// 加一个能力：先起来试试，连得进来才记进配置（global：全局那层，否则这个目录那层；同名的换掉）。返回接上后的说明
-pub fn add(config: Value, global: bool) -> Result<Value, String> {
+/// 加一个能力：先起来试试，连得进来才记进那一层的配置（同名的换掉）。返回接上后的说明
+pub fn add(config: Value, layer: Layer) -> Result<Value, String> {
     let name = name_of(&config);
     let mut stored = config.clone();
     stored["name"] = json!(name);
     stop(&name);
     launch(&name, &stored)?;
-    save(stored, global)?;
+    save(stored, layer)?;
     Ok(describe(&name).unwrap_or(Value::Null))
 }
 
 /// 只记进配置、不起（这个目录的大脑在别的进程里跑着时用；它重启后生效）
-pub fn save(config: Value, global: bool) -> Result<(), String> {
+pub fn save(config: Value, layer: Layer) -> Result<(), String> {
     let name = name_of(&config);
     if name.is_empty() {
         return Err("能力要有名字（name：字母、数字、-、_）".into());
     }
-    let global = global && !single_layer();
-    let mut items = read_layer(global);
+    let mut items = read_layer(layer);
     items.retain(|item| name_of(item) != name);
     items.push(config);
-    save_layer(global, &items)
+    save_layer(layer, &items)
 }
 
 /// 去掉一个能力（断开、结束它的程序，并从那一层的配置删掉）；没有这个返回 false
-pub fn remove(name: &str, global: bool) -> bool {
+pub fn remove(name: &str, layer: Layer) -> bool {
     let name = clean_name(name);
-    let global = global && !single_layer();
-    let mut items = read_layer(global);
+    let mut items = read_layer(layer);
     let before = items.len();
     items.retain(|item| name_of(item) != name);
     let removed = items.len() != before;
     if removed {
-        let _ = save_layer(global, &items);
+        let _ = save_layer(layer, &items);
     }
-    stop(&name) || removed
+    let stopped = stop(&name);
+    if enabled_config(&name).is_none() {
+        permissions::revoke(&name);
+    }
+    stopped || removed
 }
 
 /// 断开一个、结束大脑起的那个程序（不改配置）
@@ -237,6 +286,7 @@ pub fn stop_all() {
     }
     let children: Vec<Child> = LAUNCHED.lock().unwrap().drain().map(|(_, child)| child).collect();
     finish(children);
+    crate::mcp::stop_all();
 }
 
 fn restarts(config: &Value) -> bool {
@@ -270,7 +320,8 @@ fn launch(name: &str, config: &Value) -> Result<(), String> {
     if name.is_empty() {
         return Err("能力要有名字（name：字母、数字、-、_）".into());
     }
-    let (address, token) = crate::instance::access().ok_or("大脑的套接字还没开")?;
+    let (address, _) = crate::instance::access().ok_or("大脑的套接字还没开")?;
+    let token = permissions::token_for(name, config);
     let command =
         config.get("command").and_then(Value::as_str).filter(|command| !command.is_empty()).ok_or("能力要给 command（怎么起它）")?;
     let program = crate::downloads::resolve(command)?;
@@ -333,7 +384,7 @@ fn launch(name: &str, config: &Value) -> Result<(), String> {
         {
             // 退出码不是 0：起不来；是 0：多半是让别人替它连（启动器），接着等
             if !status.success() {
-                return Err(format!("{command} 退出了（{status}），没连进来（日志在 .edith/logs/{name}.log）"));
+                return Err(format!("{command} 退出了（{status}），没连进来（日志在 {}）", log_file(name).display()));
             }
             exited = Some(status);
         }
@@ -341,8 +392,9 @@ fn launch(name: &str, config: &Value) -> Result<(), String> {
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
-                "{command} 起来了，但 {} 秒内没用「{name}」这个名字连进来（日志在 .edith/logs/{name}.log）",
-                LAUNCH_TIMEOUT.as_secs()
+                "{command} 起来了，但 {} 秒内没用「{name}」这个名字连进来（日志在 {}）",
+                LAUNCH_TIMEOUT.as_secs(),
+                log_file(name).display()
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -356,18 +408,32 @@ fn launch(name: &str, config: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// 连进来的一个（instance.rs 接到、报对令牌后调）：握手，名字用它回的 name（重名的加编号）
-pub fn accept(reader: Box<dyn Read + Send>, writer: Box<dyn Write + Send>) -> Result<Arc<Capability>, String> {
-    handshake(writer, reader)
+/// 连进来的一个（instance.rs 接到、认出令牌后调）：握手。名字令牌定了的用它（配置里的能力已经连着就不收），
+/// 主令牌的用它回的 name（重名的、和配置里的能力重名的加编号）
+pub fn accept(reader: Box<dyn Read + Send>, mut writer: Box<dyn Write + Send>, authority: Authority) -> Result<Arc<Capability>, String> {
+    if let Some(name) = &authority.name
+        && !authority.relayed
+        && CAPABILITIES.read().unwrap().contains_key(name)
+    {
+        let refusal = protocol::error(
+            &Value::Null,
+            protocol::NOT_PERMITTED,
+            &format!("「{name}」已经连着：一个令牌只能有一条自己的连接（替别人连用 auth 的 as）"),
+        );
+        let _ = writeln!(writer, "{refusal}");
+        return Err(format!("「{name}」已经连着"));
+    }
+    handshake(writer, reader, authority)
 }
 
-/// 用一个不重名的名字：想要的已经被占了就加 -2、-3……
-fn unique_name(wanted: &str) -> String {
+/// 用一个不重名的名字：想要的已经被占了（连着的、主令牌的连接还不能用配置里的名字）就加 -2、-3……
+fn unique_name(wanted: &str, reserve_configured: bool) -> String {
     let base = {
         let cleaned = clean_name(wanted);
         if cleaned.is_empty() { "client".to_string() } else { cleaned }
     };
-    let taken = |name: &str| CAPABILITIES.read().unwrap().contains_key(name);
+    let configured: HashSet<String> = if reserve_configured { configs().iter().map(name_of).collect() } else { HashSet::new() };
+    let taken = |name: &str| CAPABILITIES.read().unwrap().contains_key(name) || configured.contains(name);
     if !taken(&base) {
         return base;
     }
@@ -375,7 +441,7 @@ fn unique_name(wanted: &str) -> String {
 }
 
 /// 握手（EDITH 发 initialize、它回话、EDITH 发 initialized）并登记
-fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>) -> Result<Arc<Capability>, String> {
+fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>, authority: Authority) -> Result<Arc<Capability>, String> {
     // 握手前先用一个临时的壳收发（还不知道它报了什么）
     let shell = Arc::new(Capability {
         name: "connecting".into(),
@@ -383,6 +449,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>) -> Res
         senses: Vec::new(),
         actions: Vec::new(),
         receives: Vec::new(),
+        grant: authority.grant.clone(),
         focus_only: false,
         ready: false,
         endpoints: Vec::new(),
@@ -409,8 +476,9 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>) -> Res
             "id": crate::instance::brain_id(),
             "workspace": home::workspace().to_string_lossy(),
         },
-        "name": "",
+        "name": authority.name.clone().unwrap_or_default(),
         "focus": mind::focus(),
+        "grant": authority.grant.to_json(),
     });
     let reply = match shell.request("initialize", params, HANDSHAKE_TIMEOUT, None) {
         Ok(reply) => reply,
@@ -419,7 +487,12 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>) -> Res
             return Err(format!("握手没成功：{}", error_text(&error)));
         }
     };
-    let name = unique_name(reply.get("name").and_then(Value::as_str).unwrap_or("client"));
+    let name = match &authority.name {
+        // 中转的子连接可能重名（同一台设备连了两次）：加编号
+        Some(fixed) if authority.relayed => unique_name(fixed, false),
+        Some(fixed) => fixed.clone(),
+        None => unique_name(reply.get("name").and_then(Value::as_str).unwrap_or("client"), true),
+    };
     let name = name.as_str();
     let actions: Vec<Value> = reply
         .get("actions")
@@ -443,6 +516,7 @@ fn handshake(writer: Box<dyn Write + Send>, reader: Box<dyn Read + Send>) -> Res
         senses: reply.get("senses").and_then(Value::as_array).cloned().unwrap_or_default(),
         actions,
         receives,
+        grant: authority.grant,
         focus_only: reply.get("sessions").and_then(Value::as_str) == Some("focus"),
         ready: true,
         endpoints: reply.get("endpoints").and_then(Value::as_array).cloned().unwrap_or_default(),
@@ -577,7 +651,9 @@ impl Capability {
 
     fn deliver(&self, envelope: &mind::Envelope) {
         let asked = self.asked.lock().unwrap().contains(&envelope.turn);
-        let subscribed = self.receives.iter().any(|kind| kind == envelope.kind) && (!self.focus_only || envelope.session == mind::focus());
+        let subscribed = self.grant.events
+            && self.receives.iter().any(|kind| kind == envelope.kind)
+            && (!self.focus_only || envelope.session == mind::focus());
         if asked || subscribed {
             self.notify("event", envelope.to_json());
         }
@@ -591,6 +667,23 @@ impl Capability {
             capability: self.name.clone(),
             kind: params.get("kind").and_then(Value::as_str).unwrap_or("").to_string(),
             from: params.get("from").and_then(Value::as_str).unwrap_or("").to_string(),
+            tools: self.grant.tools.clone(),
+        }
+    }
+
+    /// 这条连接能不能做这件事
+    fn permitted(&self, method: &str) -> Result<(), Failure> {
+        let allowed = match method {
+            "sense" => self.grant.sense,
+            "ask" => self.grant.ask,
+            "sessions.list" | "sessions.get" => self.grant.sessions >= Sessions::Read,
+            "sessions.create" | "sessions.focus" | "sessions.stop" => self.grant.sessions == Sessions::All,
+            _ => true,
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err((protocol::NOT_PERMITTED, format!("没有权限：「{}」不能 {method}（权限在能力配置的 permissions 里）", self.name)))
         }
     }
 
@@ -598,6 +691,7 @@ impl Capability {
         if !self.ready && method != "ping" {
             return Err((protocol::NOT_INITIALIZED, "还没握手：等 EDITH 的 initialize、回了话再发".into()));
         }
+        self.permitted(method)?;
         match method {
             "ping" => Ok(json!({})),
             "sense" => self.sense(params),
@@ -731,7 +825,7 @@ impl Capability {
         }
         match method {
             "sense" => {
-                if let Err((_, message)) = self.sense(params) {
+                if let Err((_, message)) = self.permitted("sense").and_then(|_| self.sense(params)) {
                     log_line(&self.name, &format!("sense 没交上：{message}"));
                 }
             }
@@ -862,12 +956,15 @@ fn native() -> Vec<Arc<Capability>> {
     CAPABILITIES.read().unwrap().values().cloned().collect()
 }
 
-/// 能力的动作交给模型的工具定义：名字「<能力名>__<动作名>」
-pub fn specs() -> Vec<Value> {
+/// 能力的动作交给模型的工具定义：名字「<能力名>__<动作名>」（tools：这一轮许可的）
+pub fn specs(tools: &permissions::Tools) -> Vec<Value> {
     let mut specs = Vec::new();
     for capability in native() {
         for action in &capability.actions {
             let name = action["name"].as_str().unwrap_or("");
+            if !tools.allows(&format!("{}{SEPARATOR}{name}", capability.name), read_only(action)) {
+                continue;
+            }
             let description = action.get("description").and_then(Value::as_str).unwrap_or("");
             specs.push(json!({
                 "type": "function",
@@ -903,6 +1000,18 @@ pub fn summary() -> String {
         .join("\n")
 }
 
+/// 动作说自己只读（不改东西）
+fn read_only(action: &Value) -> bool {
+    action.get("readOnly").and_then(Value::as_bool) == Some(true)
+}
+
+/// 这个工具名是能力的只读动作
+pub fn is_read_only(full_name: &str) -> bool {
+    let Some((name, rest)) = full_name.split_once(SEPARATOR) else { return false };
+    let Some(capability) = CAPABILITIES.read().unwrap().get(name).cloned() else { return false };
+    capability.actions.iter().any(|action| action["name"].as_str() == Some(rest) && read_only(action))
+}
+
 /// 调能力的动作（名字不是它们的返回 None）
 pub fn call(full_name: &str, arguments: &Map<String, Value>, context: &Context, cancel: &AtomicBool) -> Option<Outcome> {
     let (name, rest) = full_name.split_once(SEPARATOR)?;
@@ -926,6 +1035,7 @@ pub fn describe(name: &str) -> Option<Value> {
         "senses": capability.senses,
         "actions": capability.actions.iter().map(|action| action["name"].clone()).collect::<Vec<_>>(),
         "receives": capability.receives,
+        "grant": capability.grant.to_json(),
     }))
 }
 

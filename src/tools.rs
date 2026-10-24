@@ -1,11 +1,12 @@
-//! 大脑自带的工具（不靠能力就有的）：时间、列目录、读 / 写 / 改文件、按名字找、按内容搜、按关键词搜、抓网页、跑命令。
+//! 大脑自带的工具（不靠能力就有的）：时间、列目录、读 / 写 / 改文件、按名字找、按内容搜、按关键词搜、跑命令、搜网页、看网页（web.rs）。
 //! 工具定义和说明来自 friday-core 的 tool_defs + prompts-tools.md，执行用 tool_files / file_edit / file_search / shell_rules。
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use friday_core::file_edit::Edit;
@@ -26,6 +27,7 @@ pub const BUILTINS: &[&str] = &[
     "write_file",
     "edit_file",
     "run_shell",
+    "web_search",
     "fetch_url",
 ];
 
@@ -86,8 +88,56 @@ fn flag(arguments: &Map<String, Value>, key: &str) -> bool {
     arguments.get(key).and_then(|value| value.as_bool().or_else(|| value.as_str().map(|text| text == "true"))).unwrap_or(false)
 }
 
-/// 跑一个自带工具（不是自带的返回 None）
-pub fn run(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool) -> Option<Outcome> {
+/// 读过的文件：(会话, 路径) → 读的时候文件内容的 SHA-256。改已有的文件之前要读过、而且读完之后没被别人动过
+/// （同 Claude Code：不加锁，撞上了才要它重读）
+/// 会话读过的文件：会话 → {路径: 读到 / 写完时的 SHA-256}；也存在 `<项目数据>/reads/<会话>.json`，-c / -r 接着时还认
+static SEEN: LazyLock<Mutex<HashMap<String, HashMap<String, String>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn digest(path: &str) -> Option<String> {
+    use sha2::Digest;
+    let bytes = std::fs::read(path).ok()?;
+    Some(sha2::Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn reads_path(session: &str) -> PathBuf {
+    home::project_dir().join("reads").join(format!("{session}.json"))
+}
+
+/// 这个会话读过的（内存里没有就从文件读）
+fn seen(session: &str, path: &str) -> Option<String> {
+    let mut all = SEEN.lock().unwrap();
+    let entry = all
+        .entry(session.to_string())
+        .or_insert_with(|| home::read_json(&reads_path(session)).and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default());
+    entry.get(path).cloned()
+}
+
+/// 记下这个会话看到的样子（读完、自己写完之后）
+fn remember(session: &str, path: &str) {
+    let Some(hash) = digest(path) else { return };
+    let _ = seen(session, path);
+    let mut all = SEEN.lock().unwrap();
+    let entry = all.entry(session.to_string()).or_default();
+    entry.insert(path.to_string(), hash);
+    if !session.is_empty() {
+        let _ = home::write_json(&reads_path(session), &serde_json::json!(entry));
+    }
+}
+
+/// 改之前：文件已经存在的，这个会话要读过、读完之后没变过；不行返回说明
+fn stale(session: &str, path: &str) -> Option<String> {
+    let current = digest(path)?;
+    match seen(session, path) {
+        None => Some(format!("{path} 已经存在，还没读过：先 read_file 看一遍再改")),
+        Some(seen) if seen != current => {
+            Some(format!("{path} 在你上次读过之后被改过（可能是别的大脑、命令或用户）：先 read_file 重读，再在新内容上改"))
+        }
+        Some(_) => None,
+    }
+}
+
+/// 跑一个自带工具（不是自带的返回 None）。session：这一轮在哪个会话（记它读过哪些文件）
+pub fn run(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, session: &str) -> Option<Outcome> {
     if !BUILTINS.contains(&name) {
         return None;
     }
@@ -109,9 +159,29 @@ pub fn run(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &Atom
             Outcome::ok(format!("{}（{}，UTC{}）", now.format("%Y-%m-%d %H:%M:%S"), weekday(&now), now.format("%:z")))
         }
         "list_directory" => output(tool_files::list_directory(&path("path"), &working)),
-        "read_file" => output(tool_files::read_file(&path("path"), int(arguments, "offset"), int(arguments, "limit"), &working)),
-        "write_file" => output(tool_files::write_file(&path("path"), text(arguments, "content").unwrap_or(""))),
-        "edit_file" => output(tool_files::edit_file(&path("path"), &change(arguments), &working)),
+        "read_file" => {
+            let target = path("path");
+            let outcome = output(tool_files::read_file(&target, int(arguments, "offset"), int(arguments, "limit"), &working));
+            if outcome.ok {
+                remember(session, &target);
+            }
+            outcome
+        }
+        "write_file" | "edit_file" => {
+            let target = path("path");
+            if let Some(refusal) = stale(session, &target) {
+                return Some(Outcome::failed(refusal));
+            }
+            let outcome = if name == "write_file" {
+                output(tool_files::write_file(&target, text(arguments, "content").unwrap_or("")))
+            } else {
+                output(tool_files::edit_file(&target, &change(arguments), &working))
+            };
+            if outcome.ok {
+                remember(session, &target);
+            }
+            outcome
+        }
         "find_files" => file_search::find_files(text(arguments, "pattern").unwrap_or(""), &path("path"), &working).into(),
         "search_files" => file_search::search_files(
             text(arguments, "pattern").unwrap_or(""),
@@ -130,7 +200,13 @@ pub fn run(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &Atom
             &working,
         )
         .into(),
-        "fetch_url" => fetch_url(text(arguments, "url").unwrap_or(""), int(arguments, "offset")),
+        "web_search" => crate::web::search(
+            text(arguments, "query").unwrap_or(""),
+            text(arguments, "time_range").unwrap_or(""),
+            text(arguments, "language").unwrap_or(""),
+            int(arguments, "count").unwrap_or(8).max(1) as usize,
+        ),
+        "fetch_url" => crate::web::fetch(text(arguments, "url").unwrap_or(""), int(arguments, "offset")),
         "run_shell" => run_shell(text(arguments, "command").unwrap_or(""), int(arguments, "timeout_seconds"), cwd, cancel),
         _ => return None,
     })
@@ -160,27 +236,6 @@ fn change(arguments: &Map<String, Value>) -> Change {
         new_text: text(arguments, "new_text").unwrap_or("").to_string(),
         replace_all: flag(arguments, "replace_all"),
     }
-}
-
-fn fetch_url(url: &str, offset: Option<i64>) -> Outcome {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Outcome::failed("url 要以 http:// 或 https:// 开头");
-    }
-    let mut response = match crate::http::agent().get(url).header("User-Agent", "Mozilla/5.0 (EDITH)").call() {
-        Ok(response) => response,
-        Err(error) => return Outcome::failed(format!("抓不到：{error}")),
-    };
-    let status = response.status().as_u16();
-    let html = response.headers().get("content-type").and_then(|value| value.to_str().ok()).is_some_and(|kind| kind.contains("html"));
-    let body = match response.body_mut().with_config().limit(10 * 1024 * 1024).read_to_string() {
-        Ok(body) => body,
-        Err(error) => return Outcome::failed(format!("读不完：{error}")),
-    };
-    if !(200..300).contains(&status) {
-        return Outcome::failed(format!("HTTP {status}\n{}", tool_files::truncate(&body)));
-    }
-    let text = if html { tool_files::strip_html(&body) } else { body };
-    Outcome::ok(tool_files::page(&text, offset))
 }
 
 /// 跑命令：Unix 用登录时的 shell（$SHELL，没有用 /bin/sh），Windows 用 PowerShell；标准输出和错误按到达顺序合在一起；

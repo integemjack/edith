@@ -6,10 +6,10 @@ EDITH 是大脑；**能力**是它的四肢：耳朵、嘴、手、聊天渠道�
 - 能力可以**主动**把内容推给大脑（听到一句话、收到一条消息、看到一个画面、一个文件变了），也可以交给大脑一件事等它的回答；
 - 大脑让能力**做动作**，并把**干活的过程实时**推给关心的能力（边想边说的语音、边写边显示的界面）。
 
-这和 MCP 不同：MCP 只能由大脑去调用工具，服务端没法主动对大脑说话。MCP 服务经桥 `edith-mcp` 也能接，算一种「不会说话的能力」（[§9](#9-mcp-能力)）。
+这和 MCP 不同：MCP 只能由大脑去调用工具，服务端没法主动对大脑说话。MCP 服务不走这个协议：大脑直接读 `.mcp.json` 连（[§9](#9-mcp-服务)）。
 
 本文档是开放的：任何语言、任何人都可以照着写一个能力。示例见 [`examples/`](../examples)（Python 标准库，几十行）、
-[`tests/fake/cap.py`](../tests/fake/cap.py)。共用的工具——WebSocket 中转、共享设备、MCP 桥——在
+[`tests/fake/cap.py`](../tests/fake/cap.py)。共用的工具——WebSocket 中转、共享设备——在
 [edith.tools](https://github.com/integemjack/edith.tools)，也是照这份协议写的、不用大脑的代码，大脑要用时自己下载（[§8.4](#84-共用的工具edithtools)）。
 
 ---
@@ -19,13 +19,18 @@ EDITH 是大脑；**能力**是它的四肢：耳朵、嘴、手、聊天渠道�
 **大脑只有这一个接口**，网络（WebSocket、HTTP、MQTT、串口、蓝牙……）都由能力自己去接（比如 edith.tools 的 WebSocket 中转
 替每个远程客户端各开一条连接进来）。
 
-- 每个在跑的大脑在 `127.0.0.1` 的随机端口上等。地址和令牌：
-  - 大脑起的能力程序（[§3](#3-生命周期)）从环境变量拿：`EDITH_ACCESS`（`127.0.0.1:端口`）、`EDITH_ACCESS_TOKEN`；
-  - 自己打开的程序（终端 `edith attach`、桌面端……）读 `~/.edith/instances/<目录的键>-<进程号>.json`（只有本用户能读，[§8.2](#82-在跑的大脑instances)）。
-- 连上后**第一行**先报令牌：`{"jsonrpc": "2.0", "method": "auth", "params": {"token": "…"}}`，不对就断开。之后 EDITH 发 `initialize`（[§3.1](#31-initializeedith--能力请求)）。
+- 每个在跑的大脑在 `127.0.0.1` 的随机端口上等。连上后**第一行**先报令牌：
+  `{"jsonrpc": "2.0", "method": "auth", "params": {"token": "…", "as": "…（可选）"}}`，认不出就断开。之后 EDITH 发 `initialize`（[§3.1](#31-initializeedith--能力请求)）。
+- **令牌定了你是谁、能做什么**（[§8.1](#81-权限permissions)）：
+  - **专用令牌**：大脑起配置里的能力程序（[§3](#3-生命周期)）时每个发一个，在环境变量 `EDITH_ACCESS`（`127.0.0.1:端口`）、`EDITH_ACCESS_TOKEN` 里。
+    拿它连进来的**名字就是配置里的名字**（别人抢不走；已经连着时再连回 `-32006`），权限按配置的 `permissions`；
+  - **中转**：能力替别人开的连接（edith-websocket 替每个远程客户端）用自己的专用令牌加 `as`：名字是 `<能力名>-<as>`，
+    权限是 `permissions.relay`（默认收窄，而且不会比替它中转的能力大）；
+  - **主令牌**：写在 `~/.edith/instances/<目录的键>-<进程号>.json`（只有本用户能读，[§8.2](#82-在跑的大脑instances)），给本用户自己开的程序
+    （终端 `edith attach`、桌面端……）：什么都能做，名字用它报的，但不能用配置里能力的名字（重了加 `-2`）。
 - **一条连接就是一个能力**。一个程序可以开好几条（每条一个能力）：中转、设备服务就是这样替别人连进来的。
 - 消息**一行一条 JSON**（UTF-8，以 `\n` 结尾；JSON 里的换行要转义成 `\n`，不能有裸换行）。空行忽略；不是 JSON 的行 EDITH 回 `-32700` 并记日志。
-- 日志：大脑起的程序，标准输出、标准错误都记进 `<工作目录>/.edith/logs/<能力名>.log`（`edith -v` 时也打到终端）；也可以发 `log` 通知。
+- 日志：大脑起的程序，标准输出、标准错误都记进 `~/.edith/projects/<工作目录>/logs/<能力名>.log`（`edith -v` 时也打到终端）；也可以发 `log` 通知。
 
 ## 2. 消息格式：JSON-RPC 2.0
 
@@ -56,6 +61,7 @@ EDITH 是大脑；**能力**是它的四肢：耳朵、嘴、手、聊天渠道�
 | -32003 | 大脑用哪个模型还没设（`~/.edith/config.json`） |
 | -32004 | 被停下了（动作被取消、等的那一轮被停下） |
 | -32005 | 设备忙：共享设备正被别的大脑占着，`error.data.holder` 是占着它的大脑 `{id, workspace}`（[共享设备](https://github.com/integemjack/edith.tools/blob/main/docs/DEVICES.md)） |
+| -32006 | 没有权限：这条连接的令牌不许做这件事（[§8.1](#81-权限permissions)）；或这个名字已经连着 |
 
 ## 3. 生命周期
 
@@ -71,7 +77,7 @@ EDITH                                  能力
 ```
 
 **配置里的能力**（[§8](#8-配置capabilitiesjson)）：大脑起它的程序，环境变量里给 `EDITH_ACCESS`、`EDITH_ACCESS_TOKEN`、
-`EDITH_CAPABILITY`（它的名字）、`EDITH_WORKSPACE`（工作目录），等它**用这个名字**连进来（最多 30 秒；程序起不来、退出码不是 0 都算没接上）。
+`EDITH_CAPABILITY`（它的名字）、`EDITH_WORKSPACE`（工作目录），等它用这个令牌连进来（最多 30 秒；程序起不来、退出码不是 0 都算没接上）。
 程序可以一直开着（它就是那个能力），也可以让别人替它连进来后自己退出、退出码 0（比如共享设备的启动器）。
 
 ### 3.1 `initialize`（EDITH → 能力，请求）
@@ -81,12 +87,14 @@ EDITH                                  能力
   "protocolVersion": "1",
   "brain": {"name": "EDITH", "version": "0.1.0", "model": "qwen-max", "id": "3f9a0c1b2d4e5f60", "workspace": "/Users/me/project"},
   "name": "ear",
-  "focus": "5d0c…（焦点会话的 id，可能是空字符串）"
+  "focus": "5d0c…（焦点会话的 id，可能是空字符串）",
+  "grant": {"sense": true, "ask": true, "sessions": "all", "events": true, "tools": "all"}
 }}
 ```
 
 - `brain.id`：这个大脑的 id（工作目录的键，同一个目录重启后不变）；`brain.workspace`：它管的目录。连着几个大脑的能力（共享设备）靠它分清是谁。
-- `name`：空字符串——能力在回话里报自己的名字（大脑起的用 `EDITH_CAPABILITY`）。它的动作在模型那里叫 `<名字>__<动作名>`。
+- `name`：大脑给它定的名字（专用令牌：配置里的名字；中转：`<能力名>-<as>`）；空字符串是主令牌的连接，用回话里报的。它的动作在模型那里叫 `<名字>__<动作名>`。
+- `grant`：这条连接的权限（[§8.1](#81-权限permissions)）。越权的请求回 `-32006`。
 - `focus`：现在的焦点会话（[§5](#5-会话与焦点)）。
 
 能力回话（30 秒内，否则 EDITH 当它没起来）：
@@ -110,10 +118,10 @@ EDITH                                  能力
 | `protocolVersion` | 是 | `"1"` |
 | `capability.title` / `version` / `description` | 否 | 给人和模型看的名字、版本、一句话 |
 | `senses` | 否 | 会主动传来什么：`[{kind, description}]`。`kind` 是自己定的词（`speech`、`message`、`vision`、`file`、`sensor`……），写进模型看到的来源里 |
-| `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?, exclusive?, holds?, releases?}]`。`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600；后三个标记给[共享设备](https://github.com/integemjack/edith.tools/blob/main/docs/DEVICES.md)的仲裁用 |
+| `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?, readOnly?, exclusive?, holds?, releases?}]`。`readOnly: true`：不改东西（只读权限的一轮也能用）；`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600；后三个标记给[共享设备](https://github.com/integemjack/edith.tools/blob/main/docs/DEVICES.md)的仲裁用 |
 | `receives` | 否 | 要收哪些事件（[§7](#7-事件event)）；`["*"]` 是全部，不写是都不要 |
 | `sessions` | 否 | `"all"`（默认）：所有会话的事件；`"focus"`：只要焦点会话的 |
-| `name` | 否 | 叫什么（大脑起的程序用 `EDITH_CAPABILITY`；不写是 `client`；重名的 EDITH 加 `-2`、`-3`……） |
+| `name` | 否 | 叫什么：只对主令牌的连接有用（不写是 `client`；重名的、和配置里能力重名的 EDITH 加 `-2`、`-3`……）；专用令牌、中转的名字由大脑定，这里写的不管 |
 | `endpoints` | 否 | 它对外开的入口：`[{kind, url}]`（比如 `{"kind": "websocket", "url": "ws://127.0.0.1:52731"}`），EDITH 登记进 `instances/`，`edith instances` 列得出来 |
 
 模型的系统提示里会列出每个能力：名字、标题、有哪些动作、会主动传来什么。
@@ -198,6 +206,9 @@ EDITH                                  能力
 典型用法：语音里用户插话 → `interrupt`；用户说「顺便……」、聊天里追发一条 → `interject`；
 新来一封邮件、定时任务 → `queue`；传感器读数、背景信息 → `note`。
 
+权限（[§8.1](#81-权限permissions)）：一轮能用哪些工具看**交来这句话的连接**的 `tools`。所以补充只有和正在干的这一轮权限一样时才塞进去，
+不一样的改成排队（不借别人的工具）；打断要全部工具的权限（`tools: "all"`），不然也改成排队（不许停下别人的活）。
+
 ### 4.4 会话（请求）
 
 | 方法 | 参数 | 回话 |
@@ -223,9 +234,10 @@ EDITH                                  能力
 
 ## 5. 会话与焦点
 
-- **按目录工作**：一个大脑管一个目录（工作目录），会话存在 `<工作目录>/.edith/sessions/<id>.json`。工具的相对路径按会话的工作目录算。
-- **焦点会话**：没指明会话的话交给它。`edith "…"` / `edith` 时是这次新开的会话；`edith run` 时是这个目录的**主会话**
-  （id 记在 `<工作目录>/.edith/main-session`）。能力可以用 `sessions.focus` 换焦点。
+- **按目录工作**：一个大脑管一个目录（工作目录），会话存在 `~/.edith/projects/<工作目录的路径，非字母数字换成 ->/sessions/<id>.json`
+  （不放进项目目录：同一个目录开几个大脑各写各的文件，worktree 删了对话也不丢）。工具的相对路径按会话的工作目录算。
+- **焦点会话**：没指明会话的话交给它。`edith "…"` / `edith` / `edith run` 时是这次新开的会话；`-c` 接着这个目录最近的会话，
+  `-r <id>` 接着指定的。能力可以用 `sessions.focus` 换焦点。
 
 ## 6. EDITH → 能力
 
@@ -283,7 +295,7 @@ EDITH 要它退出（[§3.3](#33-结束)）。
 | `turn.started` | `{text, origin: {capability, kind, from}}` | 开始一轮：交来的原话、从哪来（`capability` 为空是终端里打的） |
 | `text` | `{text}` | 回答的文字，一块块到（拼起来是这一段回答） |
 | `thinking` | `{text}` | 模型的思考（模型给了才有） |
-| `tool` | `{id, name, arguments}` | 开始用一个工具（自带的、能力的动作、MCP 的） |
+| `tool` | `{id, name, arguments}` | 开始用一个工具（自带的、能力的动作、MCP 服务的） |
 | `result` | `{id, name, ok, text}` | 用完 |
 | `stats` | `{promptTokens, generatedTokens, cachedTokens, promptTime, generateTime, contextParts, contextLimit, contextCompactAt}` | 每段请求的用量（时间是秒；`contextParts` 是上下文各部分的 token：system / tools / user / replies / toolUse） |
 | `notice` | `{text, call?}` | 顺带说一句：重试、压了上下文、收到补充、动作进度（带 `call`） |
@@ -293,8 +305,9 @@ EDITH 要它退出（[§3.3](#33-结束)）。
 
 ## 8. 配置：`capabilities.json`
 
-两层，合起来用：**全局** `~/.edith/capabilities.json`（`EDITH_HOME` 换了就跟着换；所有目录都接）+ **目录**
-`<工作目录>/.edith/capabilities.json`（只有这个目录接）。同名的以目录为准；目录里只写 `{"name": "x", "disabled": true}` 就是在这个目录关掉全局的 x。
+三层，合起来用（同 Claude Code）：**全局** `~/.edith/capabilities.json`（`EDITH_HOME` 换了就跟着换；所有目录都接）→ **项目**
+`<工作目录>/.edith/capabilities.json`（提交进仓库，大家共用）→ **本地** `<工作目录>/.edith/capabilities.local.json`（只给自己，不提交）。
+同名的后面盖前面；只写 `{"name": "x", "disabled": true}`（没有 `command`）就是改前面那层的 x，别的照旧。
 
 每一项是「起哪个程序」，程序起来后自己连进大脑的套接字（[§3](#3-生命周期)）：
 
@@ -303,7 +316,8 @@ EDITH 要它退出（[§3.3](#33-结束)）。
   {"name": "ear", "command": "python3", "args": ["-u", "/opt/ear/ear.py"], "env": {"EAR_DEVICE": "0"}, "cwd": "/opt/ear"},
   {"name": "ws", "command": "edith-websocket", "args": ["--listen", "0.0.0.0:7789", "--token", "…"]},
   {"name": "mic", "command": "edith-connect", "args": ["mic"]},
-  {"name": "github", "command": "edith-mcp", "args": ["npx", "-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_TOKEN": "…"}},
+  {"name": "phone", "command": "edith-websocket", "args": ["--listen", "0.0.0.0:7790", "--token", "…"],
+   "permissions": {"sessions": "read", "tools": "read", "relay": {"ask": true, "tools": ["web_search", "fetch_url"]}}},
   {"name": "old", "command": "…", "disabled": true}
 ]}
 ```
@@ -313,20 +327,34 @@ EDITH 要它退出（[§3.3](#33-结束)）。
 | `name` | 能力名：只留字母、数字、`-`、`_`，最长 24 个字符 |
 | `command` / `args` / `env` / `cwd` | 怎么起它。`command` 是光秃秃的名字时先找装好的工具（`~/.edith/tools/`），再找 PATH，都没有而 edith.tools 里有就下载（[§8.4](#84-共用的工具edithtools)）。`cwd` 默认是工作目录 |
 | `restart` | 连接断了要不要重起，默认 `true` |
+| `permissions` | 它能做什么（[§8.1](#81-权限permissions)），默认全开 |
 | `disabled` | `true`：不接 |
 
-命令行（默认改这个目录那层，加 `--global` 改全局那层）：
+命令行（默认改本地那层，`--project` 改项目那层，`--global` 改全局那层）：
 
 ```
-edith capabilities                                  列出能力（全局的 + 这个目录的；会先接上它们，看得到动作、感知、订的事件）
+edith capabilities                                  列出能力（三层合起来的；会先接上它们，看得到动作、感知、订的事件）
 edith capabilities add <名字> <命令> [参数…]         接一个能力（起它、它连得进来才记进配置）
-edith capabilities add-mcp <名字> <命令> [参数…]     接一个本机的 MCP 服务（= add <名字> edith-mcp <命令> [参数…]）
-edith capabilities add-mcp-url <名字> <地址>          接一个 HTTP 的 MCP 服务（= add <名字> edith-mcp --url <地址>）
 edith capabilities remove <名字>                     去掉
-edith run                                           一直开着，只听能力的（主会话是焦点）
+edith run                                           一直开着，只听能力的
 ```
 
 这个目录有大脑在跑时，`edith capabilities` 不另起一份（独占的设备会撞），`add` / `remove` 只改配置，那个大脑重启后生效。
+
+### 8.1 权限（`permissions`）
+
+大脑只有套接字这一个接口，权限都在这里定（令牌定身份，[§1](#1-传输大脑的套接字)）。配置里每个能力可以写：
+
+| 字段 | 取值 | 默认 | 管什么 |
+|---|---|---|---|
+| `sense` | `true` / `false` | `true` | 能不能 `sense` |
+| `ask` | `true` / `false` | `true` | 能不能 `ask` |
+| `sessions` | `"none"` / `"read"` / `"all"` | `"all"` | `read`：`sessions.list`、`sessions.get`；`all` 再加 `sessions.create`、`sessions.focus`、`sessions.stop` |
+| `events` | `true` / `false` | `true` | 收不收订阅的事件（自己 `ask` 的那几轮总能收到） |
+| `tools` | `"all"` / `"read"` / `"none"` / `["名字", "前缀*", …]` | `"all"` | 它交来的话，那一轮能用哪些工具。`read`：只读的——自带的看、找、搜、搜网页、看网页，能力写了 `readOnly` 的动作，MCP 写了 `readOnlyHint` 的工具；不许的工具不交给模型，硬调也拒绝 |
+| `relay` | 上面几项 | `{sense, ask, events: true, sessions: "read", tools: "read"}` | 它替别人开的中转连接（`as`）的权限；不会比它自己的大 |
+
+主令牌的连接（终端、桌面端）全部都能。越权的请求回 `-32006`。
 
 ### 8.2 在跑的大脑（`instances/`）
 
@@ -338,7 +366,7 @@ edith run                                           一直开着，只听能力�
  "capabilities": ["ear", "ws"], "endpoints": [{"capability": "ws", "kind": "websocket", "url": "ws://127.0.0.1:52731"}]}
 ```
 
-`address` / `token` 是大脑的套接字（[§1](#1-传输大脑的套接字)）；`endpoints` 是能力报的入口。进程没了的登记在 `edith instances` 列出时清掉。
+`address` / `token` 是大脑的套接字和主令牌（[§1](#1-传输大脑的套接字)）；`endpoints` 是能力报的入口。进程没了的登记在 `edith instances` 列出时清掉。
 想找某个目录的大脑、它的 WebSocket 地址，读这里。
 
 ### 8.3 共享设备
@@ -350,7 +378,7 @@ edith run                                           一直开着，只听能力�
 ### 8.4 共用的工具（edith.tools）
 
 [integemjack/edith.tools](https://github.com/integemjack/edith.tools) 放大家共用的能力程序：`edith-websocket`（远程能力的中转）、
-`edith-connect`（共享设备）、`edith-mcp`（MCP 桥）。每次发布在 Release 里放每个工具每个平台一个包和一份 `index.json`：
+`edith-connect`（共享设备）。每次发布在 Release 里放每个工具每个平台一个包和一份 `index.json`：
 
 ```
 edith tools                    可装的和装了的（版本、有没有新的）
@@ -360,16 +388,37 @@ edith tools remove <工具>
 
 能力配置里写了 `edith-connect` 这样的名字、本机又没有时，大脑当场下载。`EDITH_TOOLS_INDEX` 可以换索引（网址或本地文件）。
 
-## 9. MCP 能力
+## 9. MCP 服务
 
-[MCP](https://modelcontextprotocol.io) 服务只会被调用、不会主动说话。经桥 `edith-mcp`（edith.tools）接：它连进大脑的套接字当一个能力，
-把 MCP 服务的工具当成自己的动作（`<能力名>__<工具名>`），大脑调、它转给 MCP。想要双向，就直接写本协议的能力。
+[MCP](https://modelcontextprotocol.io) 服务只会被调用、不会主动说话，所以不做成能力：大脑**直接读配置**连（stdio 或 Streamable HTTP），
+和 Claude Code 一样的写法、一样的三层——全局 `~/.edith/mcp.json` → 项目 `<工作目录>/.mcp.json`（提交进仓库）→ 本地 `<工作目录>/.edith/mcp.local.json`：
+
+```json
+{"mcpServers": {
+  "github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": {"GITHUB_TOKEN": "${GITHUB_TOKEN}"}},
+  "docs": {"type": "http", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer ${DOCS_TOKEN}"}},
+  "old": {"disabled": true}
+}}
+```
+
+字符串里的 `${VAR}`、`${VAR:-默认}` 换成环境变量。工具在模型那里叫 `<服务名>__<工具名>`；写了 `readOnlyHint` 的算只读（[§8.1](#81-权限permissions)）。
+
+```
+edith mcp                                           列出 MCP 服务和它们的工具（会试连一下）
+edith mcp add <名字> <命令> [参数…]                  加一个本机的（连得上才记；默认本地那层，--project / --global 同上）
+edith mcp add-url <名字> <地址> [--header "名字: 值"]  加一个 HTTP 的
+edith mcp remove <名字>
+```
+
+想要双向（MCP 服务也能主动说话），就照本协议写能力。
 
 ## 10. 安全
 
-能力是**受信的本机程序**：它能以用户的名义让大脑做任何事（大脑能读写文件、跑命令）。只接你信得过的能力。
-大脑的套接字只听 `127.0.0.1`，令牌只交给大脑起的程序、或者写在只有本用户能读的登记里。
-把大脑开到网络上的能力（比如 WebSocket 中转）要自己管好认证：不是只听本机就必须设令牌。
+配置里的能力默认是**受信的本机程序**：权限全开时它能以用户的名义让大脑做任何事（大脑能读写文件、跑命令）。
+只接你信得过的能力，不全信的用 `permissions` 收窄（[§8.1](#81-权限permissions)）。
+大脑的套接字只听 `127.0.0.1`；专用令牌只交给大脑起的那个程序，主令牌写在只有本用户能读的登记里。
+把大脑开到网络上的能力（比如 WebSocket 中转）要自己管好认证（不是只听本机就必须设令牌），它替远程设备开的连接用 `as`，
+权限按 `permissions.relay`（默认只读的工具、只看会话）。
 
 ## 11. 最小的能力（Python）
 

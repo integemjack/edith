@@ -11,11 +11,14 @@ mod downloads;
 mod home;
 mod http;
 mod instance;
+mod mcp;
 mod mind;
+mod permissions;
 mod protocol;
 mod sessions;
 mod terminal;
 mod tools;
+mod web;
 mod worktree;
 
 use std::io::{BufRead, IsTerminal, Write};
@@ -29,32 +32,33 @@ use mind::{Origin, Urgency};
 use sessions::Session;
 use terminal::Printer;
 
-const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作：数据在 <目录>/.edith（往上找，到 git 仓库根为止；
-都没有就是当前目录）。这个目录已经有大脑在干活时，新起的大脑自动开一个 git worktree（.edith/worktrees/，
-分支 edith/<编号>）去那里干，互不干扰；--here 不开。
+const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作：工作目录是往上找到的第一个有 .edith/ 的目录（到 git 仓库根为止；
+都没有就是当前目录）。会话、日志存在 ~/.edith/projects/<目录> 下，项目里的 .edith/ 只放配置。同一个目录可以同时开几个大脑，各写各的会话。
 
 用法：
   edith \"要做的事\"                 在这个目录干一件事（新开一个会话）
   edith [目录]                     一句一句聊（新开一个会话；干活时再打字算补充；空行或 Ctrl+D 结束）
-  edith -c <会话 id> [\"…\"]         接着某个会话（id 写开头几位就行）
-  edith run [目录]                 一直开着，只听能力的（这个目录的主会话；Ctrl+C 退出）
+  edith -c [\"…\"]                   接着这个目录最近的一个会话
+  edith -r <会话 id> [\"…\"]         接着某个会话（id 写开头几位就行）
+  edith run [目录]                 一直开着，只听能力的（新开一个会话；-c 接最近的；Ctrl+C 退出）
   edith attach [目录] [\"…\"]        接到这个目录正在跑的大脑上（一句一句聊，或干一件事就退）
   edith sessions                   列出这个目录的会话
   edith instances                  列出这台机器上在跑的大脑
-  edith capabilities               列出能力（全局的 + 这个目录的）
-  edith capabilities add <名字> <命令> [参数…]       接一个讲能力协议的程序（记进这个目录；--global 记进全局）
-  edith capabilities add-mcp <名字> <命令> [参数…]   接一个本机的 MCP 服务（经 edith-mcp）
-  edith capabilities add-mcp-url <名字> <地址>        接一个 HTTP 的 MCP 服务（经 edith-mcp）
-  edith capabilities remove <名字>                    去掉（--global 从全局去掉）
+  edith capabilities               列出能力（全局 → 项目 → 本地，同名的后面盖前面）
+  edith capabilities add <名字> <命令> [参数…]   接一个能力（记进本地；--project 记进项目、--global 记进全局）
+  edith capabilities remove <名字>                去掉（同上选哪一层）
+  edith mcp                        列出 MCP 服务（.mcp.json、~/.edith/mcp.json）和它们的工具
+  edith mcp add <名字> <命令> [参数…] | add-url <名字> <地址>   加一个 MCP 服务（记进本地；--project、--global 同上）
+  edith mcp remove <名字>          去掉
   edith tools                      列出 edith.tools 里的工具（装了哪个版本、有没有新的）
-  edith tools install <工具>       下载、装上（edith-websocket、edith-connect、edith-mcp……；能力要用时也会自己下）
+  edith tools install <工具>       下载、装上（edith-websocket、edith-connect……；能力要用时也会自己下）
   edith tools remove <工具>        去掉
 
 选项：
   -C, --cwd <目录>    工作目录（默认当前目录）
+  -w, --worktree      开一个 git worktree 去那里干（.edith/worktrees/，分支 edith/<编号>）；退出时没改东西就自动清掉
   -q, --quiet         只打最终回答，不打过程
   -v, --verbose       也打思考、每段请求的用量、能力的日志
-  --here              这个目录有大脑在干活也不开 worktree，就在这里一起干
 
 模型：~/.edith/config.json 的 {\"baseURL\", \"apiKey\", \"model\"}，或环境变量 EDITH_BASE_URL / EDITH_API_KEY / EDITH_MODEL
 能力协议：docs/CAPABILITY-PROTOCOL.md";
@@ -81,6 +85,7 @@ fn install_interrupt() {}
 fn shutdown(code: i32) -> ! {
     capabilities::stop_all();
     instance::release();
+    finish_worktree();
     std::process::exit(code);
 }
 
@@ -110,10 +115,24 @@ struct Options {
     explicit: bool,
     quiet: bool,
     verbose: bool,
-    session: Option<String>,
-    global: bool,
-    here: bool,
+    /// -r：接着哪个会话
+    resume: Option<String>,
+    /// -c：接着最近的会话
+    continue_latest: bool,
+    /// 能力、MCP 配置改哪一层
+    layer: capabilities::Layer,
+    worktree: bool,
     words: Vec<String>,
+}
+
+/// --worktree 开的（退出时没改东西就清掉）
+static WORKTREE: std::sync::OnceLock<worktree::Worktree> = std::sync::OnceLock::new();
+
+/// 退出前看一眼 worktree：没改就清掉，改了告诉用户在哪
+fn finish_worktree() {
+    if let Some(tree) = WORKTREE.get() {
+        eprintln!("\x1b[2m（{}）\x1b[0m", worktree::finish(tree));
+    }
 }
 
 fn main() {
@@ -152,24 +171,17 @@ fn main() {
         }
     }
     let mut workspace = if options.explicit { options.cwd.clone() } else { home::find_workspace(&options.cwd) };
-    // 要起大脑的（干活、聊天、run）：这个目录已经有大脑在干活就开 worktree 去那里
-    let starts_brain = !matches!(command.as_str(), "sessions" | "instances" | "capabilities" | "caps" | "attach" | "tools");
-    if starts_brain && !options.here && !instance::running_in(&workspace).is_empty() {
+    // --worktree：开一个 git worktree 去那里干（干活、聊天、run 才开）
+    let starts_brain = !matches!(command.as_str(), "sessions" | "instances" | "capabilities" | "caps" | "attach" | "tools" | "mcp");
+    if starts_brain && options.worktree {
         match worktree::create(&workspace) {
             Ok(tree) => {
-                eprintln!(
-                    "\x1b[2m（{} 已经有大脑在干活：在 git worktree {} 里接着干，分支 {}；干完要合并就 git merge {}）\x1b[0m",
-                    workspace.display(),
-                    tree.path.display(),
-                    tree.branch,
-                    tree.branch
-                );
+                eprintln!("\x1b[2m（在 git worktree {} 里干，分支 {}）\x1b[0m", tree.path.display(), tree.branch);
                 options.cwd = worktree::map_cwd(&options.cwd, &workspace, &tree.path);
-                workspace = tree.path;
+                workspace = tree.path.clone();
+                let _ = WORKTREE.set(tree);
             }
-            Err(reason) => {
-                eprintln!("\x1b[33m{} 已经有大脑在干活，开不了 worktree（{reason}），就在这里一起干\x1b[0m", workspace.display())
-            }
+            Err(reason) => return exit_on(Err(format!("开不了 worktree：{reason}"))),
         }
     }
     home::set_workspace(workspace);
@@ -179,12 +191,16 @@ fn main() {
         "capabilities" | "caps" => {
             brain::setup_prompts();
             let rest: Vec<String> = options.words[1..].to_vec();
-            let result = capabilities_command(&rest, options.global);
+            let result = capabilities_command(&rest, options.layer);
             capabilities::stop_all();
             instance::release();
             exit_on(result);
         }
         "tools" => exit_on(tools_command(&options.words[1..])),
+        "mcp" => {
+            let rest: Vec<String> = options.words[1..].to_vec();
+            exit_on(mcp_command(&rest, options.layer));
+        }
         "run" if options.words.len() == 1 => exit_on(run(options)),
         "attach" => exit_on(attach_to(options)),
         _ => exit_on(work(options)),
@@ -205,15 +221,17 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
         explicit: false,
         quiet: false,
         verbose: false,
-        session: None,
-        global: false,
-        here: false,
+        resume: None,
+        continue_latest: false,
+        layer: capabilities::Layer::Local,
+        worktree: false,
         words: Vec::new(),
     };
     let mut rest = arguments.iter();
     while let Some(argument) = rest.next() {
         // edith capabilities add <名字> <命令> 之后的都是那个命令的参数（-c 之类不是 edith 的选项）
-        let literal = matches!(options.words.first().map(String::as_str), Some("capabilities" | "caps")) && options.words.len() >= 3;
+        let literal =
+            matches!(options.words.first().map(String::as_str), Some("capabilities" | "caps" | "mcp")) && options.words.len() >= 3;
         if literal {
             options.words.push(argument.clone());
             continue;
@@ -225,9 +243,12 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             }
             "-q" | "--quiet" => options.quiet = true,
             "-v" | "--verbose" => options.verbose = true,
-            "--global" => options.global = true,
-            "--here" => options.here = true,
-            "-c" | "--continue" => options.session = Some(rest.next().ok_or("-c 后面要跟会话 id")?.clone()),
+            "--global" => options.layer = capabilities::Layer::Global,
+            "--project" => options.layer = capabilities::Layer::Project,
+            "--local" => options.layer = capabilities::Layer::Local,
+            "-w" | "--worktree" => options.worktree = true,
+            "-c" | "--continue" => options.continue_latest = true,
+            "-r" | "--resume" => options.resume = Some(rest.next().ok_or("-r 后面要跟会话 id")?.clone()),
             "--" => options.words.extend(rest.by_ref().cloned()),
             other if other.starts_with('-') && options.words.is_empty() => return Err(format!("不认识的选项 {other}（edith --help）")),
             other => options.words.push(other.to_string()),
@@ -248,19 +269,27 @@ fn prepare() -> Result<(), String> {
     install_interrupt();
     instance::serve()?;
     capabilities::start_all(&mut |message| eprintln!("\x1b[33m{message}\x1b[0m"));
+    mcp::start_all(&mut |message| eprintln!("\x1b[33m{message}\x1b[0m"));
     Ok(())
 }
 
 /// edith run：一直开着，干活的事都由能力交来（这个目录的主会话是焦点）
 fn run(options: Options) -> Result<(), String> {
     prepare()?;
-    let session = sessions::main_session(&home::workspace().to_string_lossy())?;
+    let session = match options.continue_latest.then(sessions::latest).flatten() {
+        Some(session) => session,
+        None => {
+            let mut session = Session::new(&home::workspace().to_string_lossy());
+            session.save()?;
+            session
+        }
+    };
     mind::set_focus(&session.id);
     let printer = Arc::new(Mutex::new(Printer::new(options.quiet, options.verbose)));
     mind::listen(move |envelope| printer.lock().unwrap().show(envelope.kind, &envelope.session, &envelope.data, true));
     watch_interrupt(true);
     eprintln!(
-        "EDITH 在 {} 开着（主会话 {}，{} 个能力）。Ctrl+C 退出。",
+        "EDITH 在 {} 开着（会话 {}，{} 个能力）。Ctrl+C 退出。",
         home::workspace().display(),
         &session.id[..8],
         capabilities::names().len()
@@ -301,9 +330,10 @@ fn work(options: Options) -> Result<(), String> {
     let task = task(&options)?;
     let model = home::Model::load()?;
     prepare()?;
-    let mut session = match &options.session {
-        Some(id) => Session::find(id).ok_or_else(|| format!("没有会话 {id}（edith sessions 看有哪些）"))?,
-        None => Session::new(&options.cwd.to_string_lossy()),
+    let mut session = match (&options.resume, options.continue_latest) {
+        (Some(id), _) => Session::find(id).ok_or_else(|| format!("没有会话 {id}（edith sessions 看有哪些）"))?,
+        (None, true) => sessions::latest().ok_or("这个目录还没有会话")?,
+        (None, false) => Session::new(&options.cwd.to_string_lossy()),
     };
     if !std::path::Path::new(&session.cwd).is_dir() {
         session.cwd = options.cwd.to_string_lossy().into_owned();
@@ -331,8 +361,9 @@ fn work(options: Options) -> Result<(), String> {
         mind::wait_idle(&session.id);
         capabilities::stop_all();
         instance::release();
+        finish_worktree();
         if !options.quiet {
-            eprintln!("\x1b[2m（会话 {}，接着做：edith -c {} \"…\"）\x1b[0m", &session.id[..8], &session.id[..8]);
+            eprintln!("\x1b[2m（会话 {}，接着做：edith -r {} \"…\"）\x1b[0m", &session.id[..8], &session.id[..8]);
         }
         return failure.lock().unwrap().take().map_or(Ok(()), Err);
     }
@@ -363,6 +394,7 @@ fn work(options: Options) -> Result<(), String> {
     mind::wait_idle(&session.id);
     capabilities::stop_all();
     instance::release();
+    finish_worktree();
     eprintln!("\x1b[2m（会话 {}）\x1b[0m", &session.id[..8]);
     Ok(())
 }
@@ -408,7 +440,7 @@ fn list_instances() {
     }
 }
 
-fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String> {
+fn capabilities_command(arguments: &[String], layer: capabilities::Layer) -> Result<(), String> {
     // 这个目录有大脑在跑：只看配置、不另起一份（独占的设备会撞）；改了配置要它重启才生效
     let running = instance::running_in(&home::workspace()).into_iter().next();
     let added = |value: Value| {
@@ -416,7 +448,7 @@ fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String
         let actions = value["actions"].as_array().map_or(0, Vec::len);
         println!("接上了「{name}」：{actions} 个动作");
     };
-    let layer = if global { "全局" } else { "这个目录" };
+    let layer_title = layer.title();
     match arguments.first().map(String::as_str) {
         None | Some("list") => {
             if running.is_none() {
@@ -429,12 +461,18 @@ fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String
                 println!("还没有能力（edith capabilities add <名字> <命令> [参数…]）");
             }
             let live: Vec<String> = match &running {
-                Some(entry) => entry["capabilities"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(),
+                Some(entry) => {
+                    entry["capabilities"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect()
+                }
                 None => capabilities::names(),
             };
             for config in configs {
                 let name = capabilities::clean_name(config["name"].as_str().unwrap_or(""));
-                let scope = if config["scope"] == "global" { "全局" } else { "目录" };
+                let scope = match config["scope"].as_str() {
+                    Some("global") => "全局",
+                    Some("project") => "项目",
+                    _ => "本地",
+                };
                 if config["disabled"].as_bool() == Some(true) {
                     println!("{name}（{scope}）：关掉了");
                     continue;
@@ -444,7 +482,9 @@ fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String
                         let list = |key: &str| {
                             info[key]
                                 .as_array()
-                                .map(|items| items.iter().filter_map(|item| item.as_str().or(item["kind"].as_str())).collect::<Vec<_>>().join("、"))
+                                .map(|items| {
+                                    items.iter().filter_map(|item| item.as_str().or(item["kind"].as_str())).collect::<Vec<_>>().join("、")
+                                })
                                 .unwrap_or_default()
                         };
                         let title = info["info"]["title"].as_str().map(|title| format!(" {title}")).unwrap_or_default();
@@ -455,40 +495,35 @@ fn capabilities_command(arguments: &[String], global: bool) -> Result<(), String
                         println!("  订的事件：{}", or_none(list("receives")));
                     }
                     None if live.contains(&name) => println!("{name}（{scope}）：接着（在正在跑的大脑上）"),
-                    None => println!("{name}（{scope}）：没接上（日志在 .edith/logs/{name}.log）"),
+                    None => println!("{name}（{scope}）：没接上（日志在 {}）", capabilities::log_file(&name).display()),
                 }
             }
             Ok(())
         }
-        Some(verb @ ("add" | "add-mcp" | "add-mcp-url")) if arguments.len() >= 3 => {
-            let mut config = match verb {
-                "add" => json!({ "name": arguments[1], "command": arguments[2], "args": arguments[3..] }),
-                // MCP 服务经 edith-mcp（edith.tools）接进来
-                "add-mcp" => json!({ "name": arguments[1], "command": "edith-mcp", "args": arguments[2..] }),
-                _ => json!({ "name": arguments[1], "command": "edith-mcp", "args": ["--url", arguments[2]] }),
-            };
+        Some("add") if arguments.len() >= 3 => {
+            let mut config = json!({ "name": arguments[1], "command": arguments[2], "args": arguments[3..] });
             if running.is_some() {
                 // 不在这里起它（正在跑的大脑那边会起）：只记配置
                 config["name"] = json!(capabilities::clean_name(&arguments[1]));
-                capabilities::save(config, global)?;
-                println!("记进了{layer}的配置；这个目录的大脑在跑，重启它后生效");
+                capabilities::save(config, layer)?;
+                println!("记进了{layer_title}的配置；这个目录的大脑在跑，重启它后生效");
                 return Ok(());
             }
             instance::serve()?;
-            added(capabilities::add(config, global)?);
+            added(capabilities::add(config, layer)?);
             Ok(())
         }
         Some("remove") if arguments.len() == 2 => {
-            if capabilities::remove(&arguments[1], global) {
+            if capabilities::remove(&arguments[1], layer) {
                 if running.is_some() {
-                    println!("从{layer}的配置去掉了；这个目录的大脑在跑，重启它后生效");
+                    println!("从{layer_title}的配置去掉了；这个目录的大脑在跑，重启它后生效");
                 }
                 Ok(())
             } else {
-                Err(format!("{layer}的配置里没有能力「{}」", arguments[1]))
+                Err(format!("{layer_title}的配置里没有能力「{}」", arguments[1]))
             }
         }
-        _ => Err("用法：edith capabilities [add <名字> <命令> [参数…] | add-mcp <名字> <命令> [参数…] | add-mcp-url <名字> <地址> | remove <名字>] [--global]".into()),
+        _ => Err("用法：edith capabilities [add <名字> <命令> [参数…] | remove <名字>] [--project | --global]".into()),
     }
 }
 
@@ -524,5 +559,84 @@ fn tools_command(arguments: &[String]) -> Result<(), String> {
             }
         }
         _ => Err("用法：edith tools [install <工具>… | remove <工具>]".into()),
+    }
+}
+
+fn mcp_command(arguments: &[String], layer: capabilities::Layer) -> Result<(), String> {
+    let running = instance::running_in(&home::workspace()).into_iter().next();
+    let restart_hint = |done: &str| {
+        if running.is_some() {
+            println!("{done}；这个目录的大脑在跑，重启它后生效");
+        } else {
+            println!("{done}");
+        }
+    };
+    let layer_title = layer.title();
+    match arguments.first().map(String::as_str) {
+        None | Some("list") => {
+            let configs = mcp::configs();
+            if configs.is_empty() {
+                println!("还没有 MCP 服务（edith mcp add <名字> <命令> [参数…]，或写 .mcp.json）");
+            }
+            for (name, config) in configs {
+                let scope = config["scope"].as_str().unwrap_or("");
+                let target = config["command"].as_str().or(config["url"].as_str()).unwrap_or("");
+                if config["disabled"].as_bool() == Some(true) {
+                    println!("{name}（{scope}）：关掉了");
+                    continue;
+                }
+                // 试连一下，列出工具
+                match mcp::attach(&name, config.clone()) {
+                    Ok(limb) => {
+                        let tools: Vec<&str> = limb.tools.iter().filter_map(|tool| tool["name"].as_str()).collect();
+                        println!("{name}（{scope}）{target}");
+                        println!("  工具：{}", if tools.is_empty() { "（没有）".to_string() } else { tools.join("、") });
+                    }
+                    Err(error) => println!("{name}（{scope}）{target}：连不上（{error}）"),
+                }
+            }
+            mcp::stop_all();
+            Ok(())
+        }
+        Some("add") if arguments.len() >= 3 => {
+            let config = json!({ "command": arguments[2], "args": arguments[3..] });
+            mcp::attach(&capabilities::clean_name(&arguments[1]), config.clone()).map_err(|error| format!("连不上：{error}"))?;
+            mcp::stop_all();
+            mcp::save(&arguments[1], config, layer)?;
+            restart_hint(&format!("记进了{layer_title}的 MCP 配置"));
+            Ok(())
+        }
+        Some("add-url") if arguments.len() >= 3 => {
+            let mut headers = serde_json::Map::new();
+            let mut rest = arguments[3..].iter();
+            while let Some(argument) = rest.next() {
+                match argument.as_str() {
+                    "-H" | "--header" => {
+                        let header = rest.next().ok_or("--header 后面要跟「名字: 值」")?;
+                        let (key, value) = header.split_once(':').ok_or("--header 要写成「名字: 值」")?;
+                        headers.insert(key.trim().to_string(), json!(value.trim()));
+                    }
+                    other => return Err(format!("不认识的参数 {other}")),
+                }
+            }
+            let mut config = json!({ "type": "http", "url": arguments[2] });
+            if !headers.is_empty() {
+                config["headers"] = Value::Object(headers);
+            }
+            mcp::attach(&capabilities::clean_name(&arguments[1]), config.clone()).map_err(|error| format!("连不上：{error}"))?;
+            mcp::stop_all();
+            mcp::save(&arguments[1], config, layer)?;
+            restart_hint(&format!("记进了{layer_title}的 MCP 配置"));
+            Ok(())
+        }
+        Some("remove") if arguments.len() == 2 => {
+            if mcp::remove(&arguments[1], layer) {
+                restart_hint(&format!("从{layer_title}的 MCP 配置去掉了"));
+                Ok(())
+            } else {
+                Err(format!("{layer_title}的 MCP 配置里没有「{}」", arguments[1]))
+            }
+        }
+        _ => Err("用法：edith mcp [add <名字> <命令> [参数…] | add-url <名字> <地址> [--header \"名字: 值\"] | remove <名字>] [--project | --global]".into()),
     }
 }

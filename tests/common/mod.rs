@@ -68,6 +68,19 @@ pub fn edith(home: &Path, port: u16, cwd: &Path, args: &[&str]) -> Output {
     command(home, port, cwd, args).output().unwrap()
 }
 
+/// 这个工作目录的数据在 EDITH_HOME 下的哪（同 home::project_dir：路径里非字母数字换成 -）
+pub fn project_dir(home: &Path, workspace: &Path) -> PathBuf {
+    let path = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf()).to_string_lossy().into_owned();
+    let path = path.strip_prefix(r"\\?\").unwrap_or(&path).to_string();
+    let encoded: String = path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    home.join("projects").join(encoded)
+}
+
+/// 这个工作目录有几个会话文件
+pub fn session_files(home: &Path, workspace: &Path) -> usize {
+    std::fs::read_dir(project_dir(home, workspace).join("sessions")).map(|entries| entries.count()).unwrap_or(0)
+}
+
 pub fn text(output: &Output) -> String {
     format!("{}\n--- stderr ---\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
 }

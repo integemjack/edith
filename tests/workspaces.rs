@@ -1,11 +1,12 @@
-//! 一个目录一个大脑：数据在 <目录>/.edith、同一个目录再开一次是接到正在跑的那个上、两层能力配置、在跑的大脑的登记
+//! 一个目录一个大脑（同 Claude Code）：会话在 ~/.edith/projects/<路径>/、-c 接着最近的、-r 接着指定的、
+//! -w 开 git worktree（没改东西退出时清掉）、目录不加锁可以开几个、三层能力配置、先读后改、在跑的大脑的登记
 
 mod common;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::{command, edith, fake, fake_model, python, scratch, text};
+use common::{command, edith, fake, fake_model, project_dir, python, scratch, session_files, text};
 use serde_json::{Value, json};
 
 fn wait_until(seconds: u64, mut condition: impl FnMut() -> bool) -> bool {
@@ -19,10 +20,6 @@ fn wait_until(seconds: u64, mut condition: impl FnMut() -> bool) -> bool {
     false
 }
 
-fn session_files(dir: &Path) -> usize {
-    std::fs::read_dir(dir.join(".edith").join("sessions")).map(|entries| entries.count()).unwrap_or(0)
-}
-
 fn registry(home: &Path) -> Vec<Value> {
     std::fs::read_dir(home.join("instances"))
         .into_iter()
@@ -32,8 +29,17 @@ fn registry(home: &Path) -> Vec<Value> {
         .collect()
 }
 
+/// 这个目录唯一的会话（id、历史里用户说了几句）
+fn only_session(home: &Path, workspace: &Path) -> (String, usize) {
+    let dir = project_dir(home, workspace).join("sessions");
+    let entry = std::fs::read_dir(&dir).unwrap().flatten().next().unwrap();
+    let session: Value = serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
+    let users = session["history"].as_array().unwrap().iter().filter(|message| message["role"] == "user").count();
+    (session["id"].as_str().unwrap().to_string(), users)
+}
+
 #[test]
-fn each_directory_keeps_its_own_data() {
+fn sessions_live_outside_the_project() {
     let (work, home) = scratch("dirs");
     let model = fake_model(&home.join("requests.jsonl"));
     let (a, b) = (work.join("a"), work.join("b"));
@@ -43,16 +49,22 @@ fn each_directory_keeps_its_own_data() {
         let output = edith(&home, model.port, dir, &["只聊天"]);
         assert!(output.status.success(), "{}", text(&output));
     }
-    assert_eq!(session_files(&a), 1);
-    assert_eq!(session_files(&b), 1);
-    // 全局目录里没有会话；子目录里干活用的是往上找到的那个目录
-    assert!(!home.join("sessions").exists());
-    let sub = a.join("src");
-    std::fs::create_dir_all(&sub).unwrap();
-    let output = edith(&home, model.port, &sub, &["只聊天"]);
+    assert_eq!(session_files(&home, &a), 1);
+    assert_eq!(session_files(&home, &b), 1);
+    // 项目目录里什么都不放
+    assert!(!a.join(".edith").exists() && !b.join(".edith").exists());
+    // -c：接着最近的那个；-r：接着指定的
+    let output = edith(&home, model.port, &a, &["-c", "只聊天"]);
     assert!(output.status.success(), "{}", text(&output));
-    assert_eq!(session_files(&a), 2);
-    assert!(!sub.join(".edith").exists());
+    let (id, users) = only_session(&home, &a);
+    assert_eq!(users, 2);
+    let output = edith(&home, model.port, &a, &["-r", &id[..8], "只聊天"]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(only_session(&home, &a), (id, 3));
+    // 不带 -c 就是新会话
+    let output = edith(&home, model.port, &a, &["只聊天"]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(session_files(&home, &a), 2);
     let listed = edith(&home, model.port, &b, &["sessions"]);
     assert_eq!(String::from_utf8_lossy(&listed.stdout).lines().count(), 1, "{}", text(&listed));
 }
@@ -89,50 +101,47 @@ fn repository(dir: &Path) {
 }
 
 #[test]
-fn busy_git_directory_moves_to_a_worktree() {
+fn worktree_only_when_asked_and_cleaned_when_unchanged() {
     let (work, home) = scratch("worktree");
     let model = fake_model(&home.join("requests.jsonl"));
     let repo = std::fs::canonicalize(&work).unwrap();
     repository(&repo);
+    // 有大脑在跑也不自动开 worktree：一起在这里干（目录不加锁）
     let running = start_run(&home, model.port, &repo);
-    // 有大脑在干活：新起的去 worktree（在子目录里起的对应到 worktree 的同一个子目录）
-    let output = edith(&home, model.port, &repo.join("src"), &["只聊天"]);
+    let output = edith(&home, model.port, &repo, &["只聊天"]);
+    assert!(output.status.success() && !String::from_utf8_lossy(&output.stderr).contains("git worktree"), "{}", text(&output));
+    // -w：开一个；没改东西，退出时清掉
+    let output = edith(&home, model.port, &repo.join("src"), &["-w", "只聊天"]);
     assert!(output.status.success(), "{}", text(&output));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("git worktree") && stderr.contains("edith/"), "{}", text(&output));
-    let trees: Vec<_> = std::fs::read_dir(repo.join(".edith").join("worktrees")).unwrap().flatten().map(|entry| entry.path()).collect();
-    assert_eq!(trees.len(), 1);
-    assert_eq!(session_files(&trees[0]), 1);
-    assert_eq!(session_files(&repo), 1, "主仓库里只有 run 的主会话");
+    assert!(stderr.contains("git worktree") && stderr.contains("清掉了"), "{}", text(&output));
+    assert!(!git(&repo, &["worktree", "list"]).contains("edith/"));
+    assert!(!git(&repo, &["branch"]).contains("edith/"));
+    // 在子目录里起的对应到 worktree 的同一个子目录
     let requests = std::fs::read_to_string(home.join("requests.jsonl")).unwrap();
-    assert!(requests.contains(&trees[0].join("src").to_string_lossy().replace('\\', "\\\\")), "工作目录该是 worktree 里的 src");
+    let worktrees = repo.join(".edith").join("worktrees");
+    assert!(requests.contains(&worktrees.to_string_lossy().replace('\\', "\\\\")), "工作目录该在 worktree 里");
+    // 改了东西：留着，告诉怎么合并
+    let output = edith(&home, model.port, &repo, &["-w", "写个 hello.txt 然后核对"]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("改动在 worktree"), "{}", text(&output));
+    let trees: Vec<_> = std::fs::read_dir(&worktrees).unwrap().flatten().map(|entry| entry.path()).collect();
+    assert_eq!(trees.len(), 1);
+    assert!(trees[0].join("hello.txt").exists() && !repo.join("hello.txt").exists());
     assert!(git(&repo, &["worktree", "list"]).contains("edith/"));
-    // .edith/ 不进 git
+    // .edith/worktrees 不进 git
     assert_eq!(git(&repo, &["status", "--porcelain"]), "");
-    // --here：不开
-    let output = edith(&home, model.port, &repo, &["--here", "只聊天"]);
-    assert!(output.status.success() && !String::from_utf8_lossy(&output.stderr).contains("git worktree"), "{}", text(&output));
-    assert_eq!(session_files(&repo), 2);
     // attach：接到在跑的那个上
     let output = edith(&home, model.port, &repo, &["attach", "只聊天"]);
     assert!(output.status.success() && String::from_utf8_lossy(&output.stderr).contains("正在跑的大脑上"), "{}", text(&output));
     assert!(String::from_utf8_lossy(&output.stdout).contains("你好，我是 EDITH。"), "{}", text(&output));
+    // 同一个目录可以再开一个
+    let second = start_run(&home, model.port, &repo);
+    assert_eq!(registry(&home).len(), 2);
     drop(running);
+    drop(second);
     let instances = edith(&home, model.port, &repo, &["instances"]);
     assert!(String::from_utf8_lossy(&instances.stdout).contains("没有在跑的大脑"), "{}", text(&instances));
-}
-
-#[test]
-fn busy_plain_directory_works_alongside() {
-    let (work, home) = scratch("plain");
-    let model = fake_model(&home.join("requests.jsonl"));
-    let _first = start_run(&home, model.port, &work);
-    // 不是 git 仓库：开不了 worktree，就在这里一起干（目录不加锁）
-    let output = edith(&home, model.port, &work, &["只聊天"]);
-    assert!(output.status.success(), "{}", text(&output));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("开不了 worktree"), "{}", text(&output));
-    let _second = start_run(&home, model.port, &work);
-    assert_eq!(registry(&home).len(), 2);
 }
 
 #[test]
@@ -145,12 +154,12 @@ fn workspace_search_stops_at_git_root() {
     repository(&repo);
     let output = edith(&home, model.port, &repo.join("src"), &["只聊天"]);
     assert!(output.status.success(), "{}", text(&output));
-    assert_eq!(session_files(&repo), 1);
-    assert_eq!(session_files(&work), 0);
+    assert_eq!(session_files(&home, &repo), 1);
+    assert_eq!(session_files(&home, &work), 0);
 }
 
 #[test]
-fn directory_layer_overrides_global_capabilities() {
+fn three_config_layers() {
     let (work, home) = scratch("layers");
     let model = fake_model(&home.join("requests.jsonl"));
     let (a, b) = (work.join("a"), work.join("b"));
@@ -158,19 +167,54 @@ fn directory_layer_overrides_global_capabilities() {
     std::fs::create_dir_all(&b).unwrap();
     let global = json!({ "capabilities": [{ "name": "cap", "command": python(), "args": ["-u", fake("cap.py").to_str().unwrap()] }] });
     std::fs::write(home.join("capabilities.json"), global.to_string()).unwrap();
+    // 项目那层关掉全局的
     std::fs::write(
         a.join(".edith").join("capabilities.json"),
         json!({ "capabilities": [{ "name": "cap", "disabled": true }] }).to_string(),
     )
     .unwrap();
     let listed = edith(&home, model.port, &a, &["capabilities"]);
-    assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（目录）：关掉了"), "{}", text(&listed));
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（项目）：关掉了"), "{}", text(&listed));
+    // 本地那层再打开
+    std::fs::write(
+        a.join(".edith").join("capabilities.local.json"),
+        json!({ "capabilities": [{ "name": "cap", "disabled": false }] }).to_string(),
+    )
+    .unwrap();
+    let listed = edith(&home, model.port, &a, &["capabilities"]);
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（本地） 测试能力"), "{}", text(&listed));
     let listed = edith(&home, model.port, &b, &["capabilities"]);
     assert!(String::from_utf8_lossy(&listed.stdout).contains("cap（全局） 测试能力"), "{}", text(&listed));
-    // 加进目录那层的只在这个目录有
+    // 默认加进本地那层；--project 加进项目那层（提交进仓库的）
     let cap = fake("cap.py");
     let added = edith(&home, model.port, &b, &["capabilities", "add", "demo", python(), "-u", cap.to_str().unwrap()]);
     assert!(added.status.success(), "{}", text(&added));
-    assert!(std::fs::read_to_string(b.join(".edith").join("capabilities.json")).unwrap().contains("demo"));
+    assert!(std::fs::read_to_string(b.join(".edith").join("capabilities.local.json")).unwrap().contains("demo"));
+    let added = edith(&home, model.port, &b, &["--project", "capabilities", "add", "shared", python(), "-u", cap.to_str().unwrap()]);
+    assert!(added.status.success(), "{}", text(&added));
+    assert!(std::fs::read_to_string(b.join(".edith").join("capabilities.json")).unwrap().contains("shared"));
     assert!(!std::fs::read_to_string(home.join("capabilities.json")).unwrap().contains("demo"));
+}
+
+#[test]
+fn edits_need_a_fresh_read() {
+    let (work, home) = scratch("readfirst");
+    let model = fake_model(&home.join("requests.jsonl"));
+    std::fs::write(work.join("notes.txt"), "原来的\n").unwrap();
+    // 没读过就覆盖：拒绝
+    let write = r#"调用工具 write_file 参数 {"path":"notes.txt","content":"新的\n"}"#;
+    let output = edith(&home, model.port, &work, &[write]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("还没读过"), "{}", text(&output));
+    assert_eq!(std::fs::read_to_string(work.join("notes.txt")).unwrap(), "原来的\n");
+    // 同一个会话里读过再改：行
+    let output = edith(&home, model.port, &work, &["-c", r#"调用工具 read_file 参数 {"path":"notes.txt"}"#]);
+    assert!(output.status.success(), "{}", text(&output));
+    let output = edith(&home, model.port, &work, &["-c", write]);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("还没读过"), "{}", text(&output));
+    assert_eq!(std::fs::read_to_string(work.join("notes.txt")).unwrap(), "新的\n");
+    // 读过之后别人改了：要重读
+    std::fs::write(work.join("notes.txt"), "别人改的\n").unwrap();
+    let output = edith(&home, model.port, &work, &["-c", write]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("被改过"), "{}", text(&output));
+    assert_eq!(std::fs::read_to_string(work.join("notes.txt")).unwrap(), "别人改的\n");
 }

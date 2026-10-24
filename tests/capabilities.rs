@@ -134,7 +134,7 @@ fn sense_starts_a_turn_and_notes() {
     let requests = std::fs::read_to_string(home.join("requests.jsonl")).unwrap();
     assert!(requests.contains("由能力「cap」（speech）传来，说话的是 小明"), "{requests}");
     let id = sessions[0]["id"].as_str().unwrap();
-    let stored = std::fs::read_to_string(work.join(".edith").join("sessions").join(format!("{id}.json"))).unwrap();
+    let stored = std::fs::read_to_string(common::project_dir(&home, &work).join("sessions").join(format!("{id}.json"))).unwrap();
     assert!(stored.contains("明天下雨") && stored.contains("不用回复"), "{stored}");
 }
 
@@ -212,4 +212,62 @@ fn interject_between_steps() {
     let requests: Vec<String> = std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().map(str::to_string).collect();
     assert_eq!(requests.len(), 2);
     assert!(requests[1].contains("在你工作时补充了下面这段") && requests[1].contains("顺便记得带伞"), "{}", requests[1]);
+}
+
+#[test]
+fn permissions_limit_what_a_connection_can_do() {
+    let (work, home) = scratch("permissions");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let write = r#"调用工具 write_file 参数 {"path":"x.txt","content":"x"}"#;
+    let script = json!([
+        { "delay": 0.3, "send": request(1, "sessions.create", json!({})) },
+        { "delay": 0.3, "send": request(2, "ask", json!({ "text": write })) },
+        { "delay": 0.3, "send": request(3, "ask", json!({ "text": "调用工具 get_current_time" })) },
+    ]);
+    // 能看会话、不能建；它交来的话只能用只读的工具；它替「my phone」开的中转连接权限更窄
+    let config = json!({ "capabilities": [{
+        "name": "cap",
+        "command": python(),
+        "args": ["-u", fake("cap.py").to_str().unwrap()],
+        "env": {
+            "CAP_LOG": home.join("cap.jsonl").to_str().unwrap(),
+            "CAP_SCRIPT": script.to_string(),
+            "CAP_RECEIVES": "done",
+            "CAP_RELAY": "my phone",
+        },
+        "permissions": { "sessions": "read", "tools": "read", "relay": { "sessions": "read" } },
+    }]});
+    std::fs::write(home.join("capabilities.json"), config.to_string()).unwrap();
+    let _edith = run(&home, model.port, &work);
+    let relayed =
+        |messages: &[Value], id: i64| messages.iter().find(|message| message["relay"]["id"] == id).map(|message| message["relay"].clone());
+    assert!(
+        wait_until(30, || {
+            let messages = received(&home);
+            response(&messages, 3).is_some() && relayed(&messages, 901).is_some()
+        }),
+        "{:?}",
+        received(&home)
+    );
+    let messages = received(&home);
+    // 越权的回 NOT_PERMITTED
+    assert_eq!(response(&messages, 1).unwrap()["error"]["code"], -32006);
+    // 它交来的那一轮：写文件的工具不给模型，硬调也不让
+    let answer = response(&messages, 2).unwrap()["result"]["answer"].as_str().unwrap_or("").to_string();
+    assert!(answer.contains("没有权限用 write_file"), "{answer}");
+    assert!(!work.join("x.txt").exists());
+    let requests = std::fs::read_to_string(home.join("requests.jsonl")).unwrap();
+    let asked: Value = serde_json::from_str(requests.lines().find(|line| line.contains("x.txt")).unwrap()).unwrap();
+    let tools: Vec<&str> = asked["tools"].as_array().unwrap().iter().filter_map(|tool| tool["function"]["name"].as_str()).collect();
+    assert!(tools.contains(&"read_file") && !tools.contains(&"write_file") && !tools.contains(&"run_shell"), "{tools:?}");
+    assert!(response(&messages, 3).unwrap()["result"]["answer"].as_str().unwrap_or("").starts_with("结果："));
+    // 中转的：名字由大脑定（<能力>-<as>），握手里带着它的权限
+    let initialize = messages.iter().find(|message| message["relay"]["method"] == "initialize").unwrap();
+    assert_eq!(initialize["relay"]["params"]["name"], "cap-my_phone");
+    assert_eq!(initialize["relay"]["params"]["grant"]["tools"], "read");
+    assert_eq!(relayed(&messages, 900).unwrap()["error"]["code"], -32006);
+    assert!(relayed(&messages, 901).unwrap()["result"].is_array());
+    // 主连接的握手也带着
+    assert_eq!(messages[0]["params"]["name"], "cap");
+    assert_eq!(messages[0]["params"]["grant"]["sessions"], "read");
 }

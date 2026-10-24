@@ -48,6 +48,8 @@ pub struct Origin {
     pub kind: String,
     /// 能力说的是谁（比如聊天渠道里的用户名）
     pub from: String,
+    /// 它交来的话那一轮能用哪些工具（令牌定的；终端里打的全部能用）
+    pub tools: crate::permissions::Tools,
 }
 
 impl Origin {
@@ -141,6 +143,8 @@ struct State {
     queue: VecDeque<Input>,
     /// 干活时来的「只记下」：这一轮存档时记进去
     notes: Vec<String>,
+    /// 正在干的这一轮许可的工具（补充 / 打断只在不越过它时生效）
+    tools: crate::permissions::Tools,
 }
 
 static SESSIONS: LazyLock<Mutex<HashMap<String, State>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -227,9 +231,16 @@ pub fn submit(
         }
         return Ok((Disposition::Noted, None));
     }
+    // 权限和正在干的这一轮不一样：补充不塞进去（塞进去就借了这一轮的工具），打断只有全权的能（不许停下别人的活），都改成排队
+    let urgency = match urgency {
+        Urgency::Interject if state.working && origin.tools != state.tools => Urgency::Queue,
+        Urgency::Interrupt if state.working && origin.tools != crate::permissions::Tools::All => Urgency::Queue,
+        other => other,
+    };
     if !state.working {
         let input = Input { text: text.to_string(), origin, turn: new_turn_id(), interjected: false };
         let turn = input.turn.clone();
+        state.tools = input.origin.tools.clone();
         state.working = true;
         state.turn = turn.clone();
         state.cancel = Arc::new(AtomicBool::new(false));
@@ -266,6 +277,7 @@ fn work(session_id: String, first: Input) {
             let mut sessions = SESSIONS.lock().unwrap();
             let state = sessions.entry(session_id.clone()).or_default();
             state.turn = input.turn.clone();
+            state.tools = input.origin.tools.clone();
             state.cancel.clone()
         };
         let turn = input.turn.clone();
@@ -303,7 +315,7 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
     };
     let cwd = PathBuf::from(&session.cwd);
     let cwd = if cwd.is_dir() { cwd } else { crate::home::user_home() };
-    let context = brain::Context { session: session_id.to_string(), turn: input.turn.clone() };
+    let context = brain::Context { session: session_id.to_string(), turn: input.turn.clone(), tools: input.origin.tools.clone() };
     let text = input.origin.wrap(if input.interjected { "edith.interjection" } else { "edith.input" }, &input.text);
     let mut on_event = |event: Event| {
         let (kind, data) = event_json(&event);

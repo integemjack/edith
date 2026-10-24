@@ -2,6 +2,7 @@
 - 回 initialize：一个动作 remember、一种感知 speech；订哪些事件看环境变量 CAP_RECEIVES（逗号分开，默认 done,turn.started）
 - 回 act：remember → 「记住了：<text>」（先等 CAP_ACT_DELAY 秒）
 - 握手后按 CAP_SCRIPT（JSON 数组：[{"delay": 秒, "send": 一条消息}]）按时发消息给 EDITH
+- CAP_RELAY=<名字>：握手后再开一条中转连接（auth 带 as），它收到的记进 CAP_LOG 时包在 {"relay": …} 里
 - 收到的每一条都记进 CAP_LOG（一行一条）；大脑断开或发 shutdown 就退出"""
 import json
 import os
@@ -39,6 +40,25 @@ def script():
         send(step["send"])
 
 
+def relay(name):
+    """替别人开的连接：同一个令牌加 as，握手后什么也不报"""
+    link = socket.create_connection((host, int(port)))
+    link_reader = link.makefile("r", encoding="utf-8")
+    link_writer = link.makefile("w", encoding="utf-8")
+    def link_send(message):
+        link_writer.write(json.dumps(message, ensure_ascii=False) + "\n")
+        link_writer.flush()
+    link_send({"jsonrpc": "2.0", "method": "auth", "params": {"token": os.environ["EDITH_ACCESS_TOKEN"], "as": name}})
+    for line in link_reader:
+        message = json.loads(line)
+        log({"relay": message})
+        if message.get("method") == "initialize":
+            link_send({"jsonrpc": "2.0", "id": message["id"], "result": {"protocolVersion": "1", "name": "ignored"}})
+        elif message.get("method") == "initialized":
+            link_send({"jsonrpc": "2.0", "id": 900, "method": "sessions.create", "params": {}})
+            link_send({"jsonrpc": "2.0", "id": 901, "method": "sessions.list", "params": {}})
+
+
 receives = [kind for kind in os.environ.get("CAP_RECEIVES", "done,turn.started").split(",") if kind]
 for line in reader:
     message = json.loads(line)
@@ -56,6 +76,8 @@ for line in reader:
         }})
     elif method == "initialized":
         threading.Thread(target=script, daemon=True).start()
+        if os.environ.get("CAP_RELAY"):
+            threading.Thread(target=relay, args=(os.environ["CAP_RELAY"],), daemon=True).start()
     elif method == "act":
         params = message["params"]
         send({"jsonrpc": "2.0", "method": "act.progress", "params": {"call": params["call"], "text": "在记", "fraction": 0.5}})

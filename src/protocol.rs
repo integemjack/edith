@@ -22,6 +22,8 @@ pub const NO_MODEL: i64 = -32003;
 pub const CANCELLED: i64 = -32004;
 /// 设备忙：共享设备正被别的大脑占着（error.data.holder 是占着它的大脑 {id, workspace}）
 pub const BUSY: i64 = -32005;
+/// 没有权限：这条连接的令牌不许做这件事（权限在能力配置的 permissions 里）
+pub const NOT_PERMITTED: i64 = -32006;
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })

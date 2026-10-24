@@ -39,11 +39,12 @@ pub enum Event {
     Notice(String),
 }
 
-/// 这一轮在哪个会话、是哪一轮（能力的动作要知道）
+/// 这一轮在哪个会话、是哪一轮（能力的动作要知道）、能用哪些工具（话是谁交来的定的）
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     pub session: String,
     pub turn: String,
+    pub tools: crate::permissions::Tools,
 }
 
 /// 一轮的结果
@@ -87,7 +88,7 @@ fn args(pairs: &[(&str, String)]) -> prompts::Args {
 
 /// 系统提示
 pub fn instructions(cwd: &Path) -> String {
-    let list = capabilities::summary();
+    let list = [capabilities::summary(), crate::mcp::summary()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n");
     let capabilities = if list.is_empty() { String::new() } else { prompts::text("edith.capabilities", &args(&[("list", list)]), None) };
     prompts::text(
         "edith.main",
@@ -105,10 +106,12 @@ pub fn instructions(cwd: &Path) -> String {
     )
 }
 
-/// 给模型的工具：自带的 + 能力的动作
-pub fn tool_specs() -> Vec<Value> {
-    let mut specs = tools::specs();
-    specs.extend(capabilities::specs());
+/// 给模型的工具：自带的 + 能力的动作（只给这一轮许可的）
+pub fn tool_specs(allowed: &crate::permissions::Tools) -> Vec<Value> {
+    let mut specs: Vec<Value> =
+        tools::specs().into_iter().filter(|spec| allowed.allows(spec["function"]["name"].as_str().unwrap_or(""), false)).collect();
+    specs.extend(capabilities::specs(allowed));
+    specs.extend(crate::mcp::specs(allowed));
     specs
 }
 
@@ -125,12 +128,20 @@ fn wait(seconds: f64, cancel: &AtomicBool) {
 
 /// 用一个工具：自带的、能力的动作；名字写走样的按 Friday 的别名表认回来
 fn execute(name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, context: &Context) -> Outcome {
-    if let Some(outcome) = tools::run(name, arguments, cwd, cancel).or_else(|| capabilities::call(name, arguments, context, cancel)) {
+    let canonical = tool_aliases::canonical_name(name);
+    let read_only = capabilities::is_read_only(name) || crate::mcp::is_read_only(name);
+    if !context.tools.allows(name, read_only) && !context.tools.allows(&canonical, read_only) {
+        return Outcome { ok: false, text: format!("没有权限用 {name}：这一轮的话来自的连接{}", context.tools.describe()) };
+    }
+    if let Some(outcome) = tools::run(name, arguments, cwd, cancel, &context.session)
+        .or_else(|| capabilities::call(name, arguments, context, cancel))
+        .or_else(|| crate::mcp::call(name, arguments))
+    {
         return outcome;
     }
-    let canonical = tool_aliases::canonical_name(name);
     if canonical != name
-        && let Some(outcome) = tools::run(&canonical, &tool_aliases::canonical_arguments(&canonical, arguments), cwd, cancel)
+        && let Some(outcome) =
+            tools::run(&canonical, &tool_aliases::canonical_arguments(&canonical, arguments), cwd, cancel, &context.session)
     {
         return outcome;
     }
@@ -279,7 +290,7 @@ pub fn run(
     let mut brain = Loop::new(config, history);
     brain.begin(Settings {
         instructions: instructions(cwd),
-        tools: tool_specs(),
+        tools: tool_specs(&context.tools),
         temperature: model.temperature,
         enable_thinking: model.enable_thinking,
         max_tool_rounds: MAX_TOOL_ROUNDS,
