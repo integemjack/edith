@@ -106,7 +106,7 @@ jobs:
         run: |
           name="edith-${{ steps.version.outputs.tag }}-${{ matrix.key }}"
           mkdir -p "dist/$name"
-          cp "target/$TARGET/release/edith" README.md "dist/$name/"
+          cp "target/$TARGET/release/edith" README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
           cp -R docs "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -rf "dist/$name"
@@ -119,7 +119,7 @@ jobs:
         run: |
           $name = "edith-${{ steps.version.outputs.tag }}-${{ matrix.key }}"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item "target/$env:TARGET/release/edith.exe", README.md "dist/$name/"
+          Copy-Item "target/$env:TARGET/release/edith.exe", README.md, LICENSE-MIT, LICENSE-APACHE "dist/$name/"
           Copy-Item -Recurse docs "dist/$name/"
           Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
           Remove-Item -Recurse "dist/$name"

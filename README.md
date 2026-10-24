@@ -35,3 +35,7 @@ cargo build --release
 armv6、riscv64、loong64、ppc64le、s390x；zig 编成 musl 静态程序，不挑发行版），能在运行器上原生跑的同时跑端到端测试；
 推到 `main` 的发一个 Release（`v<版本前两位>.<序号>`，只留最新一个）。
 改 friday.core：在 `core/` 里拉新提交，提交子模块指针。
+
+## 许可证
+
+MIT 或 Apache-2.0 任选（[LICENSE-MIT](LICENSE-MIT)、[LICENSE-APACHE](LICENSE-APACHE)），`core/`（friday.core）同样。除非另有说明，提交进来的贡献按同样的双许可证授权。
