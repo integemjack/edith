@@ -314,7 +314,7 @@ pub fn classify(name: &str, arguments: &Map<String, Value>, cwd: &Path) -> Optio
             if crate::capabilities::is_action(name) && !crate::capabilities::is_read_only(name) {
                 return Some(need(name.to_string(), format!("能力的动作 {name}：{shown}"), name.to_string()));
             }
-            if crate::mcp::is_tool(name) && !crate::mcp::is_read_only(name) {
+            if crate::mcp::is_tool(name) && !crate::mcp::is_read_only(name) && !crate::mcp::auto_approved(name) {
                 return Some(need(name.to_string(), format!("MCP 工具 {name}：{shown}"), name.to_string()));
             }
             None

@@ -741,7 +741,9 @@ impl Capability {
         let allowed = match method {
             "sense" => self.grant.sense,
             "ask" => self.grant.ask,
-            "sessions.list" | "sessions.get" | "agents.list" | "changes.list" | "changes.diff" => self.grant.sessions >= Sessions::Read,
+            "sessions.list" | "sessions.get" | "agents.list" | "changes.list" | "changes.diff" | "tools.list" => {
+                self.grant.sessions >= Sessions::Read
+            }
             "sessions.create" | "sessions.focus" | "sessions.stop" | "sessions.remove" | "sessions.dequeue" | "sessions.fork"
             | "sessions.truncate" | "sessions.copy" | "agents.stop" | "agents.send" | "agents.dequeue" | "changes.revert" => {
                 self.grant.sessions == Sessions::All
@@ -886,6 +888,8 @@ impl Capability {
                     }
                 }
             }
+            // 设置页（Friday 的 设置 › 工具）：有哪些工具（自带的、记忆、派子智能体的、能力的动作、MCP 的）、哪些关掉了、技能、MCP 服务
+            "tools.list" => Ok(tools_listing()),
             "sessions.dequeue" => {
                 // 拿掉一段排着的（sense 排队时回的 turn）
                 let id = params.get("id").and_then(Value::as_str).ok_or_else(|| invalid("要给 id"))?;
@@ -1181,6 +1185,49 @@ fn native() -> Vec<Arc<Capability>> {
 }
 
 /// 能力的动作交给模型的工具定义：名字「<能力名>__<动作名>」（tools：这一轮许可的）
+/// tools.list 的回复
+fn tools_listing() -> Value {
+    let context = crate::brain::Context {
+        session: String::new(),
+        prefs: Default::default(),
+        turn: String::new(),
+        tools: permissions::Tools::All,
+        origin: String::new(),
+        cancel: None,
+        me: None,
+    };
+    let entry = |spec: &Value, group: String| {
+        let name = spec["function"]["name"].as_str().unwrap_or("").to_string();
+        let read_only = is_read_only(&name) || crate::mcp::is_read_only(&name) || name == crate::memory::SEARCH;
+        json!({ "name": name, "description": spec["function"]["description"], "group": group, "readOnly": read_only,
+                "parameters": spec["function"]["parameters"] })
+    };
+    let mut tools: Vec<Value> = crate::tools::specs().iter().map(|spec| entry(spec, "builtin".into())).collect();
+    tools.extend(crate::memory::specs().iter().map(|spec| entry(spec, "builtin".into())));
+    tools.extend(crate::team::specs(&context).iter().map(|spec| entry(spec, "agents".into())));
+    tools.extend(specs(&permissions::Tools::All).iter().map(|spec| entry(spec, "capability".into())));
+    for (server, listed) in crate::mcp::known() {
+        for tool in listed {
+            let name = format!("{server}{}{}", crate::mcp::SEPARATOR, tool["name"].as_str().unwrap_or(""));
+            let read_only = tool["annotations"]["readOnlyHint"] == true;
+            tools
+                .push(json!({ "name": name, "description": tool["description"], "group": format!("mcp:{server}"), "readOnly": read_only }));
+        }
+    }
+    let skills: Vec<Value> = crate::skills::list()
+        .iter()
+        .map(|skill| json!({ "name": skill.name, "description": skill.description, "file": crate::tools::slash_path(&skill.file), "source": skill.source }))
+        .collect();
+    let servers: Map<String, Value> = crate::mcp::configs().into_iter().collect();
+    json!({
+        "tools": tools,
+        "disabled": crate::home::disabled_tools(),
+        "skills": skills,
+        "skillsDirectory": crate::tools::slash_path(&home::dir().join("skills")),
+        "mcp": { "servers": servers, "unknown": crate::mcp::unknown(), "global": crate::tools::slash_path(&home::dir().join("mcp.json")) },
+    })
+}
+
 pub fn specs(tools: &permissions::Tools) -> Vec<Value> {
     let mut specs = Vec::new();
     for capability in native() {

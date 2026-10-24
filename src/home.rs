@@ -139,6 +139,24 @@ pub struct Model {
     pub extra_body: String,
 }
 
+/// 设置里关掉的工具（config.json 的 `disabledTools`，Friday 的 设置 › 工具 经网关改它）
+pub fn disabled_tools() -> Vec<String> {
+    read_json(&dir().join("config.json"))
+        .and_then(|config| config.get("disabledTools").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+/// 用户另写的系统提示（config.json 的 `systemPrompt`，Friday 的 设置 › 智能体）：接在 EDITH 自己的后面
+pub fn extra_prompt() -> String {
+    read_json(&dir().join("config.json"))
+        .and_then(|config| config.get("systemPrompt").and_then(Value::as_str).map(str::trim).map(str::to_string))
+        .unwrap_or_default()
+}
+
 /// 密钥库：`~/.edith/secrets.json`（{名字: 值}，只有自己能读）。config.json 的 engines 按名字引用（apiKeySecret），值不出这台
 pub fn secrets_path() -> PathBuf {
     dir().join("secrets.json")

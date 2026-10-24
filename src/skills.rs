@@ -59,12 +59,19 @@ pub fn roots() -> Vec<(PathBuf, &'static str)> {
     roots
 }
 
-/// YAML 头里的一项（只认简单的 `key: value`，值可以带引号）
+/// YAML 头里的一项：`key: value`（值可以带引号），或者多行的 `key: |` / `key: >`（下面缩进的几行，接成一段）
 fn field(header: &str, key: &str) -> Option<String> {
-    header.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        (name.trim() == key).then(|| value.trim().trim_matches(['"', '\'']).to_string()).filter(|value| !value.is_empty())
-    })
+    let lines: Vec<&str> = header.lines().collect();
+    let index =
+        lines.iter().position(|line| line.split_once(':').is_some_and(|(name, _)| name.trim() == key && !name.starts_with([' ', '\t'])))?;
+    let value = lines[index].split_once(':')?.1.trim();
+    if value.is_empty() || value.starts_with(['|', '>']) {
+        let block: Vec<&str> =
+            lines[index + 1..].iter().take_while(|line| line.is_empty() || line.starts_with([' ', '\t'])).map(|line| line.trim()).collect();
+        let joined = block.into_iter().filter(|line| !line.is_empty()).collect::<Vec<_>>().join(" ");
+        return Some(joined).filter(|value| !value.is_empty());
+    }
+    Some(value.trim_matches(['"', '\'']).to_string()).filter(|value| !value.is_empty())
 }
 
 /// 读一个 SKILL.md：头里的 name / description；没有头时用文件夹名和正文第一句
@@ -187,6 +194,10 @@ mod tests {
         std::fs::create_dir_all(root.join("plain")).unwrap();
         std::fs::write(root.join("pdf/SKILL.md"), "---\nname: pdf-tools\ndescription: \"处理 PDF：合并、拆分\"\n---\n# 用法\n…").unwrap();
         std::fs::write(root.join("plain/SKILL.md"), "# 发版\n先跑测试。再打标签。").unwrap();
+        std::fs::create_dir_all(root.join("long")).unwrap();
+        std::fs::write(root.join("long/SKILL.md"), "---\nname: long\ndescription: |\n  第一行\n  第二行\nother: x\n---\n正文").unwrap();
+        let long = parse(&root.join("long/SKILL.md"), "EDITH").unwrap();
+        assert_eq!(long.description, "第一行 第二行", "多行的 description");
         let pdf = parse(&root.join("pdf/SKILL.md"), "EDITH").unwrap();
         assert_eq!((pdf.name.as_str(), pdf.description.as_str()), ("pdf-tools", "处理 PDF：合并、拆分"));
         let plain = parse(&root.join("plain/SKILL.md"), "EDITH").unwrap();

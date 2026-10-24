@@ -16,6 +16,7 @@ mod home;
 mod http;
 mod instance;
 mod mcp;
+mod memory;
 mod migrate;
 mod mind;
 mod permissions;

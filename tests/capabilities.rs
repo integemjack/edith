@@ -580,3 +580,25 @@ fn sense_brings_mode_thinking_engine_and_images() {
     let stored = common::read_sessions(&home, &work)[0]["history"][0]["content"].to_string();
     assert!(stored.contains("file://") && !stored.contains("base64"), "{stored}");
 }
+
+#[test]
+fn tools_list_for_the_settings_page() {
+    let (work, home) = scratch("tools-list");
+    let model = fake_model(&home.join("requests.jsonl"));
+    std::fs::create_dir_all(home.join("skills/demo")).unwrap();
+    std::fs::write(home.join("skills/demo/SKILL.md"), "---\nname: demo\ndescription: 演示\n---\n正文").unwrap();
+    std::fs::write(home.join("config.json"), json!({ "disabledTools": ["web_search"] }).to_string()).unwrap();
+    configure_cap(&home, json!([{ "delay": 0.3, "send": request(1, "tools.list", json!({})) }]), "done");
+    let _edith = run(&home, model.port, &work);
+    assert!(wait_until(30, || response(&received(&home), 1).is_some()), "{:?}", received(&home));
+    let listing = response(&received(&home), 1).unwrap()["result"].clone();
+    let names: Vec<&str> = listing["tools"].as_array().unwrap().iter().filter_map(|tool| tool["name"].as_str()).collect();
+    assert!(
+        ["read_file", "run_shell", "save_memory", "search_memory", "delegate_task", "cap__remember"]
+            .iter()
+            .all(|name| names.contains(name)),
+        "{names:?}"
+    );
+    assert_eq!(listing["disabled"], json!(["web_search"]));
+    assert!(listing["skills"].as_array().unwrap().iter().any(|skill| skill["name"] == "demo"));
+}

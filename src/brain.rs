@@ -145,7 +145,11 @@ pub fn instructions(cwd: &Path) -> String {
 
 /// 系统提示后面接的：按需工具的清单、技能的清单（deferred.rs、skills.rs）
 fn on_demand(context: &Context) -> String {
-    [crate::deferred::prompt(context), crate::skills::prompt()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n\n")
+    [crate::deferred::prompt(context), crate::skills::prompt(), crate::memory::prompt(), crate::home::extra_prompt()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// 给模型的工具（只给这一轮许可的）：一直给的（自带的、delegate_task、load_tools、有技能时 use_skill）+ 历史里取回过的按需工具
@@ -165,7 +169,11 @@ pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
     if !crate::skills::list().is_empty() {
         specs.push(crate::skills::spec());
     }
+    specs.extend(crate::memory::specs().into_iter().filter(|spec| allowed.allows(&name(spec), name(spec) == crate::memory::SEARCH)));
     specs.extend(crate::deferred::specs(context, history));
+    // 设置里关掉的工具（config.json 的 disabledTools，Friday 的设置 › 工具）不给
+    let disabled = crate::home::disabled_tools();
+    specs.retain(|spec| !disabled.contains(&name(spec)));
     specs
 }
 
@@ -183,7 +191,10 @@ fn wait(seconds: f64, cancel: &AtomicBool) {
 /// 用一个工具：自带的、能力的动作；名字写走样的按 Friday 的别名表认回来
 fn execute(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, context: &Context) -> Outcome {
     let canonical = tool_aliases::canonical_name(name);
-    let read_only = capabilities::is_read_only(name) || crate::mcp::is_read_only(name);
+    let read_only = capabilities::is_read_only(name) || crate::mcp::is_read_only(name) || name == crate::memory::SEARCH;
+    if crate::home::disabled_tools().iter().any(|disabled| disabled == name) {
+        return Outcome { ok: false, text: format!("{name} 在设置里关掉了") };
+    }
     if !context.tools.allows(name, read_only) && !context.tools.allows(&canonical, read_only) {
         return Outcome { ok: false, text: format!("没有权限用 {name}：这一轮的话来自的连接{}", context.tools.describe()) };
     }
@@ -199,6 +210,9 @@ fn execute(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, c
     }
     if name == crate::skills::USE {
         return crate::skills::use_skill(arguments);
+    }
+    if let Some(outcome) = crate::memory::run(name, arguments) {
+        return outcome;
     }
     if let Some(outcome) = tools::run(name, arguments, cwd, cancel, &context.session, private_ok)
         .or_else(|| crate::team::call(name, arguments, cwd, context, call))

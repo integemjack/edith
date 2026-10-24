@@ -323,6 +323,11 @@ fn find(full_name: &str) -> Option<(String, Value)> {
 }
 
 /// 这个工具名是 MCP 服务的工具
+/// 这个服务在设置里点了「自动批准」（配置里 autoApprove: true，Friday 的 设置 › 工具 › MCP 服务）：它的工具不再问
+pub fn auto_approved(full_name: &str) -> bool {
+    full_name.split_once(SEPARATOR).is_some_and(|(server, _)| configs().get(server).is_some_and(|config| config["autoApprove"] == true))
+}
+
 pub fn is_tool(full_name: &str) -> bool {
     find(full_name).is_some()
 }
