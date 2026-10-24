@@ -451,6 +451,9 @@ pub fn accept(reader: Box<dyn Read + Send>, mut writer: Box<dyn Write + Send>, a
     handshake(writer, reader, authority)
 }
 
+/// 客人找自己名下的会话、没有就建，一次只走一句（prepare）
+static GUEST: Mutex<()> = Mutex::new(());
+
 /// 取名到登记那一段一次只走一条连接（handshake）
 static NAMING: Mutex<()> = Mutex::new(());
 
@@ -1038,10 +1041,14 @@ impl Capability {
         };
         let session = match params.get("session").and_then(Value::as_str) {
             // 客人：没指明的、focus 都是它自己名下最近的会话（没有就新开）；指明的要是它名下的
-            None | Some("focus") if !self.full() => match sessions::list().into_iter().find(|session| session.owner == self.name) {
-                Some(session) => session.id,
-                None => self.guest_session()?,
-            },
+            None | Some("focus") if !self.full() => {
+                // 几句话并发进来（请求各开线程处理）时只建一段：找和建是一段
+                let _guest = GUEST.lock().unwrap();
+                match sessions::list().into_iter().find(|session| session.owner == self.name) {
+                    Some(session) => session.id,
+                    None => self.guest_session()?,
+                }
+            }
             Some("new") if !self.full() => self.guest_session()?,
             Some(id) if !self.full() => Session::find(id)
                 .filter(|session| session.owner == self.name)

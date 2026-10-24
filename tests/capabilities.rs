@@ -579,8 +579,11 @@ fn sense_brings_mode_thinking_engine_and_images() {
     // 图片随这段话给模型（存档里只记路径，发的时候才读成 base64）
     let user = first["messages"].as_array().unwrap().iter().find(|message| message["role"] == "user").unwrap();
     assert!(user["content"].to_string().contains("data:image/png;base64,iVBORw=="), "{user}");
-    let stored = common::read_sessions(&home, &work)[0]["history"][0]["content"].to_string();
-    assert!(stored.contains("file://") && !stored.contains("base64"), "{stored}");
+    // 一轮做完才存档：等存下来再看
+    let stored =
+        || common::read_sessions(&home, &work).first().map(|session| session["history"][0]["content"].to_string()).unwrap_or_default();
+    assert!(wait_until(30, || stored().contains("file://")), "存档里没有图片路径：{}", stored());
+    assert!(!stored().contains("base64"), "{}", stored());
 }
 
 #[test]
