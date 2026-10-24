@@ -330,8 +330,10 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
         |reason: String| text("edith.sub.failed", &[("name", agent.name.clone()), ("id", agents::short_id(&agent.id)), ("reason", reason)]);
     // 上级停下、到了时限：跟着停
     let finished = Arc::new(AtomicBool::new(false));
+    // 是不是因为到了时限停的（说法不一样）
+    let expired = Arc::new(AtomicBool::new(false));
     {
-        let (cancel, finished, agent) = (cancel.clone(), finished.clone(), agent.clone());
+        let (cancel, finished, agent, expired) = (cancel.clone(), finished.clone(), agent.clone(), expired.clone());
         let started = Instant::now();
         let deadline = agent.deadline.map(Duration::from_secs);
         std::thread::spawn(move || {
@@ -346,7 +348,8 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
                         agent.inbox.lock().unwrap().push(text("edith.sub.deadline", &[]));
                         warned = true;
                     }
-                    if elapsed >= deadline + Duration::from_secs(60) {
+                    if elapsed >= deadline + Duration::from_secs(60) && !cancel.load(Ordering::Relaxed) {
+                        expired.store(true, Ordering::Relaxed);
                         cancel.store(true, Ordering::Relaxed);
                     }
                 }
@@ -389,7 +392,16 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
             history = turn.history;
             if turn.stopped {
                 *agent.history.lock().unwrap() = history;
-                return Err((State::Stopped, "被停掉了".to_string()));
+                // 交回做到一半的（最后写的那段话），上级拿它接着做
+                let partial = friday_core::delivery::final_reply(agent.recorder.lock().unwrap().since(start)).trim().to_string();
+                let mut reason = match agent.deadline.filter(|_| expired.load(Ordering::Relaxed)) {
+                    Some(seconds) => format!("到了时限（{seconds} 秒）又过了 60 秒还没交，停掉了"),
+                    None => "被停掉了".to_string(),
+                };
+                if !partial.is_empty() {
+                    reason.push_str(&format!("。停下前写到：\n{}", partial.chars().take(1500).collect::<String>()));
+                }
+                return Err((State::Stopped, reason));
             }
             if let Some(error) = turn.error {
                 *agent.history.lock().unwrap() = history;
@@ -526,10 +538,14 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
     }
     Some(match name {
         "delegate_task" => {
-            let spec = match agents::task_spec(args) {
+            let mut spec = match agents::task_spec(args) {
                 Ok(spec) => spec,
                 Err(message) => return Some(refuse(message)),
             };
+            // task_spec 不带时限
+            if let Some(deadline) = args.get("deadline_seconds") {
+                spec["deadline_seconds"] = deadline.clone();
+            }
             if let Some(me) = &context.me
                 && spec["task"].as_str().map(str::trim) == Some(me.task.trim())
             {

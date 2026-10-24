@@ -55,6 +55,9 @@ fn mcp_servers_come_from_config() {
     assert!(stdout.contains("demo（项目）") && stdout.contains("工具：echo"), "{}", text(&listed));
     let output = edith(&home, model.port, &work, &["用四肢回个声"]);
     assert!(String::from_utf8_lossy(&output.stdout).contains("四肢说：四肢回声：hi"), "{}", text(&output));
+    // 写了 readOnlyHint 的算只读：不在终端里、没 --auto 也不用批准
+    let output = common::command(&home, model.port, &work, &["用四肢回个声"]).env_remove("EDITH_PERMISSION_MODE").output().unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("四肢说：四肢回声：hi"), "{}", text(&output));
     // 命令行加的默认进本地那层
     let added = edith(&home, model.port, &work, &["mcp", "add", "other", python(), "-u", limb.to_str().unwrap()]);
     assert!(added.status.success(), "{}", text(&added));

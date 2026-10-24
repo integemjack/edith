@@ -448,18 +448,18 @@ fn work(options: Options) -> Result<(), String> {
         }
         let mut line = String::new();
         let read = stdin.lock().read_line(&mut line).unwrap_or(0);
-        // 在等批准：这一行是回答
-        if read > 0 && approval::answer_terminal(&line) {
-            continue;
-        }
-        if read == 0 || line.trim().is_empty() {
-            break;
-        }
-        let urgency = if mind::working(&session.id).is_some() { Urgency::Interject } else { Urgency::Queue };
-        match mind::submit(&session.id, line.trim(), Origin::terminal(), urgency, None) {
-            Ok((mind::Disposition::Interjected, _)) => eprintln!("\x1b[2m（补充进了正在做的这一轮）\x1b[0m"),
-            Ok(_) => {}
-            Err(message) => eprintln!("\x1b[31m{message}\x1b[0m"),
+        // 在等批准：这一行是回答（答完照样等这一轮做完，再打提示符）
+        let answered = read > 0 && approval::answer_terminal(&line);
+        if !answered {
+            if read == 0 || line.trim().is_empty() {
+                break;
+            }
+            let urgency = if mind::working(&session.id).is_some() { Urgency::Interject } else { Urgency::Queue };
+            match mind::submit(&session.id, line.trim(), Origin::terminal(), urgency, None) {
+                Ok((mind::Disposition::Interjected, _)) => eprintln!("\x1b[2m（补充进了正在做的这一轮）\x1b[0m"),
+                Ok(_) => {}
+                Err(message) => eprintln!("\x1b[31m{message}\x1b[0m"),
+            }
         }
         // 刚开始的这一轮先打一会儿，再回来收下一句
         std::thread::sleep(std::time::Duration::from_millis(50));

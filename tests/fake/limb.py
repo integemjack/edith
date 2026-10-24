@@ -11,7 +11,7 @@ for line in sys.stdin:
     if method == "initialize":
         result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "demo", "version": "1"}}
     elif method == "tools/list":
-        result = {"tools": [{"name": "echo", "description": "原样返回 text", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+        result = {"tools": [{"name": "echo", "description": "原样返回 text", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
     elif method == "tools/call":
         result = {"content": [{"type": "text", "text": "四肢回声：" + msg["params"]["arguments"].get("text", "")}]}
     else:

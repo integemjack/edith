@@ -32,7 +32,8 @@
   改文件（`write_file`、`edit_file`）前，这个会话要读过它、读完之后没被改过（别的大脑、命令、用户），不然让模型先重读——不靠锁。
 - **网页**（`src/web.rs`）：`web_search` 同时查 Bing、DuckDuckGo、百度（照 Friday 的做法：按浏览器的样子请求、各自解析、轮流合并去重；
   `config.json` 写了 `"searxng"` 就只问它）；`fetch_url` 按页面编码解码，取标题、正文（标题层级、列表）和编号的链接，
-  要 JS 才有内容的页面用本机的 Chrome / Edge 无头渲染后再读。
+  要 JS 才有内容的页面、回 403 / 429 / 503 的挡爬虫页（Cloudflare「请稍候…」）用本机的 Chrome / Edge 无头渲染后再读
+  （渲染时用普通浏览器的 UA、关掉自动化标记，不然也会被挡）。
 - **MCP**（`src/mcp.rs`）：读 `~/.edith/mcp.json`、`.mcp.json`、`.edith/mcp.local.json` 直接连，客户端是 friday-core 的 `mcp_client`。
 - **权限**（`src/permissions.rs`）：主令牌（登记里，给自己开的程序）全权；配置里的能力各发专用令牌，名字由大脑定，权限按 `permissions`；
   中转的子连接（`as`）权限收窄。一轮能用哪些工具看交来这句话的连接。

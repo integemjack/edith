@@ -198,7 +198,8 @@ pub fn attach(name: &str, config: Value) -> Result<Arc<Limb>, String> {
                 return Err(failure.message);
             }
         };
-        tools.extend(page.get("tools").and_then(Value::as_array).into_iter().flatten().map(mcp_client::normalize_tool));
+        // list_tools 已经规整过（再规整一遍会丢掉 readOnlyHint：它从 annotations 里取）
+        tools.extend(page.get("tools").and_then(Value::as_array).into_iter().flatten().cloned());
         cursor = page.get("nextCursor").and_then(Value::as_str).filter(|next| !next.is_empty()).map(str::to_string);
         if cursor.is_none() {
             break;

@@ -634,14 +634,17 @@ fn render(url: &str) -> Option<String> {
     let program = browser()?;
     let profile = std::env::temp_dir().join(format!("edith-browser-{}", std::process::id()));
     let mut child = Command::new(program)
+        // 无头模式的 UA 带 HeadlessChrome、还标着自动化：Cloudflare 这类挡爬虫的会停在「请稍候…」——换成普通浏览器的样子
         .args([
             "--headless=new",
             "--disable-gpu",
             "--no-first-run",
             "--no-default-browser-check",
-            "--virtual-time-budget=8000",
+            "--disable-blink-features=AutomationControlled",
+            "--virtual-time-budget=15000",
             "--dump-dom",
         ])
+        .arg(format!("--user-agent={BROWSER}"))
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg(url)
         .stdin(Stdio::null())
@@ -710,17 +713,30 @@ pub fn fetch(url: &str, offset: Option<i64>, private_ok: bool) -> Outcome {
     }
     let body = decode(&bytes, &content_type);
     let html = content_type.contains("html") || body.trim_start().starts_with('<');
+    let mut body = body;
+    let mut rendered = false;
     if !(200..300).contains(&status) {
-        let text = if html { readable(&body, url).1 } else { body };
-        return Outcome { ok: false, text: format!("HTTP {status}\n{}", tool_files::truncate(&text)) };
+        // 403 / 429 / 503 的网页多半是挡爬虫的验证页：本机有浏览器就用它打开一遍，读得到正文就照常交回
+        let challenged = html && matches!(status, 401 | 403 | 429 | 503);
+        let dom = if challenged { render(url) } else { None };
+        match dom.filter(|dom| readable(dom, url).1.chars().count() >= 200) {
+            Some(dom) => {
+                body = dom;
+                rendered = true;
+            }
+            None => {
+                let text = if html { readable(&body, url).1 } else { body };
+                return Outcome { ok: false, text: format!("HTTP {status}\n{}", tool_files::truncate(&text)) };
+            }
+        }
     }
     if !html {
         return Outcome { ok: true, text: tool_files::page(&body, offset) };
     }
     let (mut title, mut text, mut links) = readable(&body, url);
-    let mut rendered = false;
     // 正文几乎是空的、页面带脚本：多半要 JS 渲染
-    if text.chars().count() < 200
+    if !rendered
+        && text.chars().count() < 200
         && body.contains("<script")
         && let Some(dom) = render(url)
     {
