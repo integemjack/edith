@@ -164,4 +164,4 @@ jobs:
           gh release create "$tag" dist/* --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "EDITH ${tag}" --notes "$notes"
           # 只留最新的一个 Release（标签留着）
           gh release list --repo "${{ github.repository }}" --limit 100 --json tagName -q '.[].tagName' \
-            | grep -vx "$tag" | while read -r old; do gh release delete "$old" --repo "${{ github.repository }}" -y; done
+            | { grep -vx "$tag" || true; } | while read -r old; do gh release delete "$old" --repo "${{ github.repository }}" -y; done
