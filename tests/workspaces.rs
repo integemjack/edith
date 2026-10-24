@@ -80,9 +80,22 @@ impl Drop for Running {
 }
 
 fn start_run(home: &Path, port: u16, dir: &Path) -> Running {
-    let before = registry(home).len();
-    let child = command(home, port, dir, &["run"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
-    assert!(wait_until(20, || registry(home).len() > before), "登记没出现");
+    let before: Vec<Value> = registry(home);
+    let log = home.join(format!("run-{}.log", before.len()));
+    let stderr = std::fs::File::create(&log).unwrap();
+    let mut child = command(home, port, dir, &["run"]).stdout(std::process::Stdio::null()).stderr(stderr).spawn().unwrap();
+    let pid = child.id();
+    // 认它自己的那份登记（进程号），不按条数：别的登记可能同时被清掉
+    let appeared = wait_until(20, || registry(home).iter().any(|entry| entry["pid"] == pid));
+    if !appeared {
+        let exited = child.try_wait().ok().flatten();
+        let _ = child.kill();
+        panic!(
+            "登记没出现（进程 {pid}，退出：{exited:?}）\n之前的登记：{before:?}\n现在的登记：{:?}\n它的输出：{}",
+            registry(home),
+            std::fs::read_to_string(&log).unwrap_or_default()
+        );
+    }
     Running(child)
 }
 
