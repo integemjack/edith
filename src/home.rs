@@ -74,15 +74,18 @@ pub fn project_key(workspace: &Path) -> String {
     format!("{}-{hash}", readable.trim_matches('-'))
 }
 
-/// 从 start 往上找工作目录：先碰到有 .edith/ 的目录就是它（全局数据目录那个不算）；碰到 git 仓库的根（有 .git，
+/// 从 start 往上找工作目录：先碰到有 .edith/ 的目录就是它（全局数据目录那个不算，家目录的 `~/.edith` 也不算——那是默认的全局数据目录，
+/// 不说明家目录是个项目；EDITH_HOME 换到别处时它照样在）；碰到 git 仓库的根（有 .git，
 /// git worktree 的根是个 .git 文件）就停在那里——每个 worktree 自成一个工作目录，不会找到外面主仓库的 .edith；
 /// 都没有用 start 本身
 pub fn find_workspace(start: &Path) -> PathBuf {
     let global = std::fs::canonicalize(dir()).unwrap_or_else(|_| dir());
+    let user = std::fs::canonicalize(user_home()).unwrap_or_else(|_| user_home());
     let mut current = Some(start);
     while let Some(candidate) = current {
         let data = candidate.join(".edith");
-        if data.is_dir() && std::fs::canonicalize(&data).unwrap_or(data) != global {
+        let is_home = std::fs::canonicalize(candidate).is_ok_and(|real| real == user);
+        if data.is_dir() && !is_home && std::fs::canonicalize(&data).unwrap_or(data) != global {
             return candidate.to_path_buf();
         }
         if candidate.join(".git").exists() {

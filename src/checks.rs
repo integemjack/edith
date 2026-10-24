@@ -244,6 +244,8 @@ mod tests {
 
     #[test]
     fn spots_unverified_writes_and_plans() {
+        // 提示词会装进数据目录：别写进真的 ~/.edith
+        unsafe { std::env::set_var("EDITH_HOME", std::env::temp_dir().join(format!("edith-unit-{}", std::process::id()))) };
         crate::brain::setup_prompts();
         let wrote = record(&[
             Event::Tool { id: "1".into(), name: "write_file".into(), arguments: json!({ "path": "a.py", "content": "x" }) },

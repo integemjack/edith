@@ -340,3 +340,18 @@ fn upgrades_old_data() {
     let tools = edith(&home, model.port, &work, &["mcp"]);
     assert!(String::from_utf8_lossy(&tools.stdout).contains("工具：echo"), "{}", text(&tools));
 }
+
+#[test]
+fn home_dot_edith_is_not_a_project() {
+    let (work, home) = scratch("homedir");
+    let model = fake_model(&home.join("requests.jsonl"));
+    // 用户的家目录里有 ~/.edith（默认的全局数据目录）、EDITH_HOME 换到了别处：家目录下的目录不该往上找到家目录
+    let user = work.join("user");
+    let project = user.join("proj");
+    std::fs::create_dir_all(user.join(".edith")).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    let output = command(&home, model.port, &project, &["只聊天"]).env("HOME", &user).env("USERPROFILE", &user).output().unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(session_files(&home, &project), 1);
+    assert_eq!(session_files(&home, &user), 0);
+}
