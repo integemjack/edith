@@ -354,8 +354,22 @@ fn task(options: &Options) -> Result<Option<String>, String> {
     let mut task = options.words.join(" ");
     let piped = !std::io::stdin().is_terminal();
     if piped {
-        let mut input = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).map_err(|error| error.to_string())?;
+        // 管道送进来的也算要做的事（cat 报错.log | edith "看看怎么回事"）。给了参数时最多等 1.5 秒：
+        // 从脚本、定时任务、别的智能体里起的 edith，标准输入常常是一直不关的管子，读到底会永远等下去
+        let (sender, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut input = String::new();
+            let read = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).map(|_| input).map_err(|error| error.to_string());
+            let _ = sender.send(read);
+        });
+        let input = if task.trim().is_empty() {
+            received.recv().map_err(|error| error.to_string())??
+        } else {
+            match received.recv_timeout(std::time::Duration::from_millis(1500)) {
+                Ok(read) => read?,
+                Err(_) => String::new(),
+            }
+        };
         if !input.trim().is_empty() {
             task = if task.is_empty() { input } else { format!("{task}\n\n{input}") };
         }

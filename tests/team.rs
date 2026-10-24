@@ -74,3 +74,39 @@ fn workflow_runs_steps_in_order() {
     let second = log.find("第二步：接着做").unwrap();
     assert!(first < second);
 }
+
+#[test]
+fn parallel_results_come_back_together() {
+    let (work, home) = scratch("parallel");
+    let model = fake_model(&home.join("requests.jsonl"));
+    // 一次并联派出的都做完才一起交回：一个回来开一轮，每轮都要把整段上下文再发一遍
+    let output = edith(&home, model.port, &work, &["并联测试"]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("验收通过：2 个一起回来了"), "{}", text(&output));
+    let main_turns = requests(&home).lines().filter(|line| !line.contains("你是 EDITH 派出的临时子 Agent")).count();
+    assert_eq!(main_turns, 3, "派、派完收尾、一起验收");
+}
+
+#[test]
+fn stdin_that_never_closes_does_not_hang() {
+    let (work, home) = scratch("stdin");
+    let model = fake_model(&home.join("requests.jsonl"));
+    // 从脚本、别的智能体里起的：标准输入是一直不关的管子，给了参数就不该一直等它
+    let mut child = common::command(&home, model.port, &work, &["只聊天"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _stdin = child.stdin.take();
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(20) {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let finished = child.try_wait().unwrap().is_some();
+    if !finished {
+        let _ = child.kill();
+    }
+    assert!(finished, "标准输入不关就一直卡着");
+}

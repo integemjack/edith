@@ -144,3 +144,8 @@
 @@ stops.off-note
 @// items：不用停下来问的那几类（EDITH 没有这个设置，代码给空）
 {{items}}
+
+@@ edith.sub.parallel
+@// 一次并联派出的都交回了，一起送回给主智能体。count：几个；results：每个的结果（空一行隔开）
+[并联派出的 {{count}} 个子 Agent 都交回了，等你验收、汇总]
+{{results}}

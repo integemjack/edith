@@ -84,9 +84,11 @@ worktree 里的会话记在仓库名下，回到仓库 `-c`、`edith sessions` �
 
 照 Friday（`src/team.rs`，规则在 friday-core 的 `agents`、`delivery`、`liveness`）：
 - `delegate_task` / `run_parallel_tasks`：派临时子 Agent。主智能体派的**在后台跑**，立刻返回 id，这一轮可以先结束；做完的结果作为一段话交回
-  这个会话（正在干活就补充进这一轮，闲着就开始新的一轮去验收）。子 Agent 也能往下派（最多 3 层），等下级做完再返回。
+  这个会话（正在干活就补充进这一轮，闲着就开始新的一轮去验收）；一次 `run_parallel_tasks` 派出的全部做完一起交回，排着的几段交回也并成一轮
+  ——一个回来开一轮验收，每轮都要把整段上下文再发一遍（真模型测：6 次请求 3.2 万 token → 4 次 2.1 万）。子 Agent 也能往下派（最多 3 层），等下级做完再返回。
 - `run_workflow`：主智能体给出目标和步骤（任务、验收标准 `check`、依赖 `after`），依赖都做完的同时开始，写了 after 的带着前面的结果再开始，
-  前置没做成的不做；全部结束后各步结果连同验收标准一起交回验收。
+  前置没做成的不做；全部结束后各步结果连同验收标准一起交回验收。任务里说要用前面的结果（「根据上一步…」）却没写 after 的退回去让它补上
+  （真模型测时 glm-5.3-flash 三步都没写 after，结果同时开始）；没起名字的步骤用它的 id 当名字。
 - `rework_agent`：验收不合格打回，原来那个子 Agent 带着它的上下文接着改；同一轮打回的几个都改完一起交回。
 - `read_agent_log`、`message_agent`、`stop_agent`：看运行记录、追加指示、停掉（停掉工作流的 id 就停整个工作流）。停下这一轮（Ctrl+C、`sessions.stop`）时它派出去的也停。
 - 子 Agent 看不到对话：系统提示（`edith.sub`）写明它是临时子 Agent、交回结果的格式（结论 / 依据 / 改动 / 未完成与风险），任务后面附用户的原话。
@@ -116,6 +118,9 @@ edith capabilities [add | remove]       管能力（默认本地那层；--proje
 edith mcp [add | add-url | remove]      管 MCP 服务（同上）
 edith tools [install | remove]          共用的工具（edith.tools）
 ```
+
+管道送进来的也算要做的事（`cat 报错.log | edith "看看怎么回事"`）：给了参数时最多等 1.5 秒（从脚本、定时任务、别的智能体里起的 edith，
+标准输入常常是一直不关的管子），没给参数就读到底。
 
 大脑用哪个模型：`~/.edith/config.json`（`{"baseURL", "apiKey", "model", "thinking"?, "temperature"?, "enableThinking"?, "supportsVision"?, "extraBody"?}`），
 环境变量 `EDITH_BASE_URL` / `EDITH_API_KEY` / `EDITH_MODEL` 盖掉同名的。

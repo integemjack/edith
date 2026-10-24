@@ -312,6 +312,18 @@ fn work(session_id: String, first: Input) {
             continue;
         }
         match state.queue.pop_front() {
+            // 排着的几段都是子智能体交回的：并成一轮验收（不然每段各开一轮，整段上下文发好几遍）
+            Some(mut next) if next.origin.kind == "agent" => {
+                while state
+                    .queue
+                    .front()
+                    .is_some_and(|following| following.origin.kind == "agent" && following.origin.tools == next.origin.tools)
+                {
+                    let following = state.queue.pop_front().unwrap();
+                    next.text = format!("{}\n\n{}", next.text, following.text);
+                }
+                input = next;
+            }
             Some(next) => input = next,
             None => {
                 state.working = false;

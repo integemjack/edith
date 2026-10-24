@@ -95,8 +95,8 @@ type Running = HashMap<String, (String, Arc<AtomicBool>)>;
 static WORKFLOWS: LazyLock<Mutex<Running>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 /// 会话里还有几件后台的事没交回（交回时会话已经在干活了才减：命令行等它们都交回再退出）
 static PENDING: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-/// 同一轮打回的：会话:轮 → (还在改的 id, 改完的结果)
-type Batch = (HashSet<String>, Vec<String>);
+/// 一起交回的一批（同一轮打回的、一次并联派出的）：键 → (还在做的 id, 做完的结果, 交回时的开头那段提示词)
+type Batch = (HashSet<String>, Vec<String>, &'static str);
 static BATCHES: LazyLock<Mutex<HashMap<String, Batch>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn pending(session: &str, change: isize) {
@@ -357,10 +357,13 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
     let outcome = (|| {
         let Some(_slot) = acquire(&cancel) else { return Err((State::Stopped, "还没开始就被停掉了".to_string())) };
         *agent.state.lock().unwrap() = State::Running;
-        notice(
-            agent,
-            format!("子 Agent「{}」开始：{}", agent.name, agent.task.lines().next().unwrap_or("").chars().take(60).collect::<String>()),
-        );
+        let start = agent.recorder.lock().unwrap().mark();
+        if start == 0 {
+            let first = agent.task.lines().next().unwrap_or("").chars().take(60).collect::<String>();
+            notice(agent, format!("子 Agent「{}」开始：{first}", agent.name));
+        } else {
+            notice(agent, format!("子 Agent「{}」按验收意见接着改", agent.name));
+        }
         let model = Model::load().map_err(|error| (State::Failed, error))?;
         let context = Context {
             session: agent.session.clone(),
@@ -376,7 +379,6 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
                 depth: agent.depth,
             }),
         };
-        let start = agent.recorder.lock().unwrap().mark();
         let mut history = std::mem::take(&mut *agent.history.lock().unwrap());
         let mut message = prompt;
         let mut checked = HashSet::new();
@@ -455,16 +457,16 @@ fn background(agent: Arc<Agent>, prompt: String, batch: Option<String>) {
 fn finish_batch(key: &str, agent: &Agent, report: String) {
     let ready = {
         let mut batches = BATCHES.lock().unwrap();
-        let Some((waiting, done)) = batches.get_mut(key) else { return deliver(&agent.session, &report, &agent.tools) };
+        let Some((waiting, done, _)) = batches.get_mut(key) else { return deliver(&agent.session, &report, &agent.tools) };
         waiting.remove(&agent.id);
         done.push(report);
-        if waiting.is_empty() { batches.remove(key).map(|(_, done)| done) } else { None }
+        if waiting.is_empty() { batches.remove(key).map(|(_, done, header)| (done, header)) } else { None }
     };
-    if let Some(done) = ready {
+    if let Some((done, header)) = ready {
         let report = if done.len() == 1 {
             done.into_iter().next().unwrap()
         } else {
-            text("edith.sub.batch", &[("count", done.len().to_string()), ("results", done.join("\n\n"))])
+            text(header, &[("count", done.len().to_string()), ("results", done.join("\n\n"))])
         };
         deliver(&agent.session, &report, &agent.tools);
     }
@@ -558,13 +560,17 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
             if context.me.is_none() {
                 let lines: Vec<String> =
                     agents.iter().map(|agent| format!("- 「{}」（id：{}）", agent.name, agents::short_id(&agent.id))).collect();
+                // 一起交回：一个个回来各开一轮验收，每轮都要把整段上下文再发一遍
+                let key = format!("parallel:{}", uuid::Uuid::new_v4().simple());
+                let ids = agents.iter().map(|agent| agent.id.clone()).collect();
+                BATCHES.lock().unwrap().insert(key.clone(), (ids, Vec::new(), "edith.sub.parallel"));
                 for agent in &agents {
-                    background(agent.clone(), first_prompt(agent, &agent.task), None);
+                    background(agent.clone(), first_prompt(agent, &agent.task), Some(key.clone()));
                 }
                 Outcome {
                     ok: true,
                     text: format!(
-                        "已在后台派出 {} 个子 Agent，做完的结果会陆续自动送回来：\n{}\n不用等：先做别的，或者用一两句话告诉用户怎么分的工，然后结束这一轮。",
+                        "已在后台派出 {} 个子 Agent，全部做完后结果一起送回来：\n{}\n不用等：先做别的，或者用一两句话告诉用户怎么分的工，然后结束这一轮。",
                         agents.len(),
                         lines.join("\n")
                     ),
@@ -604,7 +610,13 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
             let prompt = text("edith.sub.rework", &[("feedback", feedback)]);
             if context.me.is_none() {
                 let key = format!("{}:{}", context.session, context.turn);
-                BATCHES.lock().unwrap().entry(key.clone()).or_default().0.insert(agent.id.clone());
+                BATCHES
+                    .lock()
+                    .unwrap()
+                    .entry(key.clone())
+                    .or_insert_with(|| (HashSet::new(), Vec::new(), "edith.sub.batch"))
+                    .0
+                    .insert(agent.id.clone());
                 background(agent.clone(), prompt, Some(key));
                 Outcome {
                     ok: true, text: format!("已打回「{}」，它在后台接着改；这一轮打回的都改完会一起送回来。", agent.name)
@@ -655,14 +667,61 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
 
 // MARK: - 工作流
 
+/// 任务里说要用前面的结果、却没写 after 的步骤（会和前面的同时开始，拿不到前面的结果）
+const UPSTREAM_MARKERS: &[&str] = &[
+    "上一步",
+    "前一步",
+    "上一个步骤",
+    "前面的步骤",
+    "前面步骤",
+    "上面的步骤",
+    "上一步骤",
+    "之前的步骤",
+    "前面整理",
+    "上面整理",
+    "前一步骤",
+    "previous step",
+    "prior step",
+    "earlier step",
+];
+
+fn missing_after(args: &Map<String, Value>) -> Option<String> {
+    let steps = args.get("steps")?.as_array()?;
+    let ids: Vec<&str> = steps.iter().filter_map(|step| step.get("id").and_then(Value::as_str)).collect();
+    steps.iter().enumerate().skip(1).find_map(|(index, step)| {
+        let task = step.get("task").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        let after = step.get("after").filter(|after| !after.is_null() && after.as_array().is_none_or(|list| !list.is_empty()));
+        let id = step.get("id").and_then(Value::as_str).unwrap_or("");
+        (after.is_none() && UPSTREAM_MARKERS.iter().any(|marker| task.contains(marker))).then(|| {
+            format!(
+                "步骤「{id}」的任务里要用前面步骤的结果，却没写 after：没写 after 的步骤一开始就同时做，拿不到前面的结果。要先后做的写上依赖（比如 \"after\": [\"{}\"]），前面的做完、结果会自动附进它的任务；互不依赖的才不写。改好再调 run_workflow",
+                ids.get(index - 1).copied().unwrap_or("前一步的 id")
+            )
+        })
+    })
+}
+
 fn start_workflow(args: &Map<String, Value>, context: &Context, cwd: &Path) -> Outcome {
+    if let Some(message) = missing_after(args) {
+        return refuse(message);
+    }
     let plan = match agents::workflow_plan(args) {
         Ok(plan) => plan,
         Err(message) => return refuse(message),
     };
     let goal = plan["goal"].as_str().unwrap_or("").to_string();
     let steps: Vec<Value> = plan["steps"].as_array().cloned().unwrap_or_default();
-    let agents: Vec<Arc<Agent>> = steps.iter().map(|step| create(&step["spec"], context, cwd)).collect();
+    // 没起名字的步骤用它的 id（比从任务里截一段好认）
+    let agents: Vec<Arc<Agent>> = steps
+        .iter()
+        .map(|step| {
+            let mut spec = step["spec"].clone();
+            if spec.get("name").is_none() {
+                spec["name"] = step["key"].clone();
+            }
+            create(&spec, context, cwd)
+        })
+        .collect();
     let id = uuid::Uuid::new_v4().simple().to_string();
     let stop = Arc::new(AtomicBool::new(false));
     WORKFLOWS.lock().unwrap().insert(id.clone(), (context.session.clone(), stop.clone()));
@@ -769,5 +828,27 @@ fn run_workflow(_id: &str, goal: &str, steps: &[Value], agents: &[Arc<Agent>], s
                 Err(_) => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn workflow_steps_that_need_earlier_results_must_say_so() {
+        let args = |after: serde_json::Value| {
+            json!({ "goal": "g", "steps": [
+                { "id": "read", "task": "读 notes.md", "check": "c" },
+                { "id": "write", "task": "根据上一步整理出的清单写 todo.py", "check": "c", "after": after },
+            ]})
+            .as_object()
+            .unwrap()
+            .clone()
+        };
+        let refused = super::missing_after(&args(json!(null))).expect("该退回");
+        assert!(refused.contains("「write」") && refused.contains("\"read\""), "{refused}");
+        assert!(super::missing_after(&args(json!([]))).is_some());
+        assert!(super::missing_after(&args(json!(["read"]))).is_none());
     }
 }

@@ -80,6 +80,13 @@ class Handler(BaseHTTPRequestHandler):
                 events.append(say("验收通过：" + ("改好的也收到了" if "按意见改好了" in last_user else "子任务做完了")))
             else:
                 events.append(call("delegate_task", {"task": "子任务：把这件事做完", "name": "小助手"}))
+        elif "并联测试" in first_user:
+            if "都交回了" in last_user:
+                events.append(say("验收通过：%d 个一起回来了" % last_user.count("交回结果")))
+            elif tools_since:
+                events.append(say("派出去了，等它们回来。"))
+            else:
+                events.append(call("run_parallel_tasks", {"tasks": [{"task": "子任务甲", "name": "甲"}, {"task": "子任务乙", "name": "乙"}]}))
         elif "工作流测试" in first_user:
             if "等你验收" in last_user:
                 ok = "拿到了前一步的结果" in last_user
