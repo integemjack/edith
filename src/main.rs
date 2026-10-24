@@ -8,6 +8,7 @@ mod approval;
 mod attach;
 mod brain;
 mod capabilities;
+mod changes;
 mod checks;
 mod deferred;
 mod downloads;

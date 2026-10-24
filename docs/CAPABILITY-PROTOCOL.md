@@ -219,6 +219,17 @@ EDITH                                  能力
 | `sessions.get` | `{id}` | 会话全文：上面的字段 + `history`（OpenAI 格式的历史）+ `working`（在干的那一轮的 id 或 `null`）+ `focus` |
 | `sessions.focus` | `{id}` | `{focus}`：设焦点 |
 | `sessions.stop` | `{id?}` | `{stopping}`：停下正在干的一轮（排着的也不干了）；不给 `id` 是焦点会话 |
+| `sessions.remove` | `{id}` | `{removed}`：删掉一段会话（在干活的先停下）：存档、读过的文件、会话改动的基线、子 Agent 的运行记录一起删 |
+| `agents.list` | `{session?}` | `[Agent]`：这个进程里的子 Agent（在跑的、跑过的），带运行记录 `transcript`；给了 `session` 只要那段会话的。Agent 见 §7 的 `agent` 事件 |
+| `agents.stop` | `{id}` | `{name}`：停掉一个子 Agent（它往下派的跟着停；同 stop_agent） |
+| `agents.send` | `{id, text}` | `{name}`：给在做的子 Agent 追加指示（同 message_agent，它做完当前这一步就看到） |
+| `changes.list` | `{session}` | `{files:[{path, status, known, text, added, removed}]}`：这段会话（含它派的子 Agent）改了哪些文件——净改动，`status` 是 A / M / D，不知道原文的 `known: false`、增删是 -1 |
+| `changes.diff` | `{session, path}` | `{path, status, known, binary, tooLarge, old?, new?}`：一个文件的改动（基线和现在的全文，各最多 1 MB）；这段会话没动过它回 `-32002` |
+| `changes.revert` | `{session, path?}` | `{failed:[{path, error}]}`：撤销——改回这段会话第一次动它之前的样子，新建的删掉；不给 `path` 撤全部；撤不了的（不知道原文）列在 `failed` 里 |
+
+会话改动的基线（同 Friday 的 SessionChanges，存的格式一样）在 `<项目数据目录>/changes/<会话>/`：write_file / edit_file 写之前记原文；
+run_shell 执行前后各看一遍工作目录和命令里写到的路径，新建的记「原来没有」，改的、删的拿执行前每行的指纹到 git 里找 HEAD / 暂存区对得上的那一版，
+找不到只知道改过（撤不了）。超过 1 MB 的不存原文，一段会话最多 1000 个文件。
 
 ### 4.5 `act.progress`：动作的进度（通知）
 
@@ -297,7 +308,8 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 }}
 ```
 
-`call` 是哪一个工具调用（同 `tool` 事件的 `id`）：界面按它把「允许 / 拒绝」放在那张工具卡片上。
+`call` 是哪一个工具调用（同 `tool` 事件的 `id`）：界面按它把「允许 / 拒绝」放在那张工具卡片上。子 Agent 要做的还带 `agent`（它的 id）：
+那张卡片在它的运行记录里（`agent.event` 的 `tool`），不在主会话这一轮。
 
 回话：`{"decision": "allow" | "always" | "deny", "reason"?: "…"}`。`always`：这个会话里同类的都行；`deny` 的 `reason` 交给模型。
 最多等 10 分钟，这一轮被停下就不等了。没人能批的就不做——`edith run`（一直开着的大脑）例外：等能批准的连上来再问它（同样最多 10 分钟，
@@ -325,8 +337,16 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 | `stats` | `{promptTokens, generatedTokens, cachedTokens, promptTime, generateTime, contextParts, contextLimit, contextCompactAt}` | 每段请求的用量（时间是秒；`contextParts` 是上下文各部分的 token：system / tools / user / replies / toolUse） |
 | `notice` | `{text, call?, agent?}` | 顺带说一句：重试、压了上下文、收到补充、动作进度（带 `call`）、交付检查追了提醒、子智能体开始 / 交回 / 被打回（带 `agent`：子智能体的 id） |
 | `done` | `{answer, stopped, error}` | 这一轮结束 |
+| `agent` | Agent | 一个子 Agent 派出来、开始、开始 / 用完一个工具、交回、没做成、被停掉、被打回（状态变了就推一次） |
+| `agent.event` | `{agent, type, data}` | 子 Agent 干活时的一步：`type` 是 `text` / `thinking` / `tool` / `result` / `notice`，`data` 同主会话的这几种事件 |
 
-想边生成边说话的语音能力订 `text` 和 `done`；界面订 `*`；只关心结果的订 `done`。
+**Agent**：`{id, name, role, task, session, parent, call, slot, kind, depth, state, started, finished, steps, activity, reply}`——`parent` 是派它的上级子 Agent（主智能体派的是 `null`），
+`call` 是派它的那个工具调用（上级的 `delegate_task` / `run_parallel_tasks` / `run_workflow` 的调用 id），`slot` 是那一批里第几个，`kind` 是 `delegate` / `parallel` / `workflow`；
+`state` 是 `waiting`（排队等名额或打回后等着）/ `running` / `done` / `failed` / `stopped`；`activity` 是 `{kind: generating / tool / queued, title?}`（`title` 是工具名）；
+`reply` 是它最后交出的话（没做成的是原因）。状态一变 EDITH 就把它连同运行记录 `transcript`（`[{type: text / thinking, text} | {type: tool, call, name, arguments, status, result}]`）
+存进 `<项目数据目录>/agents/<会话>/<id>.json`，界面重新打开时从这里读回来（打回要的上下文只在这个进程里）。
+
+想边生成边说话的语音能力订 `text` 和 `done`；界面订 `*`；只关心结果的订 `done`；要画子 Agent 的（Agent 树）再订 `agent`、`agent.event`。
 
 ## 8. 配置：`capabilities.json`
 

@@ -184,6 +184,8 @@ pub fn run(
             if let Some(refusal) = stale(session, &target) {
                 return Some(Outcome::failed(refusal));
             }
+            // 会话改动：第一次动它之前的样子记成基线（changes.rs）
+            crate::changes::before_write(session, &target);
             let outcome = if name == "write_file" {
                 output(tool_files::write_file(&target, text(arguments, "content").unwrap_or("")))
             } else {
@@ -191,6 +193,8 @@ pub fn run(
             };
             if outcome.ok {
                 remember(session, &target);
+                // 同时跑着的命令（并行的子智能体）不把它算成命令改的
+                friday_core::file_changes::note_written(&target, &tool_files::slash(&home::user_home()));
             }
             outcome
         }
@@ -219,7 +223,16 @@ pub fn run(
             int(arguments, "count").unwrap_or(8).max(1) as usize,
         ),
         "fetch_url" => crate::web::fetch(text(arguments, "url").unwrap_or(""), int(arguments, "offset"), private_ok),
-        "run_shell" => run_shell(text(arguments, "command").unwrap_or(""), int(arguments, "timeout_seconds"), cwd, cancel),
+        "run_shell" => {
+            // 会话改动：执行前后各看一遍，命令动了的文件记基线（changes.rs）
+            let command = text(arguments, "command").unwrap_or("");
+            let home_dir = tool_files::slash(&home::user_home());
+            let snapshot = friday_core::file_changes::before(command, &working, &home_dir, &working);
+            let outcome = run_shell(command, int(arguments, "timeout_seconds"), cwd, cancel);
+            let (_, changed) = friday_core::file_changes::after(&snapshot);
+            crate::changes::note_shell(session, &changed);
+            outcome
+        }
         _ => return None,
     })
 }

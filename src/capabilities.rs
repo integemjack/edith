@@ -42,7 +42,8 @@ const DEFAULT_ACTION_TIMEOUT: u64 = 600;
 /// 动作的工具名：<能力名>__<动作名>
 pub const SEPARATOR: &str = "__";
 /// 能被订阅的事件
-pub const EVENT_TYPES: &[&str] = &["turn.started", "input", "text", "thinking", "tool", "result", "stats", "notice", "done"];
+pub const EVENT_TYPES: &[&str] =
+    &["turn.started", "input", "text", "thinking", "tool", "result", "stats", "notice", "done", "agent", "agent.event"];
 
 /// 一个连着的能力
 pub struct Capability {
@@ -727,8 +728,9 @@ impl Capability {
         let allowed = match method {
             "sense" => self.grant.sense,
             "ask" => self.grant.ask,
-            "sessions.list" | "sessions.get" => self.grant.sessions >= Sessions::Read,
-            "sessions.create" | "sessions.focus" | "sessions.stop" => self.grant.sessions == Sessions::All,
+            "sessions.list" | "sessions.get" | "agents.list" | "changes.list" | "changes.diff" => self.grant.sessions >= Sessions::Read,
+            "sessions.create" | "sessions.focus" | "sessions.stop" | "sessions.remove" | "agents.stop" | "agents.send"
+            | "changes.revert" => self.grant.sessions == Sessions::All,
             _ => true,
         };
         if allowed {
@@ -816,6 +818,59 @@ impl Capability {
                     return Err((protocol::NOT_PERMITTED, "没有权限：只能停下自己名下的会话".into()));
                 }
                 Ok(json!({ "stopping": mind::stop(&id) }))
+            }
+            "sessions.remove" => {
+                // 删掉一段会话（在干活的先停下）：存档、改动基线、子 Agent 的运行记录一起删
+                let id = params.get("id").and_then(Value::as_str).ok_or_else(|| invalid("要给 id"))?;
+                let session =
+                    Session::find(id).filter(|session| self.owns(&session.id)).ok_or((protocol::NO_SESSION, format!("没有会话 {id}")))?;
+                // 停下后等这一轮收完（它结束时会存档，删早了又被写回来）；不等派出去的子 Agent（停了，交回时会话已经没了）
+                if mind::stop(&session.id) {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while mind::working(&session.id).is_some() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+                Ok(json!({ "removed": sessions::remove(&session.id) }))
+            }
+            // 子 Agent（team.rs）：在跑的、它们的运行记录；停掉、追加指示
+            "agents.list" => {
+                let session = params.get("session").and_then(Value::as_str);
+                if session.is_some_and(|session| !self.owns(session)) {
+                    return Err((protocol::NOT_PERMITTED, "没有权限：只能看自己名下会话的子 Agent".into()));
+                }
+                let agents = crate::team::list(session);
+                Ok(Value::Array(agents.into_iter().filter(|agent| self.owns(agent["session"].as_str().unwrap_or(""))).collect()))
+            }
+            "agents.stop" | "agents.send" => {
+                let id = params.get("id").and_then(Value::as_str).ok_or_else(|| invalid("要给 id"))?;
+                let session = crate::team::session_of(id).ok_or((protocol::NO_SESSION, format!("没有子 Agent {id}")))?;
+                if !self.owns(&session) {
+                    return Err((protocol::NOT_PERMITTED, "没有权限：只能管自己名下会话的子 Agent".into()));
+                }
+                if method == "agents.stop" {
+                    return Ok(json!({ "name": crate::team::stop(id) }));
+                }
+                let text = params
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .ok_or_else(|| invalid("要给 text"))?;
+                crate::team::send(id, text).map(|name| json!({ "name": name })).map_err(|message| (protocol::INVALID_PARAMS, message))
+            }
+            // 会话改动（changes.rs）：改了哪些文件、改动、撤销
+            "changes.list" | "changes.diff" | "changes.revert" => {
+                let id = params.get("session").and_then(Value::as_str).ok_or_else(|| invalid("要给 session"))?;
+                let session =
+                    Session::find(id).filter(|session| self.owns(&session.id)).ok_or((protocol::NO_SESSION, format!("没有会话 {id}")))?;
+                let path = params.get("path").and_then(Value::as_str).filter(|path| !path.is_empty());
+                match method {
+                    "changes.list" => Ok(crate::changes::list(&session.id)),
+                    "changes.diff" => crate::changes::diff(&session.id, path.ok_or_else(|| invalid("要给 path"))?)
+                        .map_err(|message| (protocol::NO_SESSION, message)),
+                    _ => Ok(crate::changes::revert(&session.id, path)),
+                }
             }
             "initialize" => Err((protocol::INVALID_REQUEST, "握手由 EDITH 发起：等 EDITH 的 initialize，回话就行".into())),
             other => Err((protocol::METHOD_NOT_FOUND, format!("没有这个方法：{other}"))),

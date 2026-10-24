@@ -7,11 +7,13 @@
 //! - read_agent_log、message_agent、stop_agent：看运行记录、追加指示、停掉。
 //!
 //! 子 Agent 交回之前自己查一遍（checks.rs：没写结果、只说下一步、只交方案、写完没验证 → 原地打回），交给上级的结果后面附验收提示。
-//! 同时跑几个有上限（EDITH_MAX_AGENTS，默认 4），多的排队。子 Agent 只在这个进程里活着，不存档。
+//! 同时跑几个有上限（EDITH_MAX_AGENTS，默认 4），多的排队。子 Agent 只在这个进程里活着（打回要它原来的上下文）；
+//! 给界面看的（Friday 的 Agent 树、卡片里的运行记录）另外推事件、存一份：`agent`（谁、谁派的、哪个调用派的、在做什么）、
+//! `agent.event`（它的每一块字、每个工具），状态一变就把运行记录存进 `<项目数据目录>/agents/<会话>/<id>.json`；`agents.list` 列在跑的。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -63,6 +65,17 @@ impl State {
             State::Failed | State::Stopped => "failed",
         }
     }
+
+    /// 给界面看的状态（agent 事件、agents.list）
+    fn name(self) -> &'static str {
+        match self {
+            State::Waiting => "waiting",
+            State::Running => "running",
+            State::Done => "done",
+            State::Failed => "failed",
+            State::Stopped => "stopped",
+        }
+    }
 }
 
 struct Agent {
@@ -89,6 +102,17 @@ struct Agent {
     recorder: Mutex<Recorder>,
     cancel: Mutex<Arc<AtomicBool>>,
     inbox: Mutex<Vec<String>>,
+    /// 派它的那个工具调用（上级运行记录里的 delegate_task / run_parallel_tasks / run_workflow 的调用 id）、它是那一批里第几个、哪种派法
+    call: String,
+    slot: usize,
+    kind: &'static str,
+    started: Mutex<Option<String>>,
+    finished: Mutex<Option<String>>,
+    /// 调过几次工具、现在在做什么（{kind: generating / tool / queued, title}）
+    steps: AtomicUsize,
+    activity: Mutex<Value>,
+    /// 给界面看的运行记录：[{type: text / thinking, text} | {type: tool, call, name, arguments, status, result}]
+    transcript: Mutex<Vec<Value>>,
 }
 
 static AGENTS: LazyLock<Mutex<HashMap<String, Arc<Agent>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -282,7 +306,8 @@ pub fn specs(context: &Context) -> Vec<Value> {
 // MARK: - 派、跑
 
 /// 照派发的参数建一个子智能体（还没开始跑）
-fn create(spec: &Value, context: &Context, cwd: &Path) -> Arc<Agent> {
+/// 派出一个子 Agent。call：派它的工具调用 id；slot：那一批里第几个；kind：delegate / parallel / workflow
+fn create(spec: &Value, context: &Context, cwd: &Path, call: &str, slot: usize, kind: &'static str) -> Arc<Agent> {
     let field = |key: &str| spec.get(key).and_then(Value::as_str).filter(|value| !value.trim().is_empty());
     let task = field("task").unwrap_or("").to_string();
     let used: HashSet<String> =
@@ -307,9 +332,142 @@ fn create(spec: &Value, context: &Context, cwd: &Path) -> Arc<Agent> {
         recorder: Mutex::new(Recorder::default()),
         cancel: Mutex::new(Arc::new(AtomicBool::new(false))),
         inbox: Mutex::new(Vec::new()),
+        call: call.to_string(),
+        slot,
+        kind,
+        started: Mutex::new(None),
+        finished: Mutex::new(None),
+        steps: AtomicUsize::new(0),
+        activity: Mutex::new(json!({ "kind": "queued" })),
+        transcript: Mutex::new(Vec::new()),
     });
     AGENTS.lock().unwrap().insert(agent.id.clone(), agent.clone());
+    publish(&agent);
     agent
+}
+
+fn now() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// 给界面看的：谁、谁派的、哪个调用派的、状态、在做什么
+fn meta(agent: &Agent) -> Value {
+    json!({
+        "id": agent.id,
+        "name": agent.name,
+        "role": agent.role,
+        "task": agent.task,
+        "session": agent.session,
+        "parent": agent.parent,
+        "call": agent.call,
+        "slot": agent.slot,
+        "kind": agent.kind,
+        "depth": agent.depth,
+        "state": agent.state.lock().unwrap().name(),
+        "started": *agent.started.lock().unwrap(),
+        "finished": *agent.finished.lock().unwrap(),
+        "steps": agent.steps.load(Ordering::Relaxed),
+        "activity": *agent.activity.lock().unwrap(),
+        "reply": *agent.reply.lock().unwrap(),
+    })
+}
+
+/// 状态变了：推 agent 事件、存运行记录（界面重新打开时读）
+fn publish(agent: &Agent) {
+    let turn = agent.turn.lock().unwrap().clone();
+    let data = meta(agent);
+    mind::emit(&agent.session, &turn, "agent", data.clone());
+    let mut stored = data;
+    stored["transcript"] = Value::Array(agent.transcript.lock().unwrap().clone());
+    let dir = home::project_dir().join("agents").join(&agent.session);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = home::write_json(&dir.join(format!("{}.json", agent.id)), &stored);
+}
+
+/// 它干活时的一步：记进运行记录、推 agent.event；开始 / 用完一个工具时状态也推一下
+fn record(agent: &Agent, event: &Event) {
+    let (kind, data) = {
+        let mut transcript = agent.transcript.lock().unwrap();
+        match event {
+            Event::Text(text) | Event::Thinking(text) => {
+                let kind = if matches!(event, Event::Text(_)) { "text" } else { "thinking" };
+                match transcript.last_mut() {
+                    Some(last) if last["type"] == kind => {
+                        if let Value::String(existing) = &mut last["text"] {
+                            existing.push_str(text);
+                        }
+                    }
+                    _ => transcript.push(json!({ "type": kind, "text": text })),
+                }
+                (kind, json!({ "text": text }))
+            }
+            Event::Tool { id, name, arguments } => {
+                transcript
+                    .push(json!({ "type": "tool", "call": id, "name": name, "arguments": arguments, "status": "running", "result": "" }));
+                ("tool", json!({ "id": id, "name": name, "arguments": arguments }))
+            }
+            Event::Result { id, name, ok, text } => {
+                if let Some(tool) = transcript.iter_mut().rev().find(|piece| piece["type"] == "tool" && piece["call"] == json!(id)) {
+                    tool["status"] = json!(if *ok { "succeeded" } else { "failed" });
+                    tool["result"] = json!(text);
+                }
+                ("result", json!({ "id": id, "name": name, "ok": ok, "text": text }))
+            }
+            Event::Notice(text) => ("notice", json!({ "text": text })),
+            _ => return,
+        }
+    };
+    let turn = agent.turn.lock().unwrap().clone();
+    mind::emit(&agent.session, &turn, "agent.event", json!({ "agent": agent.id, "type": kind, "data": data }));
+    match event {
+        Event::Tool { name, .. } => {
+            agent.steps.fetch_add(1, Ordering::Relaxed);
+            *agent.activity.lock().unwrap() = json!({ "kind": "tool", "title": name });
+            publish(agent);
+        }
+        Event::Result { .. } => {
+            *agent.activity.lock().unwrap() = json!({ "kind": "generating" });
+            publish(agent);
+        }
+        _ => {}
+    }
+}
+
+/// agents.list：在跑的（和这个进程里跑过的）子 Agent，带运行记录。session：只要这段会话的
+pub fn list(session: Option<&str>) -> Vec<Value> {
+    let mut agents: Vec<Arc<Agent>> =
+        AGENTS.lock().unwrap().values().filter(|agent| session.is_none_or(|session| agent.session == session)).cloned().collect();
+    agents.sort_by(|a, b| a.started.lock().unwrap().cmp(&b.started.lock().unwrap()));
+    agents
+        .iter()
+        .map(|agent| {
+            let mut value = meta(agent);
+            value["transcript"] = Value::Array(agent.transcript.lock().unwrap().clone());
+            value
+        })
+        .collect()
+}
+
+/// 这个子 Agent 在哪段会话（权限按它看）
+pub fn session_of(id: &str) -> Option<String> {
+    AGENTS.lock().unwrap().get(id).map(|agent| agent.session.clone())
+}
+
+/// agents.stop：停掉它（它下面的跟着停）；返回名字
+pub fn stop(id: &str) -> Option<String> {
+    let agent = AGENTS.lock().unwrap().get(id).cloned()?;
+    agent.cancel.lock().unwrap().store(true, Ordering::Relaxed);
+    Some(agent.name.clone())
+}
+
+/// agents.send：给在做的子 Agent 追加指示（同 message_agent），它做完当前这一步就看到
+pub fn send(id: &str, message: &str) -> Result<String, String> {
+    let agent = AGENTS.lock().unwrap().get(id).cloned().ok_or_else(|| format!("没有子 Agent {id}"))?;
+    if !matches!(*agent.state.lock().unwrap(), State::Waiting | State::Running) {
+        return Err(format!("「{}」已经交回了", agent.name));
+    }
+    agent.inbox.lock().unwrap().push(text("edith.sub.message", &[("text", message.to_string())]));
+    Ok(agent.name.clone())
 }
 
 fn notice(agent: &Agent, text: String) {
@@ -362,6 +520,9 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
     let outcome = (|| {
         let Some(_slot) = acquire(&cancel) else { return Err((State::Stopped, "还没开始就被停掉了".to_string())) };
         *agent.state.lock().unwrap() = State::Running;
+        agent.started.lock().unwrap().get_or_insert_with(now);
+        *agent.activity.lock().unwrap() = json!({ "kind": "generating" });
+        publish(agent);
         let start = agent.recorder.lock().unwrap().mark();
         if start == 0 {
             let first = agent.task.lines().next().unwrap_or("").chars().take(60).collect::<String>();
@@ -388,7 +549,10 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
         let mut message = prompt;
         let mut checked = HashSet::new();
         loop {
-            let mut on = |event: Event| agent.recorder.lock().unwrap().on(&event);
+            let mut on = |event: Event| {
+                agent.recorder.lock().unwrap().on(&event);
+                record(agent, &event);
+            };
             let mut interject = || std::mem::take(&mut *agent.inbox.lock().unwrap());
             let turn = brain::run(&model, history, &message, &agent.cwd, &cancel, &context, &mut on, &mut interject);
             history = turn.history;
@@ -428,10 +592,13 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
         Ok((reply, hint))
     })();
     finished.store(true, Ordering::Relaxed);
+    *agent.finished.lock().unwrap() = Some(now());
+    *agent.activity.lock().unwrap() = Value::Null;
     match outcome {
         Ok((reply, hint)) => {
             *agent.state.lock().unwrap() = State::Done;
             *agent.reply.lock().unwrap() = reply.clone();
+            publish(agent);
             notice(agent, format!("子 Agent「{}」交回了结果", agent.name));
             let clipped = friday_core::liveness::clip_result(&reply, &agent.id, &home::project_dir().join("agents"));
             text(
@@ -442,6 +609,7 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
         Err((state, reason)) => {
             *agent.state.lock().unwrap() = state;
             *agent.reply.lock().unwrap() = reason.clone();
+            publish(agent);
             notice(agent, format!("子 Agent「{}」没做成：{reason}", agent.name));
             failed(reason)
         }
@@ -526,7 +694,8 @@ fn specs_of(args: &Map<String, Value>, key: &str) -> Result<Vec<Value>, String> 
 }
 
 /// 派发工具（不是返回 None）
-pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context) -> Option<Outcome> {
+/// 派子智能体的工具。call：这个工具调用的 id（界面按它把子 Agent 放在这张卡片里）
+pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context, call: &str) -> Option<Outcome> {
     let cancel = context.cancel.clone();
     if !TOOLS.contains(&name) {
         return None;
@@ -553,7 +722,7 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
             {
                 return Some(refuse("派下去的必须比你自己的任务小：不能把你的整个任务原样交给一个下级，自己做"));
             }
-            let agent = create(&spec, context, cwd);
+            let agent = create(&spec, context, cwd, call, 0, "delegate");
             let prompt = first_prompt(&agent, &agent.task);
             if context.me.is_none() {
                 background(agent.clone(), prompt, None);
@@ -574,7 +743,8 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
                 Ok(specs) => specs,
                 Err(message) => return Some(refuse(message)),
             };
-            let agents: Vec<Arc<Agent>> = specs.iter().map(|spec| create(spec, context, cwd)).collect();
+            let agents: Vec<Arc<Agent>> =
+                specs.iter().enumerate().map(|(slot, spec)| create(spec, context, cwd, call, slot, "parallel")).collect();
             if context.me.is_none() {
                 let lines: Vec<String> =
                     agents.iter().map(|agent| format!("- 「{}」（id：{}）", agent.name, agents::short_id(&agent.id))).collect();
@@ -610,7 +780,7 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
                 Outcome { ok: true, text: results.join("\n\n") }
             }
         }
-        "run_workflow" => start_workflow(args, context, cwd),
+        "run_workflow" => start_workflow(args, context, cwd, call),
         "rework_agent" => {
             let id = args.get("id").and_then(Value::as_str).unwrap_or("");
             let feedback = args.get("feedback").and_then(Value::as_str).unwrap_or("").trim().to_string();
@@ -625,6 +795,9 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
             }
             *agent.turn.lock().unwrap() = context.turn.clone();
             *agent.state.lock().unwrap() = State::Waiting;
+            *agent.finished.lock().unwrap() = None;
+            *agent.activity.lock().unwrap() = json!({ "kind": "queued" });
+            publish(&agent);
             let prompt = text("edith.sub.rework", &[("feedback", feedback)]);
             if context.me.is_none() {
                 let key = format!("{}:{}", context.session, context.turn);
@@ -719,7 +892,7 @@ fn missing_after(args: &Map<String, Value>) -> Option<String> {
     })
 }
 
-fn start_workflow(args: &Map<String, Value>, context: &Context, cwd: &Path) -> Outcome {
+fn start_workflow(args: &Map<String, Value>, context: &Context, cwd: &Path, call: &str) -> Outcome {
     if let Some(message) = missing_after(args) {
         return refuse(message);
     }
@@ -732,12 +905,13 @@ fn start_workflow(args: &Map<String, Value>, context: &Context, cwd: &Path) -> O
     // 没起名字的步骤用它的 id（比从任务里截一段好认）
     let agents: Vec<Arc<Agent>> = steps
         .iter()
-        .map(|step| {
+        .enumerate()
+        .map(|(slot, step)| {
             let mut spec = step["spec"].clone();
             if spec.get("name").is_none() {
                 spec["name"] = step["key"].clone();
             }
-            create(&spec, context, cwd)
+            create(&spec, context, cwd, call, slot, "workflow")
         })
         .collect();
     let id = uuid::Uuid::new_v4().simple().to_string();

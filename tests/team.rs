@@ -3,6 +3,34 @@
 mod common;
 
 use common::{edith, fake_model, scratch, text};
+use serde_json::Value;
+
+/// 存下来给界面看的子 Agent（<项目数据目录>/agents/<会话>/<id>.json），按派它的那一批里的先后
+fn agent_records(home: &std::path::Path, work: &std::path::Path) -> (String, Vec<Value>) {
+    let sessions = common::read_sessions(home, work);
+    let session = sessions.iter().find(|session| session["history"].as_array().is_some_and(|history| !history.is_empty())).unwrap();
+    let id = session["id"].as_str().unwrap().to_string();
+    let dir = common::project_dir(home, work).join("agents").join(&id);
+    let mut records: Vec<Value> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|_| panic!("没存子 Agent 的运行记录：{}", dir.display()))
+        .flatten()
+        .map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap())
+        .collect();
+    records.sort_by_key(|record| record["slot"].as_u64());
+    (id, records)
+}
+
+/// 主会话里调这个工具的调用 id
+fn call_id(home: &std::path::Path, work: &std::path::Path, tool: &str) -> String {
+    let sessions = common::read_sessions(home, work);
+    sessions
+        .iter()
+        .flat_map(|session| session["history"].as_array().cloned().unwrap_or_default())
+        .flat_map(|message| message["tool_calls"].as_array().cloned().unwrap_or_default())
+        .find(|call| call["function"]["name"] == tool)
+        .and_then(|call| call["id"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("主会话里没有调 {tool}"))
+}
 
 fn requests(home: &std::path::Path) -> String {
     std::fs::read_to_string(home.join("requests.jsonl")).unwrap_or_default()
@@ -44,6 +72,21 @@ fn delegated_work_comes_back_for_review() {
     // 子智能体看到的：它自己的系统提示、任务、用户的原话
     let log = requests(&home);
     assert!(log.contains("临时子 Agent「小助手」") && log.contains("用户的原话：派活测试"), "{log}");
+    // 给界面看的：存了运行记录，记着是哪个调用派的
+    let (_, records) = agent_records(&home, &work);
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(
+        (record["name"].as_str(), record["kind"].as_str(), record["state"].as_str()),
+        (Some("小助手"), Some("delegate"), Some("done"))
+    );
+    assert_eq!(record["call"].as_str(), Some(call_id(&home, &work, "delegate_task").as_str()));
+    assert!(record["parent"].is_null() && record["started"].is_string() && record["finished"].is_string(), "{record}");
+    let transcript = record["transcript"].as_array().unwrap();
+    assert!(
+        transcript.iter().any(|piece| piece["type"] == "text" && piece["text"].as_str().is_some_and(|text| !text.is_empty())),
+        "{record}"
+    );
 }
 
 #[test]
@@ -84,6 +127,12 @@ fn parallel_results_come_back_together() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("验收通过：2 个一起回来了"), "{}", text(&output));
     let main_turns = requests(&home).lines().filter(|line| !line.contains("你是 EDITH 派出的临时子 Agent")).count();
     assert_eq!(main_turns, 3, "派、派完收尾、一起验收");
+    // 一批两个：同一个调用派的，排第 0、第 1
+    let (_, records) = agent_records(&home, &work);
+    let call = call_id(&home, &work, "run_parallel_tasks");
+    let slots: Vec<(Option<&str>, Option<u64>, Option<&str>)> =
+        records.iter().map(|record| (record["call"].as_str(), record["slot"].as_u64(), record["kind"].as_str())).collect();
+    assert_eq!(slots, [(Some(call.as_str()), Some(0), Some("parallel")), (Some(call.as_str()), Some(1), Some("parallel"))]);
 }
 
 #[test]

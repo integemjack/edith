@@ -171,7 +171,7 @@ fn execute(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, c
         return crate::skills::use_skill(arguments);
     }
     if let Some(outcome) = tools::run(name, arguments, cwd, cancel, &context.session, private_ok)
-        .or_else(|| crate::team::call(name, arguments, cwd, context))
+        .or_else(|| crate::team::call(name, arguments, cwd, context, call))
         .or_else(|| capabilities::call(name, arguments, context, cancel))
         .or_else(|| crate::mcp::call(name, arguments))
     {

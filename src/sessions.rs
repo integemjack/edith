@@ -57,6 +57,20 @@ fn file(id: &str) -> PathBuf {
     dir().join(format!("{id}.jsonl"))
 }
 
+/// 删掉一段会话：存档、读过的文件、会话改动的基线、子 Agent 的运行记录（sessions.remove）
+pub fn remove(id: &str) -> bool {
+    if !valid(id) {
+        return false;
+    }
+    let removed = std::fs::remove_file(file(id)).is_ok();
+    let project = home::project_dir();
+    let _ = std::fs::remove_file(project.join("reads").join(format!("{id}.json")));
+    let _ = std::fs::remove_dir_all(project.join("agents").join(id));
+    crate::changes::remove(id);
+    OWNERS.lock().unwrap().remove(id);
+    removed
+}
+
 /// 会话 id 只认 uuid 的字符（防止拼出别的路径）
 fn valid(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')

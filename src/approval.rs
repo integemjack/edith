@@ -346,6 +346,8 @@ pub fn check(
         "origin": context.origin,
         // 是哪一个工具调用（同 tool 事件的 id：界面按它把确认按钮放在那张工具卡片上）
         "call": call,
+        // 子 Agent 要做的：是哪一个（它的运行记录里的那张卡片）
+        "agent": context.me.as_ref().map(|me| me.id.clone()),
     });
     let decision = ask(&request, &context.origin, guest, cancel).ok_or_else(|| {
         format!(

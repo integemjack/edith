@@ -414,3 +414,66 @@ fn linger_exits_when_idle() {
     assert!(text(&output).contains("闲了 2 秒"), "{}", text(&output));
     assert!(std::fs::read_dir(home.join("instances")).map_or(true, |mut dir| dir.next().is_none()), "登记没删");
 }
+
+#[test]
+fn session_changes_list_diff_and_revert() {
+    let (work, home) = scratch("changes");
+    // y.txt 在 git 里：命令改了它也找得到原文
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(&work)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+    };
+    git(&["init", "-q"]);
+    std::fs::write(work.join("y.txt"), "原来\n").unwrap();
+    git(&["add", "y.txt"]);
+    git(&["commit", "-q", "-m", "y"]);
+    let model = fake_model(&home.join("requests.jsonl"));
+    // 工具新建 x.txt；命令往 y.txt 后面加一行
+    let wrote = edith(&home, model.port, &work, &[r#"调用工具 write_file 参数 {"path":"x.txt","content":"新的\n"}"#]);
+    assert!(wrote.status.success(), "{}", text(&wrote));
+    let appended = edith(&home, model.port, &work, &["-c", r#"调用工具 run_shell 参数 {"command":"echo 加的 >> y.txt"}"#]);
+    assert!(appended.status.success(), "{}", text(&appended));
+    let session = common::read_sessions(&home, &work)[0]["id"].as_str().unwrap().to_string();
+    let ask = |script: Value, wanted: i64| -> Vec<Value> {
+        configure_cap(&home, script, "done");
+        let _edith = run(&home, model.port, &work);
+        assert!(wait_until(30, || response(&received(&home), wanted).is_some()), "{:?}", received(&home));
+        received(&home)
+    };
+    let messages = ask(json!([{ "delay": 0.3, "send": request(1, "changes.list", json!({ "session": session })) }]), 1);
+    let files = response(&messages, 1).unwrap()["result"]["files"].as_array().unwrap().clone();
+    let find = |name: &str| {
+        files
+            .iter()
+            .find(|file| file["path"].as_str().unwrap().ends_with(name))
+            .cloned()
+            .unwrap_or_else(|| panic!("改动里没有 {name}：{files:?}"))
+    };
+    let (x, y) = (find("x.txt"), find("y.txt"));
+    assert_eq!((x["status"].as_str(), x["added"].as_i64()), (Some("A"), Some(1)));
+    assert_eq!(
+        (y["status"].as_str(), y["known"].as_bool(), y["added"].as_i64(), y["removed"].as_i64()),
+        (Some("M"), Some(true), Some(1), Some(0))
+    );
+    // 看改动、撤销全部
+    let y_path = y["path"].as_str().unwrap().to_string();
+    std::fs::remove_file(home.join("cap.jsonl")).unwrap();
+    let messages = ask(
+        json!([
+            { "delay": 0.3, "send": request(2, "changes.diff", json!({ "session": session, "path": y_path })) },
+            { "delay": 0.3, "send": request(3, "changes.revert", json!({ "session": session })) },
+        ]),
+        3,
+    );
+    let diff = &response(&messages, 2).unwrap()["result"];
+    assert_eq!(diff["old"].as_str(), Some("原来\n"), "{diff}");
+    assert!(diff["new"].as_str().unwrap().contains("加的"), "{diff}");
+    assert_eq!(response(&messages, 3).unwrap()["result"]["failed"], json!([]));
+    assert_eq!(std::fs::read_to_string(work.join("y.txt")).unwrap(), "原来\n");
+    assert!(!work.join("x.txt").exists(), "新建的没删");
+}

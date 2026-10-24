@@ -109,7 +109,16 @@ MCP 服务每次请求再多 2.1k，而大多数用不上（改完实测：「�
 - `read_agent_log`、`message_agent`、`stop_agent`：看运行记录、追加指示、停掉（停掉工作流的 id 就停整个工作流）。停下这一轮（Ctrl+C、`sessions.stop`）时它派出去的也停。
 - 子 Agent 看不到对话：系统提示（`edith.sub`）写明它是临时子 Agent、交回结果的格式（结论 / 依据 / 改动 / 未完成与风险），任务后面附用户的原话。
   交回前自己查一遍（没写结果、只说下一步、只交方案、写完没验证 → 原地打回），交给上级的结果后面附验收提示；结果太长的全文存进 `~/.edith/projects/<目录>/agents/`。
-- 同时跑几个有上限（`EDITH_MAX_AGENTS`，默认 4），多的排队。工具权限、审批照派它的那一轮。子 Agent 只在这个进程里活着，不存档。
+- 同时跑几个有上限（`EDITH_MAX_AGENTS`，默认 4），多的排队。工具权限、审批照派它的那一轮。子 Agent 只在这个进程里活着（打回要它原来的上下文）。
+- 给界面看的（Friday 的 Agent 树、卡片里的运行记录）：推 `agent`（谁、谁派的、哪个调用派的、状态、在做什么）和 `agent.event`（它的每一步）事件，
+  状态一变把运行记录存进 `projects/<目录>/agents/<会话>/<id>.json`；`agents.list` / `agents.stop` / `agents.send` 列出、停掉、追加指示（协议 §4.4）。
+
+## 会话改动
+
+同 Friday 的 SessionChanges（`src/changes.rs`，存的格式一样）：这段会话（含它派的子 Agent）第一次动一个文件之前的样子是基线，
+存在 `projects/<目录>/changes/<会话>/`。write_file / edit_file 写之前记；run_shell 执行前后各看一遍（friday-core 的 `file_changes`），
+命令改的、删的拿执行前的行指纹到 git 的 HEAD / 暂存区找原文，找不到只知道改过。`changes.list` / `changes.diff` / `changes.revert`
+列出净改动、看改动、撤销（协议 §4.4）；Friday 的文件卡片「本次会话改动」经 edith-friday 用的就是它们。
 - `edith "…"` 干完一件事等派出去的都交回、验收完再退出。
 
 ## 升级
@@ -148,7 +157,7 @@ edith tools [install | remove]          共用的工具（edith.tools）
 | `config.json` | 模型；`searxng`（可选，搜网页用自己的 SearXNG）；`permissions`（审批：mode、allow、deny、additionalDirectories） |
 | `trust.json` | 信任了哪些目录的项目 / 本地配置（按内容哈希） |
 | `capabilities.json`、`mcp.json` | 全局那层的能力、MCP 服务（[协议 §8](CAPABILITY-PROTOCOL.md#8-配置capabilitiesjson)、[§9](CAPABILITY-PROTOCOL.md#9-mcp-服务)） |
-| `projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希前 8 位>/` | 这个目录的数据：`sessions/<id>.jsonl` 会话（只追加，一行一条；同一个会话几个大脑接着写也不互相盖掉）、`reads/<id>.json` 会话读过的文件（先读后改用）、`logs/<能力名>.log` 能力的日志 |
+| `projects/<工作目录的路径，不是字母数字的换成 ->-<路径哈希前 8 位>/` | 这个目录的数据：`sessions/<id>.jsonl` 会话（只追加，一行一条；同一个会话几个大脑接着写也不互相盖掉）、`reads/<id>.json` 会话读过的文件（先读后改用）、`changes/<id>/` 会话改动的基线、`agents/<会话>/<id>.json` 子 Agent 的运行记录、`logs/<能力名>.log` 能力的日志 |
 | `Prompts/` | 提示词（`edith.md` 是 EDITH 自己的；改了下一轮生效，改坏的段自动用自带的；friday-core 的 prompts 管合并） |
 | `instances/<目录的键>-<进程号>.json` | 在跑的大脑：目录、进程、套接字的地址和主令牌、能力、入口（[协议 §8.2](CAPABILITY-PROTOCOL.md#82-在跑的大脑instances)） |
 | `tools/<工具>/` | 从 edith.tools 下的工具；`tools/installed.json` 记版本 |
