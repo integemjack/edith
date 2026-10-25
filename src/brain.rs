@@ -96,7 +96,7 @@ pub struct Turn {
 /// 装提示词：自带的三份 + 数据目录里可改的那份（~/.edith/Prompts）
 pub fn setup_prompts() {
     let bundled = [
-        ("edith.md", include_str!("../prompts/edith.md")),
+        ("prompts-edith.md", include_str!("../prompts/prompts-edith.md")),
         ("prompts-tools.md", include_str!("../prompts/prompts-tools.md")),
         ("prompts-framework.md", include_str!("../prompts/prompts-framework.md")),
     ]
@@ -115,7 +115,33 @@ pub fn setup_prompts() {
         section("scriptCwd", "platform.script-cwd"),
         value("promptsDir", dir.to_string_lossy().into_owned()),
     ];
-    prompts::setup(bundled, Some(dir), platform);
+    prompts::setup(bundled, Some(dir.clone()), platform);
+    *PROMPT_FILES.lock().unwrap() = prompt_signature(&dir);
+}
+
+/// 上次读提示词时各文件的修改时间和大小
+static PROMPT_FILES: std::sync::Mutex<Vec<(String, Option<std::time::SystemTime>, u64)>> = std::sync::Mutex::new(Vec::new());
+
+fn prompt_signature(dir: &Path) -> Vec<(String, Option<std::time::SystemTime>, u64)> {
+    prompts::prompt_files(dir)
+        .into_iter()
+        .map(|name| {
+            let info = std::fs::metadata(dir.join(&name)).ok();
+            let modified = info.as_ref().and_then(|info| info.modified().ok());
+            (name, modified, info.map_or(0, |info| info.len()))
+        })
+        .collect()
+}
+
+/// 提示词文件变了（用户、智能体改的，Friday 设置里回滚 / 恢复成自带的）：这一段请求前重新读，在跑着的大脑不用重起
+pub fn refresh_prompts() {
+    let Some(dir) = prompts::directory() else { return };
+    let now = prompt_signature(&dir);
+    let mut last = PROMPT_FILES.lock().unwrap();
+    if *last != now {
+        *last = now;
+        prompts::reload();
+    }
 }
 
 fn args(pairs: &[(&str, String)]) -> prompts::Args {
@@ -515,6 +541,7 @@ pub fn run(
         thinking: model.thinking.clone(),
         extra_body: model.extra_body.clone(),
     };
+    refresh_prompts();
     let base = match &context.me {
         Some(me) => crate::team::instructions(cwd, me),
         None => instructions(cwd),

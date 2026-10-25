@@ -40,7 +40,7 @@ src/            main（命令行）、mind（调度：会话、急缓、事件�
                 instance（套接字、登记）、attach（接上去的终端）、downloads（edith tools）、
                 worktree（-w 开 git worktree）、terminal（终端上的样子）、sessions、http、home
 examples/       示例能力（Python 标准库）
-prompts/        提示词：edith.md 是 EDITH 自己的；prompts-tools.md、prompts-framework.md 抄自 Friday（工具说明、循环里的提醒）
+prompts/        提示词：prompts-edith.md 是 EDITH 自己的；prompts-tools.md、prompts-framework.md 抄自 Friday（工具说明、循环里的提醒）
 core/           子模块 integemjack/friday.core（Friday 的 Swift / Qt 两端也用它）：对话循环、请求体、流式解析、文件工具、MCP 客户端等规则
 tests/          端到端测试：tests/fake/ 里的假模型（OpenAI 流式，兼做假的搜索结果页、网页）、假能力（cap.py，连进套接字）、假 MCP 服务（limb.py）
 ```

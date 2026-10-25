@@ -2,7 +2,9 @@
 //! - 老的会话 `<工作目录>/.edith/sessions/<id>.json`（v0.1.9 及以前放在项目里）→ `~/.edith/projects/<工作目录>/sessions/<id>.jsonl`；
 //!   老的 `main-session`（主会话，已经没有了）删掉；
 //! - 能力配置里经 `edith-mcp` 接的 MCP 服务（edith.tools 已经没有这个工具）、更早的 `"protocol": "mcp"` 项
-//!   → 同一层的 MCP 配置（全局 `~/.edith/mcp.json`、项目 `.mcp.json`、本地 `.edith/mcp.local.json`）。
+//!   → 同一层的 MCP 配置（全局 `~/.edith/mcp.json`、项目 `.mcp.json`、本地 `.edith/mcp.local.json`）；
+//! - 提示词 `~/.edith/Prompts/edith.md`（v0.1.31 及以前的名字）→ `prompts-edith.md`（提示词文件都叫 prompts-*.md，Friday 设置里的历史才有它），
+//!   `.upstream/` 里上次自带的那份一起改名，改过的内容照样留着。
 
 use std::path::Path;
 
@@ -19,7 +21,25 @@ pub fn run() -> Vec<String> {
         done.push(note);
     }
     done.extend(mcp_capabilities());
+    if let Some(note) = prompt_names() {
+        done.push(note);
+    }
     done
+}
+
+/// 提示词 edith.md 改名成 prompts-edith.md
+fn prompt_names() -> Option<String> {
+    let dir = home::dir().join("Prompts");
+    let (old, new) = (dir.join("edith.md"), dir.join("prompts-edith.md"));
+    if !old.is_file() || new.exists() {
+        return None;
+    }
+    std::fs::rename(&old, &new).ok()?;
+    let upstream = dir.join(".upstream");
+    if upstream.join("edith.md").is_file() && !upstream.join("prompts-edith.md").exists() {
+        let _ = std::fs::rename(upstream.join("edith.md"), upstream.join("prompts-edith.md"));
+    }
+    Some("提示词 edith.md 改名成了 prompts-edith.md".into())
 }
 
 /// 项目里的老会话挪到全局

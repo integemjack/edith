@@ -188,7 +188,7 @@ EDITH                                  能力
 帮我把今天的会议纪要整理一下
 ```
 
-（措辞在提示词 `edith.input` / `edith.interjection` / `edith.note`，`~/.edith/Prompts/edith.md` 里可以改。）
+（措辞在提示词 `edith.input` / `edith.interjection` / `edith.note`，`~/.edith/Prompts/prompts-edith.md` 里可以改。）
 
 ### 4.2 `ask`：交一件事、等回答（请求）
 
