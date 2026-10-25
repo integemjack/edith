@@ -8,6 +8,7 @@
 - CAP_HOOKS（逗号分开的时机）：报 hooks；CAP_HOOK_MODE 是 PreToolUse 怎么回——change（默认：参数改成「改过」）、deny（拦下：不许记）、
   need（替动作说批准要求：summary「要记东西」）；PostToolUse 补「钩子看过了」、UserPromptSubmit 补「钩子补的」、
   Stop 第一次不让停（让它「只聊天：再看一遍」）
+- CAP_ACTION_SESSIONS（逗号分开的会话 id）：remember 只给这几段会话用（动作的 sessions）
 - 收到的每一条都记进 CAP_LOG（一行一条）；大脑断开或发 shutdown 就退出"""
 import json
 import os
@@ -75,8 +76,9 @@ for line in reader:
             "name": os.environ.get("EDITH_CAPABILITY", "cap"),
             "capability": {"title": "测试能力", "version": "1"},
             "senses": [{"kind": "speech", "description": "假装听到的话"}],
-            "actions": [{"name": "remember", "description": "记住一句话",
-                         "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}],
+            "actions": [dict({"name": "remember", "description": "记住一句话",
+                              "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
+                             **({"sessions": os.environ["CAP_ACTION_SESSIONS"].split(",")} if os.environ.get("CAP_ACTION_SESSIONS") else {}))],
             "receives": receives,
             "approves": bool(os.environ.get("CAP_APPROVE")),
             "models": ["power://"] if os.environ.get("CAP_MODEL_URL") else [],

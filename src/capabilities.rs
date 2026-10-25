@@ -43,7 +43,7 @@ const DEFAULT_ACTION_TIMEOUT: u64 = 600;
 pub const SEPARATOR: &str = "__";
 /// 能被订阅的事件
 pub const EVENT_TYPES: &[&str] =
-    &["turn.started", "input", "text", "thinking", "tool", "result", "stats", "notice", "done", "agent", "agent.event"];
+    &["turn.started", "input", "text", "thinking", "tool", "result", "stats", "notice", "approval", "done", "agent", "agent.event"];
 
 /// 一个连着的能力
 pub struct Capability {
@@ -844,6 +844,15 @@ impl Capability {
                 if !self.full() {
                     session.owner = self.name.clone();
                 }
+                // 全权的能力可以给这段会话一段专用的系统提示（如 Friday 助手的人设）、把它记在「#」开头的名下（会话列表里不出现，同分出去的另一支）
+                if self.full() {
+                    if let Some(instructions) = params.get("instructions").and_then(Value::as_str) {
+                        session.instructions = instructions.to_string();
+                    }
+                    if let Some(owner) = params.get("owner").and_then(Value::as_str).filter(|owner| owner.starts_with('#')) {
+                        session.owner = owner.to_string();
+                    }
+                }
                 session.save().map_err(|message| (protocol::INTERNAL_ERROR, message))?;
                 if params.get("focus").and_then(Value::as_bool) == Some(true) && self.full() {
                     mind::set_focus(&session.id);
@@ -897,6 +906,7 @@ impl Capability {
                         }
                         fork.history = session.history[..keep.unwrap_or(session.history.len()).min(session.history.len())].to_vec();
                         fork.title = session.title.clone();
+                        fork.instructions = session.instructions.clone();
                         if params.get("hidden").and_then(Value::as_bool) == Some(true) {
                             fork.owner = sessions::ARCHIVED.into();
                         } else if !self.full() {
@@ -1247,6 +1257,7 @@ fn tools_listing() -> Value {
         origin: String::new(),
         cancel: None,
         me: None,
+        instructions: String::new(),
     };
     let entry = |spec: &Value, group: String| {
         let name = spec["function"]["name"].as_str().unwrap_or("").to_string();
@@ -1257,7 +1268,7 @@ fn tools_listing() -> Value {
     let mut tools: Vec<Value> = crate::tools::specs().iter().map(|spec| entry(spec, "builtin".into())).collect();
     tools.extend(crate::memory::specs().iter().map(|spec| entry(spec, "builtin".into())));
     tools.extend(crate::team::specs(&context).iter().map(|spec| entry(spec, "agents".into())));
-    tools.extend(specs(&permissions::Tools::All).iter().map(|spec| entry(spec, "capability".into())));
+    tools.extend(specs(&permissions::Tools::All, "").iter().map(|spec| entry(spec, "capability".into())));
     for (server, listed) in crate::mcp::known() {
         for tool in listed {
             let name = format!("{server}{}{}", crate::mcp::SEPARATOR, tool["name"].as_str().unwrap_or(""));
@@ -1281,12 +1292,12 @@ fn tools_listing() -> Value {
 }
 
 /// 能力的动作交给模型的工具定义：名字「<能力名>__<动作名>」（tools：这一轮许可的）
-pub fn specs(tools: &permissions::Tools) -> Vec<Value> {
+pub fn specs(tools: &permissions::Tools, session: &str) -> Vec<Value> {
     let mut specs = Vec::new();
     for capability in native() {
         for action in &capability.actions() {
             let name = action["name"].as_str().unwrap_or("");
-            if !tools.allows(&format!("{}{SEPARATOR}{name}", capability.name), read_only(action)) {
+            if !tools.allows(&format!("{}{SEPARATOR}{name}", capability.name), read_only(action)) || !for_session(action, session) {
                 continue;
             }
             let description = action.get("description").and_then(Value::as_str).unwrap_or("");
@@ -1323,6 +1334,11 @@ pub fn summary() -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 动作给不给这段会话用：声明了 `sessions`（会话 id 的列表）的只给这几段（如 Friday 助手管会话的工具只给助手那段）
+fn for_session(action: &Value, session: &str) -> bool {
+    action.get("sessions").and_then(Value::as_array).is_none_or(|list| list.iter().any(|id| id.as_str() == Some(session)))
 }
 
 /// 动作说自己只读（不改东西）
@@ -1495,6 +1511,9 @@ pub fn call(full_name: &str, arguments: &Map<String, Value>, context: &Context, 
     let action = capability.actions().into_iter().find(|action| {
         action["name"].as_str().is_some_and(|action| action == rest || (full_name.chars().count() == 64 && action.starts_with(rest)))
     })?;
+    if !for_session(&action, &context.session) {
+        return Some(Outcome { ok: false, text: format!("「{full_name}」不给这段会话用") });
+    }
     Some(capability.act(&action, arguments, context, cancel))
 }
 

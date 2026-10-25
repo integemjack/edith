@@ -405,6 +405,7 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         origin: input.origin.capability.clone(),
         cancel: Some(cancel.clone()),
         me: None,
+        instructions: session.instructions.clone(),
     };
     let recorder = Mutex::new(crate::checks::Recorder::default());
     let mut text = input.origin.wrap(if input.interjected { "edith.interjection" } else { "edith.input" }, &input.text);

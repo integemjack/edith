@@ -445,7 +445,18 @@ pub fn check(
         // 子 Agent 要做的：是哪一个（它的运行记录里的那张卡片）
         "agent": context.me.as_ref().map(|me| me.id.clone()),
     });
-    let decision = ask(&request, &context.origin, guest, cancel).ok_or_else(|| {
+    // 等批准的这件事推给看事件的能力（Friday 助手的状态板标「等确认」）；答了、没人答再推一条结束
+    let approval = |waiting: bool, approved: Option<bool>| {
+        let mut data = json!({ "call": call, "tool": need.tool, "summary": need.summary, "agent": request["agent"], "waiting": waiting });
+        if let Some(approved) = approved {
+            data["approved"] = json!(approved);
+        }
+        crate::mind::emit(&context.session, &context.turn, "approval", data);
+    };
+    approval(true, None);
+    let asked = ask(&request, &context.origin, guest, cancel);
+    approval(false, asked.as_ref().map(|decision| !matches!(decision, Decision::Deny(_))));
+    let decision = asked.ok_or_else(|| {
         format!(
             "没做：{}——要批准，可是没人能批（不在终端里，也没有能批准的能力）。让用户在终端里跑、用 edith --auto，或在 ~/.edith/config.json 的 permissions.allow 里放开",
             need.summary

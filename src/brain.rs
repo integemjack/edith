@@ -53,6 +53,8 @@ pub struct Context {
     pub cancel: Option<std::sync::Arc<AtomicBool>>,
     /// 子智能体自己是谁（主智能体是 None）
     pub me: Option<crate::team::Me>,
+    /// 这段会话专用的系统提示（建会话时能力给的；接在主智能体的后面，子智能体不带）
+    pub instructions: String,
 }
 
 /// 这一轮按什么来（sense 带来的，只认全权的连接；没给的照 EDITH 自己的规则和 config.json）
@@ -579,6 +581,10 @@ pub fn run(
         None => instructions(cwd),
     };
     let mut extra = on_demand(context);
+    if context.me.is_none() && !context.instructions.trim().is_empty() {
+        extra =
+            [context.instructions.trim().to_string(), extra].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n\n");
+    }
     // 计划模式、工作流（工作流只给主智能体：它定流程、子智能体照步骤做）
     let modes = [
         context.prefs.plan().then(|| prompts::text("edith.plan-mode", &args(&[]), None)),

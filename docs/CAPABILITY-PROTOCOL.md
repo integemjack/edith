@@ -118,7 +118,7 @@ EDITH                                  能力
 | `protocolVersion` | 是 | `"1"` |
 | `capability.title` / `version` / `description` | 否 | 给人和模型看的名字、版本、一句话 |
 | `senses` | 否 | 会主动传来什么：`[{kind, description}]`。`kind` 是自己定的词（`speech`、`message`、`vision`、`file`、`sensor`……），写进模型看到的来源里 |
-| `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?, readOnly?, exclusive?, holds?, releases?}]`。`readOnly: true`：不改东西（只读权限的一轮也能用）；`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600；后三个标记给[共享设备](https://github.com/integemjack/edith.tools/blob/main/docs/DEVICES.md)的仲裁用 |
+| `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?, readOnly?, sessions?, exclusive?, holds?, releases?}]`。`readOnly: true`：不改东西（只读权限的一轮也能用）；`sessions`（会话 id 的列表）：只给这几段会话用，别的会话看不到、硬调也拒绝（如 Friday 助手管会话的工具只给助手那段；换了用 `capability.update`）；`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600；后三个标记给[共享设备](https://github.com/integemjack/edith.tools/blob/main/docs/DEVICES.md)的仲裁用 |
 | `receives` | 否 | 要收哪些事件（[§7](#7-事件event)）；`["*"]` 是全部，不写是都不要 |
 | `sessions` | 否 | `"all"`（默认）：所有会话的事件；`"focus"`：只要焦点会话的 |
 | `name` | 否 | 叫什么：只对主令牌的连接有用（不写是 `client`；重名的、和配置里能力重名的 EDITH 加 `-2`、`-3`……）；专用令牌、中转的名字由大脑定，这里写的不管 |
@@ -226,7 +226,7 @@ EDITH                                  能力
 | 方法 | 参数 | 回话 |
 |---|---|---|
 | `sessions.list` | 无 | `[{id, title, cwd, created, updated, working, turn?, queue?}]`，新的在前；在干活的带 `turn: {id, text}`（哪一轮、交来的原话，后连上来的界面据此接着显示），排着的带 `queue: [{turn, text}]` |
-| `sessions.create` | `{cwd?, focus?, id?}` | 新会话 `{id, title, cwd, created, updated}`；`cwd` 默认焦点会话的工作目录；`focus: true` 顺便设成焦点；`id`：用这个 UUID（客户端先定好 id 再建，比如 Friday 的网关），这个 id 已经有了就回那段会话 |
+| `sessions.create` | `{cwd?, focus?, id?, instructions?, owner?}` | 新会话 `{id, title, cwd, created, updated, owner?}`；`cwd` 默认焦点会话的工作目录；`focus: true` 顺便设成焦点；`id`：用这个 UUID（客户端先定好 id 再建，比如 Friday 的网关），这个 id 已经有了就回那段会话。全权的连接还能给：`instructions`——这段会话专用的系统提示，接在主智能体的后面（子智能体不带；存在会话里）；`owner`——「#」开头的名下（如 `#assistant`），Friday 的会话列表不列（同分出去的另一支 `#branch`） |
 | `sessions.get` | `{id}` | 会话全文：上面的字段 + `history`（OpenAI 格式的历史）+ `working`（在干的那一轮的 id 或 `null`）+ `focus` |
 | `sessions.focus` | `{id}` | `{focus}`：设焦点 |
 | `sessions.stop` | `{id?}` | `{stopping}`：停下正在干的一轮（排着的也不干了）；不给 `id` 是焦点会话 |
@@ -408,6 +408,7 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 | `result` | `{id, name, ok, text, lines?}` | 用完；改文件、跑命令改了文件的带 `lines: {added, removed}`（增删了几行，界面卡片上的「+N −M」） |
 | `stats` | `{promptTokens, generatedTokens, cachedTokens, promptTime, generateTime, contextParts, contextLimit, contextCompactAt}` | 每段请求的用量（时间是秒；`contextParts` 是上下文各部分的 token：system / tools / user / replies / toolUse） |
 | `notice` | `{text, call?, agent?}` | 顺带说一句：重试、压了上下文、收到补充、动作进度（带 `call`）、交付检查追了提醒、子智能体开始 / 交回 / 被打回（带 `agent`：子智能体的 id） |
+| `approval` | `{call, tool, summary, agent?, waiting, approved?}` | 要批准一件事：`waiting: true` 开始等（问能批准的能力、终端），`false` 答了或没人答（`approved` 批没批；没人答不带）。看状态的（Friday 助手的状态板）用它标「等确认」 |
 | `done` | `{answer, stopped, error}` | 这一轮结束 |
 | `agent` | Agent | 一个子 Agent 派出来、开始、开始 / 用完一个工具、交回、没做成、被停掉、被打回（状态变了就推一次） |
 | `agent.event` | `{agent, type, data}` | 子 Agent 干活时的一步：`type` 是 `text` / `thinking` / `tool` / `result` / `notice`，`data` 同主会话的这几种事件 |

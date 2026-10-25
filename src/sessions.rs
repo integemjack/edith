@@ -25,6 +25,8 @@ pub struct Session {
     pub history: Vec<Value>,
     /// 谁的会话：空是主人的（终端、全权的能力）；权限不全的连接（中转的远程设备、收窄过的能力）只能用自己名下的
     pub owner: String,
+    /// 这段会话专用的系统提示（接在主智能体的后面；建会话时能力给的，如 Friday 助手的人设）
+    pub instructions: String,
     /// 文件里已经有的（这个进程看到的）：存的时候只追加多出来的
     saved: Saved,
 }
@@ -36,6 +38,7 @@ struct Saved {
     title: String,
     cwd: String,
     owner: String,
+    instructions: String,
 }
 
 /// 分出去的另一支（Friday 改一条重发、切分支时存着的那份历史）记在这个名下：列表里不出现，-c 不接它
@@ -99,6 +102,7 @@ impl Session {
             updated: now,
             history: Vec::new(),
             owner: String::new(),
+            instructions: String::new(),
             saved: Saved::default(),
         }
     }
@@ -135,6 +139,9 @@ impl Session {
                     if let Some(owner) = field("owner") {
                         session.owner = owner;
                     }
+                    if let Some(instructions) = field("instructions") {
+                        session.instructions = instructions;
+                    }
                 }
                 Some("message") => session.history.push(entry["message"].clone()),
                 Some("reset") => session.history.clear(),
@@ -149,6 +156,7 @@ impl Session {
             title: session.title.clone(),
             cwd: session.cwd.clone(),
             owner: session.owner.clone(),
+            instructions: session.instructions.clone(),
         };
         session
     }
@@ -192,10 +200,17 @@ impl Session {
             self.title = first_user_text(&self.history).chars().take(40).collect();
         }
         let mut lines: Vec<Value> = Vec::new();
-        if !self.saved.exists || self.saved.cwd != self.cwd || self.saved.owner != self.owner {
+        if !self.saved.exists
+            || self.saved.cwd != self.cwd
+            || self.saved.owner != self.owner
+            || self.saved.instructions != self.instructions
+        {
             let mut meta = json!({ "type": "meta", "id": self.id, "cwd": self.cwd, "created": self.created });
             if !self.owner.is_empty() || self.saved.exists {
                 meta["owner"] = json!(self.owner);
+            }
+            if !self.instructions.is_empty() || self.saved.instructions != self.instructions {
+                meta["instructions"] = json!(self.instructions);
             }
             lines.push(meta);
         }
@@ -233,6 +248,7 @@ impl Session {
             title: self.title.clone(),
             cwd: self.cwd.clone(),
             owner: self.owner.clone(),
+            instructions: self.instructions.clone(),
         };
         OWNERS.lock().unwrap().insert(self.id.clone(), self.owner.clone());
         Ok(())

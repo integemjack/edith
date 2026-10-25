@@ -33,7 +33,7 @@ pub fn available(context: &Context) -> Vec<Value> {
         .into_iter()
         .filter(|spec| !crate::team::always(context).contains(&name_of(spec)) && allowed.allows(name_of(spec), false))
         .collect();
-    specs.extend(crate::capabilities::specs(allowed));
+    specs.extend(crate::capabilities::specs(allowed, &context.session));
     specs.extend(crate::mcp::specs(allowed));
     // 现成的子智能体限定了工具：只列这些
     if let Some(only) = context.me.as_ref().and_then(|me| me.tools.as_ref()) {

@@ -451,11 +451,47 @@ fn capability_can_approve() {
     assert!(answer.contains("用户没批准") && answer.contains("先别动"), "{answer}");
     assert!(!work.join("y.txt").exists());
     drop(edith);
-    // 说行：写了
+    // 说行：写了；订了 approval 的收到等批准、答完的两条
     configure("allow");
     let _edith = start();
     assert!(wait_until(30, || response(&read("allow"), 1).is_some()), "{:?}", read("allow"));
     assert!(work.join("y.txt").exists(), "{:?}", read("allow"));
+    let messages = read("allow");
+    let waits: Vec<(Value, Value)> =
+        events(&messages, "approval").iter().map(|event| (event["data"]["waiting"].clone(), event["data"]["approved"].clone())).collect();
+    assert_eq!(waits, vec![(json!(true), Value::Null), (json!(false), json!(true))], "{messages:?}");
+    assert!(events(&messages, "approval")[0]["data"]["summary"].as_str().unwrap().contains("写文件"));
+}
+
+/// 能力建的会话：带一段专用的系统提示、记在「#」开头的名下；动作声明了 sessions 的只给那几段会话
+#[test]
+fn session_instructions_and_session_only_actions() {
+    let (work, home) = scratch("session-instructions");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let (mine, other) = ("8f0c2c4e-7a1b-4c55-9d3e-2b6f1a0e9c11", "1d2e3f40-5a6b-4c7d-8e9f-a0b1c2d3e4f5");
+    let create = json!({ "id": mine, "cwd": work, "instructions": "你是测试助手：只管派活。", "owner": "#assistant" });
+    let script = json!([
+        { "delay": 0.3, "send": request(1, "sessions.create", create) },
+        { "delay": 0.1, "send": request(2, "sessions.create", json!({ "id": other, "cwd": work })) },
+        { "delay": 0.1, "send": request(3, "ask", json!({ "session": mine, "text": "只聊天" })) },
+        { "delay": 0.1, "send": request(4, "ask", json!({ "session": other, "text": "只聊天" })) },
+    ]);
+    configure_cap(&home, script, "done");
+    let config = std::fs::read_to_string(home.join("capabilities.json"))
+        .unwrap()
+        .replace(r#""CAP_RECEIVES""#, &format!(r#""CAP_ACTION_SESSIONS":"{mine}","CAP_RECEIVES""#));
+    std::fs::write(home.join("capabilities.json"), config).unwrap();
+    let _edith = run(&home, model.port, &work);
+    assert!(wait_until(30, || response(&received(&home), 4).is_some()), "{:?}", received(&home));
+    assert_eq!(response(&received(&home), 1).unwrap()["result"]["owner"], "#assistant");
+    let requests: Vec<Value> =
+        std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+    let systems: Vec<String> =
+        requests.iter().map(|request| request["messages"][0]["content"].as_str().unwrap_or("").to_string()).collect();
+    let assistant = systems.iter().find(|system| system.contains("你是测试助手")).cloned().unwrap_or_default();
+    assert!(assistant.contains("你是测试助手：只管派活。") && assistant.contains("cap__remember"), "{assistant}");
+    let plain = systems.iter().find(|system| !system.contains("你是测试助手")).cloned().unwrap_or_default();
+    assert!(!plain.is_empty() && !plain.contains("你是测试助手") && !plain.contains("cap__remember"), "{plain}");
 }
 
 /// 像 Friday 的网关那样连进来：主令牌、说自己能批准；返回读到的消息的通道和写的一头

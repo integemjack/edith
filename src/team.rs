@@ -623,6 +623,7 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
                 depth: agent.depth,
                 tools: agent.allowed.clone(),
             }),
+            instructions: String::new(),
         };
         let mut history = std::mem::take(&mut *agent.history.lock().unwrap());
         let mut message = prompt;
