@@ -5,6 +5,7 @@
 //! 工具名「<服务名>__<工具名>」；写了 readOnlyHint 的算只读（权限 tools: "read" 时能用）。
 //! **用到时再起**（同 Claude Code 的按需加载）：起来时不连；工具清单按配置的哈希记在 `~/.edith/mcp-cache.json`，系统提示里只列名字
 //! （deferred.rs），模型用 load_tools 取回定义、或者调用它的工具时才连上；连上后刷新缓存。没连过的服务清单里写「还不知道有哪些工具」。
+//! 连着的服务配置改了（地址、令牌换了：Friday 的 devices 能力重启后 edith-friday 改写 mcp.json）：调用时按新配置重连。
 //! MCP 客户端是 friday-core 的 mcp_client；它的 HTTP 交给宿主发（mcpClient.httpPost 事件），EDITH 就是这个宿主。
 
 use std::collections::{BTreeMap, HashMap};
@@ -30,6 +31,8 @@ pub struct Limb {
     client_id: u64,
     /// 规整过的 MCP 工具（{name, description?, inputSchema, …}）
     pub tools: Vec<Value>,
+    /// 连上时那份配置的哈希：配置改了（地址、令牌换了，比如 Friday 的 devices 能力重启了）就重连
+    hash: String,
 }
 
 static LIMBS: LazyLock<RwLock<BTreeMap<String, Arc<Limb>>>> = LazyLock::new(|| RwLock::new(BTreeMap::new()));
@@ -176,6 +179,7 @@ pub fn known() -> Vec<(String, Vec<Value>)> {
     enabled()
         .into_iter()
         .filter_map(|(name, config)| {
+            // 连着的用实时的（配置改了也先认它的清单：调用时 ensure 按新配置重连）
             if let Some(limb) = live.get(&name) {
                 return Some((name, limb.tools.clone()));
             }
@@ -192,13 +196,13 @@ pub fn unknown() -> Vec<String> {
     enabled().into_iter().map(|(name, _)| name).filter(|name| !known.contains(name)).collect()
 }
 
-/// 用到时连上（已经连着就不动）
+/// 用到时连上（已经连着、配置没改就不动；配置改了重连）
 pub fn ensure(name: &str) -> Result<(), String> {
-    if LIMBS.read().unwrap().contains_key(name) {
-        return Ok(());
-    }
     let config =
         enabled().into_iter().find(|(server, _)| server == name).map(|(_, config)| config).ok_or(format!("没有 MCP 服务「{name}」"))?;
+    if LIMBS.read().unwrap().get(name).is_some_and(|limb| limb.hash == config_hash(&config)) {
+        return Ok(());
+    }
     attach(name, config).map(|_| ())
 }
 
@@ -267,7 +271,7 @@ pub fn attach(name: &str, config: Value) -> Result<Arc<Limb>, String> {
         }
     }
     remember_tools(&name, &raw, &tools);
-    let limb = Arc::new(Limb { name: name.clone(), client, client_id, tools });
+    let limb = Arc::new(Limb { name: name.clone(), client, client_id, tools, hash: config_hash(&raw) });
     LIMBS.write().unwrap().insert(name, limb.clone());
     Ok(limb)
 }
