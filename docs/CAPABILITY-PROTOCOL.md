@@ -167,9 +167,10 @@ EDITH                                  能力
 | `mode` | 否 | 这一轮的权限模式（同 Friday）：`auto` 删除类、改系统的才问；`plan` 先给计划、照 EDITH 的规则问；`full` 都不问。读敏感的文件、访问本机 / 内网什么模式都问。不写照 EDITH 的规则（[§6.5](#65-approve请求)） |
 | `thinking` | 否 | 思考档位：`off` / `low` / `medium` / `high` / `ultra`（按 high 发）；不写照 `config.json` |
 | `engine` | 否 | 用哪个模型：`config.json` 的 `engines` 里的 id（[EDITH.md](EDITH.md#模型)）；不写用默认的 |
+| `team` | 否 | 工作方式：`workflow`（工作流；Friday 的 `ultra` 也认）或 `default`（原来的，需要时派子智能体）；不写照 `edith --workflow`，没有就是原来的（[EDITH.md](EDITH.md#子智能体与工作流)） |
 | `images` | 否 | 附的图片（这台上的路径）：模型能看图时随这段话一起给它（历史里只记路径，发请求时才读成 base64），看不了图的换成一句话 |
 
-`mode`、`thinking`、`engine`、`images` 只认全权的连接（客人不能替自己放开审批，也不能拿这台的文件给模型看）；这一轮派的子 Agent 照着来，
+`mode`、`thinking`、`engine`、`team`、`images` 只认全权的连接（客人不能替自己放开审批，也不能拿这台的文件给模型看）；这一轮派的子 Agent 照着来，
 干活时补充、排着的话按那一轮开始时的。
 
 回话：

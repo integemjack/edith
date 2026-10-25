@@ -73,6 +73,7 @@ const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作�
   -C, --cwd <目录>    工作目录（默认当前目录）
   -w, --worktree      开一个 git worktree 去那里干（.edith/worktrees/，分支 edith/<编号>）；退出时没改东西就自动清掉
   --auto              不问就做：改文件、跑命令、打开新网站这些不再等批准（~/.edith/config.json 的 permissions.deny 照样挡）
+  --workflow          按工作流做：先定完整流程（步骤、依赖、验收标准）交给子智能体并联 / 串联去做，回来验收、不合格打回
   -q, --quiet         只打最终回答，不打过程
   -v, --verbose       也打思考、每段请求的用量、能力的日志
 
@@ -325,6 +326,7 @@ fn parse(arguments: &[String]) -> Result<Options, String> {
             "--local" => options.layer = capabilities::Layer::Local,
             "-w" | "--worktree" => options.worktree = true,
             "--auto" => options.auto = true,
+            "--workflow" => brain::set_default_workflow(true),
             "--idle" => options.idle = true,
             "--linger" => {
                 let seconds = rest.next().ok_or("--linger 后面要跟秒数")?;

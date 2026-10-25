@@ -126,6 +126,35 @@ fn ready_made_subagents_bring_role_and_tools() {
     assert_eq!((list[0]["name"].as_str(), list[0]["source"].as_str()), (Some("reviewer"), Some("user")), "{list}");
 }
 
+/// 工作方式：原来的（run_workflow 按需取回）和工作流（--workflow：直接给、系统提示接上那一段）
+#[test]
+fn workflow_mode_gives_the_workflow_up_front() {
+    let names = |request: &Value| -> Vec<String> {
+        request["tools"].as_array().unwrap().iter().filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string)).collect()
+    };
+    let first = |home: &std::path::Path| -> Value { serde_json::from_str(requests(home).lines().next().unwrap()).unwrap() };
+    let (work, home) = scratch("team-default");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let output = edith(&home, model.port, &work, &["只聊天"]);
+    assert!(output.status.success(), "{}", text(&output));
+    let plain = first(&home);
+    let system = plain["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        !names(&plain).contains(&"run_workflow".to_string()) && names(&plain).contains(&"delegate_task".to_string()),
+        "{:?}",
+        names(&plain)
+    );
+    assert!(system.contains("run_workflow（") && !system.contains("## 工作方式：工作流"), "原来的方式：run_workflow 在按需的清单里");
+    let (work, home) = scratch("team-workflow");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let output = edith(&home, model.port, &work, &["--workflow", "只聊天"]);
+    assert!(output.status.success(), "{}", text(&output));
+    let request = first(&home);
+    let system = request["messages"][0]["content"].as_str().unwrap();
+    assert!(names(&request).contains(&"run_workflow".to_string()), "{:?}", names(&request));
+    assert!(system.contains("## 工作方式：工作流") && !system.contains("run_workflow（"), "工作流：直接给、不在按需的清单里");
+}
+
 #[test]
 fn rework_sends_it_back() {
     let (work, home) = scratch("rework");

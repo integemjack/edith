@@ -64,6 +64,16 @@ pub struct Prefs {
     pub thinking: Option<String>,
     /// 用哪个模型：config.json 的 engines 里的 id
     pub engine: Option<String>,
+    /// 工作方式：workflow = 工作流（主智能体先定完整流程交给子智能体，回来验收）；default = EDITH 原来的（需要时自己派）；
+    /// 没给时按 edith --workflow（DEFAULT_WORKFLOW）
+    pub team: Option<String>,
+}
+
+/// edith --workflow：这个进程里没指明工作方式的都按工作流
+static DEFAULT_WORKFLOW: AtomicBool = AtomicBool::new(false);
+
+pub fn set_default_workflow(on: bool) {
+    DEFAULT_WORKFLOW.store(on, Ordering::Relaxed);
 }
 
 impl Prefs {
@@ -75,6 +85,16 @@ impl Prefs {
             mode: text("mode", &["auto", "plan", "full"]),
             thinking: text("thinking", &["off", "low", "medium", "high", "ultra"]),
             engine: text("engine", &[]).filter(|engine| !engine.is_empty()),
+            // Friday 的任务模式「工作流」原始值是 ultra
+            team: text("team", &["workflow", "ultra", "default"]).map(|team| if team == "ultra" { "workflow".into() } else { team }),
+        }
+    }
+
+    /// 这一轮按工作流做
+    pub fn workflow(&self) -> bool {
+        match self.team.as_deref() {
+            Some(team) => team == "workflow",
+            None => DEFAULT_WORKFLOW.load(Ordering::Relaxed),
         }
     }
 
@@ -189,7 +209,7 @@ pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
     specs.extend(
         crate::team::specs(context)
             .into_iter()
-            .filter(|spec| crate::team::ALWAYS.contains(&name(spec).as_str()) && allowed.allows(&name(spec), false)),
+            .filter(|spec| crate::team::always(context).contains(&name(spec).as_str()) && allowed.allows(&name(spec), false)),
     );
     if !crate::deferred::available(context).is_empty() || !crate::mcp::unknown().is_empty() {
         specs.push(crate::deferred::spec());
@@ -559,12 +579,13 @@ pub fn run(
         None => instructions(cwd),
     };
     let mut extra = on_demand(context);
-    if context.prefs.plan() {
-        extra = [extra, prompts::text("edith.plan-mode", &args(&[]), None)]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+    // 计划模式、工作流（工作流只给主智能体：它定流程、子智能体照步骤做）
+    let modes = [
+        context.prefs.plan().then(|| prompts::text("edith.plan-mode", &args(&[]), None)),
+        (context.me.is_none() && context.prefs.workflow()).then(|| prompts::text("edith.workflow-mode", &args(&[]), None)),
+    ];
+    for mode in modes.into_iter().flatten() {
+        extra = [extra, mode].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n\n");
     }
     let mut settings = Settings {
         instructions: if extra.is_empty() { base } else { format!("{base}\n\n{extra}") },

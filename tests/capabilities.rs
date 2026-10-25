@@ -672,7 +672,7 @@ fn sessions_fork_truncate_and_copy() {
 }
 
 #[test]
-fn sense_brings_mode_thinking_engine_and_images() {
+fn sense_brings_mode_thinking_engine_team_and_images() {
     let (work, home) = scratch("prefs");
     let model = fake_model(&home.join("requests.jsonl"));
     // 第二个模型（同一个假模型、另一个名字），密钥按名字在 secrets.json 里
@@ -686,7 +686,7 @@ fn sense_brings_mode_thinking_engine_and_images() {
     // 完全模式：写文件不问（这个能力不能批准，照 EDITH 的规则就没人能批、不做）
     let params = json!({
         "text": r#"调用工具 write_file 参数 {"path":"made.txt","content":"x\n"}"#, "kind": "user",
-        "mode": "full", "thinking": "high", "engine": "second", "images": [work.join("shot.png")],
+        "mode": "full", "thinking": "high", "engine": "second", "team": "ultra", "images": [work.join("shot.png")],
     });
     configure_cap(&home, json!([{ "delay": 0.3, "send": { "jsonrpc": "2.0", "method": "sense", "params": params } }]), "done");
     let _edith = run(&home, model.port, &work);
@@ -695,6 +695,10 @@ fn sense_brings_mode_thinking_engine_and_images() {
         std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
     let first = &requests[0];
     assert_eq!((first["model"].as_str(), first["reasoning_effort"].as_str()), (Some("second-model"), Some("high")), "{first}");
+    // 工作流（Friday 的 ultra）：run_workflow 直接给，系统提示接上那一段
+    let tools: Vec<&str> = first["tools"].as_array().unwrap().iter().filter_map(|tool| tool["function"]["name"].as_str()).collect();
+    assert!(tools.contains(&"run_workflow") && tools.contains(&"delegate_task"), "{tools:?}");
+    assert!(first["messages"][0]["content"].as_str().unwrap().contains("## 工作方式：工作流"), "{first}");
     // 图片随这段话给模型（存档里只记路径，发的时候才读成 base64）
     let user = first["messages"].as_array().unwrap().iter().find(|message| message["role"] == "user").unwrap();
     assert!(user["content"].to_string().contains("data:image/png;base64,iVBORw=="), "{user}");

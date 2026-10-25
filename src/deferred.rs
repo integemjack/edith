@@ -31,7 +31,7 @@ pub fn available(context: &Context) -> Vec<Value> {
     let allowed = &context.tools;
     let mut specs: Vec<Value> = crate::team::specs(context)
         .into_iter()
-        .filter(|spec| !crate::team::ALWAYS.contains(&name_of(spec)) && allowed.allows(name_of(spec), false))
+        .filter(|spec| !crate::team::always(context).contains(&name_of(spec)) && allowed.allows(name_of(spec), false))
         .collect();
     specs.extend(crate::capabilities::specs(allowed));
     specs.extend(crate::mcp::specs(allowed));

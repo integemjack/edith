@@ -33,6 +33,15 @@ use crate::tools::Outcome;
 pub const MAX_DEPTH: usize = 3;
 /// 一直给的派发工具（其余的按需取回：deferred.rs）
 pub const ALWAYS: &[&str] = &["delegate_task"];
+
+/// 这一轮一直给的派发工具：ALWAYS；按工作流做时主智能体还有 run_workflow（不用先取回）
+pub fn always(context: &Context) -> Vec<&'static str> {
+    let mut list = ALWAYS.to_vec();
+    if context.me.is_none() && context.prefs.workflow() {
+        list.push("run_workflow");
+    }
+    list
+}
 /// 派子智能体的工具
 pub const TOOLS: &[&str] =
     &["delegate_task", "run_parallel_tasks", "run_workflow", "rework_agent", "read_agent_log", "message_agent", "stop_agent"];
