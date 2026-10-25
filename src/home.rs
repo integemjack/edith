@@ -15,10 +15,17 @@ pub fn user_home() -> PathBuf {
 }
 
 /// 全局数据目录
+/// 数据根：EDITH_HOME；没指时 ~/.edith——它的 storage.json 里换过位置（Friday 设置 › 文件存放位置，edith-friday 搬的）就用换过的
 pub fn dir() -> PathBuf {
     match std::env::var_os("EDITH_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => user_home().join(".edith"),
+        _ => {
+            let default = user_home().join(".edith");
+            let root = read_json(&default.join("storage.json"))
+                .and_then(|pointer| pointer.get("root").and_then(Value::as_str).map(|root| root.trim().to_string()))
+                .filter(|root| !root.is_empty());
+            root.map(PathBuf::from).unwrap_or(default)
+        }
     }
 }
 
