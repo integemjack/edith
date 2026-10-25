@@ -82,6 +82,15 @@ class Handler(BaseHTTPRequestHandler):
                 events.append(say("结论：第一步做完\n依据：无\n改动：无\n未完成与风险：无"))
             else:
                 events.append(say("结论：子任务做完了\n依据：无\n改动：无\n未完成与风险：无"))
+        elif "现成测试" in first_user:
+            # 点名现成的子智能体（reviewer）；「叫不存在的」点一个没有的
+            if "交回结果" in last_user:
+                events.append(say("验收通过：现成的做完了"))
+            elif tools_since:
+                events.append(say(tools_since[-1]["content"].splitlines()[0]))
+            else:
+                kind = "nobody" if "叫不存在的" in first_user else "reviewer"
+                events.append(call("delegate_task", {"task": "子任务：审一下改动", "subagent_type": kind}))
         elif "派活测试" in first_user or "打回测试" in first_user:
             ids = re.findall(r"运行记录 id：(\w+)", last_user)
             if "交回结果" in last_user and "打回测试" in first_user and "已打回" not in everything:

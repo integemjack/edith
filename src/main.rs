@@ -23,6 +23,7 @@ mod permissions;
 mod protocol;
 mod sessions;
 mod skills;
+mod subagents;
 mod team;
 mod terminal;
 mod tools;
@@ -62,6 +63,7 @@ const HELP: &str = "EDITH——能自己把事做完的大脑。按目录工作�
   edith worktree [list | prune | remove <编号> [--force]]   edith -w 开的 worktree：看、清掉没改东西的、删掉一个
   edith trust [--yes | revoke]     看这个目录的项目 / 本地配置要起哪些程序、信任它（内容变了要再信任）
   edith skills                     列出技能（~/.edith/skills、~/.claude/skills、Friday 的、项目的 .edith/skills 和 .claude/skills）
+  edith agents [--json]            列出现成的子智能体（~/.edith/agents、~/.claude/agents、Friday 的、项目的 .edith/.claude/.friday 下的 agents）
   edith tools                      列出 edith.tools 里的工具（装了哪个版本、有没有新的）
   edith tools install <工具>       下载、装上（edith-websocket、edith-connect……；能力要用时也会自己下）
   edith tools remove <工具>        去掉
@@ -245,6 +247,27 @@ fn main() {
             }
             for skill in skills {
                 println!("{}（{}）：{}\n  {}", skill.name, skill.source, skill.description, skill.file.display());
+            }
+        }
+        // 现成的子智能体；--json 给 edith-friday（Friday 设置 › 工具、输入框的「/」菜单列出来）
+        "agents" => {
+            let agents = subagents::all();
+            if options.words.get(1).map(String::as_str) == Some("--json") {
+                let list: Vec<serde_json::Value> = agents
+                    .iter()
+                    .map(|agent| {
+                        serde_json::json!({ "name": agent.name, "description": agent.description, "tools": agent.tools, "model": agent.model,
+                            "file": agent.file.to_string_lossy(), "source": agent.source, "plugin": agent.plugin })
+                    })
+                    .collect();
+                println!("{}", serde_json::Value::Array(list));
+                return;
+            }
+            if agents.is_empty() {
+                println!("还没有现成的子智能体（放进 ~/.edith/agents/<名字>.md，Claude Code 的 ~/.claude/agents/ 也认）");
+            }
+            for agent in agents {
+                println!("{}（{}）：{}\n  {}", agent.name, agent.source, agent.description, agent.file.display());
             }
         }
         "worktree" | "worktrees" => exit_on(worktree_command(&options.words[1..])),

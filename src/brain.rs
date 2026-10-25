@@ -171,7 +171,9 @@ pub fn instructions(cwd: &Path) -> String {
 
 /// 系统提示后面接的：按需工具的清单、技能的清单（deferred.rs、skills.rs）
 fn on_demand(context: &Context) -> String {
-    [crate::deferred::prompt(context), crate::skills::prompt(), crate::memory::prompt(), crate::home::extra_prompt()]
+    // 能派子智能体的才列现成的子智能体
+    let agents = if crate::team::available(context).contains(&"delegate_task") { crate::subagents::prompt() } else { String::new() };
+    [crate::deferred::prompt(context), agents, crate::skills::prompt(), crate::memory::prompt(), crate::home::extra_prompt()]
         .into_iter()
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
@@ -200,6 +202,10 @@ pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
     // 设置里关掉的工具（config.json 的 disabledTools，Friday 的设置 › 工具）不给
     let disabled = crate::home::disabled_tools();
     specs.retain(|spec| !disabled.contains(&name(spec)));
+    // 现成的子智能体限定了工具：只给这些（取回按需工具的 load_tools 留着）
+    if let Some(only) = context.me.as_ref().and_then(|me| me.tools.as_ref()) {
+        specs.retain(|spec| only.contains(&name(spec)) || name(spec) == crate::deferred::LOAD);
+    }
     specs
 }
 
@@ -268,6 +274,12 @@ fn run_tool(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, 
         return refused(format!("{name} 在设置里关掉了"));
     }
     let canonical = tool_aliases::canonical_name(name);
+    if let Some(only) = context.me.as_ref().and_then(|me| me.tools.as_ref())
+        && name != crate::deferred::LOAD
+        && !only.iter().any(|tool| tool == name || *tool == canonical)
+    {
+        return refused(format!("你能用的工具只有：{}（{name} 不在里面）", only.join("、")));
+    }
     let read_only = capabilities::is_read_only(name) || crate::mcp::is_read_only(name) || name == crate::memory::SEARCH;
     if !context.tools.allows(name, read_only) && !context.tools.allows(&canonical, read_only) {
         return refused(format!("没有权限用 {name}：这一轮的话来自的连接{}", context.tools.describe()));

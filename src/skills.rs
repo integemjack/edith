@@ -31,17 +31,29 @@ impl Skill {
     }
 }
 
-/// Friday 的技能目录（各平台的数据目录）
-fn friday_dir() -> Option<PathBuf> {
+/// Friday 的数据目录（各平台的；这台装着 Friday 时它的技能、子智能体也能用）
+pub fn friday_data_dir() -> Option<PathBuf> {
     let home = home::user_home();
     let dir = if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/Friday/Skills")
+        home.join("Library/Application Support/Friday")
     } else if cfg!(windows) {
-        PathBuf::from(std::env::var_os("APPDATA")?).join("Friday").join("Skills")
+        PathBuf::from(std::env::var_os("APPDATA")?).join("Friday")
     } else {
-        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share")).join("Friday").join("Skills")
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share")).join("Friday")
     };
     Some(dir)
+}
+
+/// Claude Code 的配置文件夹：CLAUDE_CONFIG_DIR，没指时 ~/.claude
+pub fn claude_dir() -> PathBuf {
+    match std::env::var("CLAUDE_CONFIG_DIR").ok().map(|dir| dir.trim().to_string()).filter(|dir| !dir.is_empty()) {
+        Some(dir) => match dir.strip_prefix("~/").or_else(|| dir.strip_prefix("~\\")) {
+            Some(rest) => home::user_home().join(rest),
+            None if dir == "~" => home::user_home(),
+            None => PathBuf::from(dir),
+        },
+        None => home::user_home().join(".claude"),
+    }
 }
 
 /// 找技能的目录（先找的同名优先）
@@ -52,15 +64,26 @@ pub fn roots() -> Vec<(PathBuf, &'static str)> {
         roots.push((home::workspace().join(".claude").join("skills"), "项目"));
     }
     roots.push((home::dir().join("skills"), "EDITH"));
-    roots.push((home::user_home().join(".claude").join("skills"), "Claude Code"));
-    if let Some(dir) = friday_dir() {
-        roots.push((dir, "Friday"));
+    roots.push((claude_dir().join("skills"), "Claude Code"));
+    if let Some(dir) = friday_data_dir() {
+        roots.push((dir.join("Skills"), "Friday"));
     }
     roots
 }
 
+/// 分开 YAML 头和正文（没有头时头是空的）
+pub fn split_header(text: &str) -> (String, String) {
+    match text.strip_prefix("---") {
+        Some(rest) => match rest.split_once("\n---") {
+            Some((header, body)) => (header.to_string(), body.split_once('\n').map_or("", |(_, body)| body).to_string()),
+            None => (String::new(), text.to_string()),
+        },
+        None => (String::new(), text.to_string()),
+    }
+}
+
 /// YAML 头里的一项：`key: value`（值可以带引号），或者多行的 `key: |` / `key: >`（下面缩进的几行，接成一段）
-fn field(header: &str, key: &str) -> Option<String> {
+pub fn field(header: &str, key: &str) -> Option<String> {
     let lines: Vec<&str> = header.lines().collect();
     let index =
         lines.iter().position(|line| line.split_once(':').is_some_and(|(name, _)| name.trim() == key && !name.starts_with([' ', '\t'])))?;
@@ -78,13 +101,7 @@ fn field(header: &str, key: &str) -> Option<String> {
 fn parse(file: &Path, source: &'static str) -> Option<Skill> {
     let text = std::fs::read_to_string(file).ok()?;
     let folder = file.parent()?.file_name()?.to_string_lossy().into_owned();
-    let (header, body) = match text.strip_prefix("---") {
-        Some(rest) => match rest.split_once("\n---") {
-            Some((header, body)) => (header.to_string(), body.to_string()),
-            None => (String::new(), text.clone()),
-        },
-        None => (String::new(), text.clone()),
-    };
+    let (header, body) = split_header(&text);
     let name = field(&header, "name").unwrap_or(folder);
     let description = field(&header, "description").unwrap_or_else(|| {
         body.lines()

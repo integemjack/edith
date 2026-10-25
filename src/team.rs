@@ -45,6 +45,8 @@ pub struct Me {
     pub role: String,
     pub task: String,
     pub depth: usize,
+    /// 现成的子智能体限定了能用的工具（None = 和主智能体一样）
+    pub tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -82,6 +84,8 @@ struct Agent {
     id: String,
     name: String,
     role: String,
+    /// 派它时点名的现成子智能体限定的工具
+    allowed: Option<Vec<String>>,
     /// 派给它的任务（自己查、验收提示按它）
     task: String,
     session: String,
@@ -321,6 +325,22 @@ pub fn specs(context: &Context) -> Vec<Value> {
 
 // MARK: - 派、跑
 
+/// 这一轮有没有这个工具（现成子智能体的 tools 换叫法、丢掉没有的用）
+fn known_tool(context: &Context, name: &str) -> bool {
+    crate::tools::BUILTINS.contains(&name)
+        || TOOLS.contains(&name)
+        || [crate::memory::SAVE, crate::memory::SEARCH, crate::skills::USE].contains(&name)
+        || crate::deferred::available(context).iter().any(|spec| spec["function"]["name"] == name)
+}
+
+/// 点名的现成子智能体都有（没有的回给模型，列出有的）
+fn check_types(specs: &[&Value], context: &Context) -> Result<(), String> {
+    for spec in specs {
+        crate::subagents::resolve(spec.get("agentType").and_then(Value::as_str), &|tool| known_tool(context, tool))?;
+    }
+    Ok(())
+}
+
 /// 照派发的参数建一个子智能体（还没开始跑）
 /// 派出一个子 Agent。call：派它的工具调用 id；slot：那一批里第几个；kind：delegate / parallel / workflow
 fn create(spec: &Value, context: &Context, cwd: &Path, call: &str, slot: usize, kind: &'static str) -> Arc<Agent> {
@@ -328,11 +348,15 @@ fn create(spec: &Value, context: &Context, cwd: &Path, call: &str, slot: usize, 
     let task = field("task").unwrap_or("").to_string();
     let used: HashSet<String> =
         AGENTS.lock().unwrap().values().filter(|agent| agent.session == context.session).map(|agent| agent.name.clone()).collect();
-    let name = agents::agent_name(field("name"), None, field("role"), &task, &used);
+    // 点名了现成的子智能体：角色、能用的工具照它的文件（派之前 check_types 查过名字）
+    let definition = crate::subagents::resolve(field("agentType"), &|tool| known_tool(context, tool)).ok().flatten();
+    let short = definition.as_ref().map(|definition| definition.agent.short_name.clone());
+    let name = agents::agent_name(field("name"), short.as_deref(), field("role"), &task, &used);
     let agent = Arc::new(Agent {
         id: uuid::Uuid::new_v4().simple().to_string(),
         name,
-        role: field("role").unwrap_or("").to_string(),
+        role: crate::subagents::composed_role(definition.as_ref(), field("role").unwrap_or("")),
+        allowed: definition.and_then(|definition| definition.tools),
         task,
         session: context.session.clone(),
         parent: context.me.as_ref().map(|me| me.id.clone()),
@@ -588,6 +612,7 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
                 role: agent.role.clone(),
                 task: agent.task.clone(),
                 depth: agent.depth,
+                tools: agent.allowed.clone(),
             }),
         };
         let mut history = std::mem::take(&mut *agent.history.lock().unwrap());
@@ -773,6 +798,9 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
             {
                 return Some(refuse("派下去的必须比你自己的任务小：不能把你的整个任务原样交给一个下级，自己做"));
             }
+            if let Err(message) = check_types(&[&spec], context) {
+                return Some(refuse(message));
+            }
             let agent = create(&spec, context, cwd, call, 0, "delegate");
             let prompt = first_prompt(&agent, &agent.task);
             if context.me.is_none() {
@@ -794,6 +822,9 @@ pub fn call(name: &str, args: &Map<String, Value>, cwd: &Path, context: &Context
                 Ok(specs) => specs,
                 Err(message) => return Some(refuse(message)),
             };
+            if let Err(message) = check_types(&specs.iter().collect::<Vec<_>>(), context) {
+                return Some(refuse(message));
+            }
             let agents: Vec<Arc<Agent>> =
                 specs.iter().enumerate().map(|(slot, spec)| create(spec, context, cwd, call, slot, "parallel")).collect();
             if context.me.is_none() {
@@ -953,6 +984,9 @@ fn start_workflow(args: &Map<String, Value>, context: &Context, cwd: &Path, call
     };
     let goal = plan["goal"].as_str().unwrap_or("").to_string();
     let steps: Vec<Value> = plan["steps"].as_array().cloned().unwrap_or_default();
+    if let Err(message) = check_types(&steps.iter().map(|step| &step["spec"]).collect::<Vec<_>>(), context) {
+        return refuse(message);
+    }
     // 没起名字的步骤用它的 id（比从任务里截一段好认）
     let agents: Vec<Arc<Agent>> = steps
         .iter()

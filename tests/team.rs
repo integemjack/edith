@@ -90,6 +90,43 @@ fn delegated_work_comes_back_for_review() {
 }
 
 #[test]
+fn ready_made_subagents_bring_role_and_tools() {
+    let (work, home) = scratch("subagent-type");
+    let model = fake_model(&home.join("requests.jsonl"));
+    std::fs::create_dir_all(home.join("agents")).unwrap();
+    std::fs::write(
+        home.join("agents").join("reviewer.md"),
+        "---\nname: reviewer\ndescription: 审代码：看改动有没有 bug\ntools: Read, Bash\nmodel: sonnet\n---\n你是代码审查员，只看不改。\n",
+    )
+    .unwrap();
+    let claude = home.join("no-claude");
+    let run = |words: &[&str]| common::command(&home, model.port, &work, words).env("CLAUDE_CONFIG_DIR", &claude).output().unwrap();
+    let output = run(&["现成测试"]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("验收通过：现成的做完了"), "{}", text(&output));
+    let log = requests(&home);
+    // 主智能体的系统提示列着它；子智能体的角色是文件正文、工具只有 Read（read_file）、Bash（run_shell），名字用它的
+    assert!(log.contains("现成的子智能体") && log.contains("- reviewer：审代码：看改动有没有 bug"), "{log}");
+    let sub = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|request| request["messages"][0]["content"].as_str().is_some_and(|system| system.contains("你是代码审查员，只看不改")));
+    let sub = sub.unwrap_or_else(|| panic!("子智能体的请求里没有现成的角色：{log}"));
+    let mut tools: Vec<&str> = sub["tools"].as_array().unwrap().iter().filter_map(|tool| tool["function"]["name"].as_str()).collect();
+    tools.sort();
+    assert_eq!(tools, vec!["read_file", "run_shell"], "{sub}");
+    let (_, records) = agent_records(&home, &work);
+    assert_eq!(records[0]["name"], "reviewer");
+    // 点了没有的：回给模型，列出有的
+    let (work2, _) = scratch("subagent-type-missing");
+    let output = common::command(&home, model.port, &work2, &["现成测试 叫不存在的"]).env("CLAUDE_CONFIG_DIR", &claude).output().unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("没有叫「nobody」的现成子智能体。有的：reviewer"), "{}", text(&output));
+    // edith agents --json 列出来
+    let listed = run(&["agents", "--json"]);
+    let list: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!((list[0]["name"].as_str(), list[0]["source"].as_str()), (Some("reviewer"), Some("user")), "{list}");
+}
+
+#[test]
 fn rework_sends_it_back() {
     let (work, home) = scratch("rework");
     let model = fake_model(&home.join("requests.jsonl"));

@@ -222,6 +222,12 @@ general（默认）：到哪都适用；project：只跟这个项目有关（用
 技能是做某一类事的现成做法（可能带脚本、模板、参考资料）。手上的事和哪个技能的用途对得上，先用 use_skill 读它的全文，照着做：
 {{list}}
 
+@@ edith.agents
+@// 能派子智能体时：项目的 .edith/agents、.claude/agents、.friday/agents，~/.edith/agents（含 Friday 插件带的），Claude Code 的 ~/.claude/agents，Friday 的 Agents 里现成的子智能体，没有时不给这段。agents：每个一行「- 名字：用途」
+## 现成的子智能体
+下面这些子智能体的角色、能用的工具已经写好了。要派的活和其中一个的用途对得上时，派发时用 subagent_type 写它的名字（role 不用再写，写了接在它的角色后面）；对不上的照常用 role 现场写。
+{{agents}}
+
 @@ edith.tool.use_skill
 读一个技能的全文（系统提示「技能」里列着名字和用途）。读完照它的做法做；它提到的脚本、模板、参考资料在它的文件夹里。
 
