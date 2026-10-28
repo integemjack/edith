@@ -624,6 +624,7 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
                 tools: agent.allowed.clone(),
             }),
             instructions: String::new(),
+            ..Default::default()
         };
         let mut history = std::mem::take(&mut *agent.history.lock().unwrap());
         let mut message = prompt;

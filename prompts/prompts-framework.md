@@ -28,6 +28,36 @@
 @// 按上下文上限整段去掉的地方留的说明（ContextFit）。count：去掉了几条
 （为放进模型的上下文，这里省略了较早的 {{count}} 条消息（对话和工具记录）；需要时重新调用工具查看。）
 
+@// ———— 上下文折叠分级（v2.86，同 Friday；会话那层在 src/folds.rs，一次运行里的在 friday-core 的 folding::trim）————
+
+@@ context-fold.dropped-steps
+@// 主 Agent 一轮里已折叠的步骤太多、最早的整步去掉时留的说明，写在后面第一条回答前面。count：去掉了几步；turn：第几轮
+（第 {{turn}} 轮较早的 {{count}} 步已省略，以节省上下文；要看当时的调用参数和完整结果，用 read_history 看第 {{turn}} 轮。）
+
+@@ context-fold.dropped-steps.sub
+@// 子 Agent 一次运行里已折叠的步骤太多、最早的整步去掉时留的说明。count：一共去掉了几步
+（较早的 {{count}} 步已省略，以节省上下文；需要细节就重新调用工具。）
+
+@@ context-fold.skeleton-user
+@// 只留要点的较早轮次里，太长的用户消息留开头和结尾。head / tail：开头和结尾；count：原话多少字；turn：第几轮
+{{head}}
+…（较早的轮次，原话共 {{count}} 字，这里只留开头和结尾；原文用 read_history 看第 {{turn}} 轮）…
+{{tail}}
+
+@@ context-fold.skeleton-notice
+@// 只留要点的较早轮次里，子 Agent 的汇报只留开头。head：开头；count：原文多少字
+{{head}}…（较早的汇报，原 {{count}} 字，这里只留开头；全文用 read_agent_log 按上面的 id 看）
+
+@@ context-fold.skeleton-tools
+@// 只留要点的较早轮次里，一条回答用了哪些工具（接在它的结论后面）。count：调用了几次；tools：工具名和次数；turn：第几轮
+（这一步调用了 {{count}} 次工具：{{tools}}；过程和结果已省略，要看用 read_history 看第 {{turn}} 轮）
+
+@@ context-fold.omitted
+@// 整轮省略的较早轮次留的说明，写在后面第一条用户消息前面。range：第几轮到第几轮；said：这些轮里用户说过的话（第一条和像要求的，截短；没有就是空的）
+[较早的对话已省略（EDITH 自动附上，用户看不到这段）]
+第 {{range}} 轮对话已省略，以节省上下文；用户的要求以他们的原话为准。
+{{said}}要看当时的原文（用户的话、你的回答、工具调用和结果），用 read_history。
+
 @// ———— 引擎（OpenAIChatEngine）————
 
 @@ wrap-up

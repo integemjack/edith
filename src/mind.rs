@@ -397,6 +397,11 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
     };
     let cwd = PathBuf::from(&session.cwd);
     let cwd = if cwd.is_dir() { cwd } else { crate::home::user_home() };
+    // v2.86 存档里是原样的历史：每轮开头成批整理较早的部分怎么交给模型（folds.rs），照标记拼出这一轮的那份
+    let echoes = crate::folds::echoes_reasoning(&model.base_url, &model.model);
+    let change = crate::folds::fold(&session.history, &mut session.folds, echoes);
+    let turn_number = crate::folds::next_turn(&session.history);
+    let pending = Arc::new(Mutex::new(Vec::<Value>::new()));
     let context = brain::Context {
         session: session_id.to_string(),
         prefs: input.origin.prefs.clone(),
@@ -406,6 +411,9 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         cancel: Some(cancel.clone()),
         me: None,
         instructions: session.instructions.clone(),
+        history_turn: Some(turn_number),
+        prior_calls: Some(Arc::new(brain::calls_of(&session.history))),
+        pending: Some(pending.clone()),
     };
     let recorder = Mutex::new(crate::checks::Recorder::default());
     let mut text = input.origin.wrap(if input.interjected { "edith.interjection" } else { "edith.input" }, &input.text);
@@ -438,8 +446,12 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         }
         taken.iter().map(|item| item.origin.wrap("edith.interjection", &item.text)).collect::<Vec<_>>()
     };
-    let history = std::mem::take(&mut session.history);
+    if !change.is_empty() {
+        emit(session_id, &input.turn, "notice", json!({ "text": change.notice() }));
+    }
+    let history = crate::folds::render(&session.history, &session.folds, echoes);
     let mut turn = brain::run(&model, history, &text, &input.origin.images, &cwd, cancel, &context, &mut on_event, &mut interject);
+    pending.lock().unwrap().extend(turn.appended.iter().cloned());
     // 交付检查（checks.rs）：写完没验证、交的是方案、只说了下一步、问要不要修——追一条提醒接着做，每种最多一次
     let request = request_of(session_id);
     let delegates = context.tools.allows("delegate_task", false);
@@ -452,6 +464,7 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         emit(session_id, &input.turn, "notice", json!({ "text": followup.notice }));
         let previous = turn.answer.clone();
         turn = brain::run(&model, turn.history, &followup.prompt, &[], &cwd, cancel, &context, &mut on_event, &mut interject);
+        pending.lock().unwrap().extend(turn.appended.iter().cloned());
         if turn.answer.trim().is_empty() {
             turn.answer = previous;
         }
@@ -476,11 +489,17 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         let prompt = prompts::text("hooks.stop", &[("reason".to_string(), outcome.reason)].into_iter().collect(), None);
         let previous = turn.answer.clone();
         turn = brain::run(&model, turn.history, &prompt, &[], &cwd, cancel, &context, &mut on_event, &mut interject);
+        pending.lock().unwrap().extend(turn.appended.iter().cloned());
         if turn.answer.trim().is_empty() {
             turn.answer = previous;
         }
     }
-    session.history = turn.history;
+    // 存原样的：这一轮接上的全部（第一条是用户交来的那条，记上第几轮）
+    let mut appended = std::mem::take(&mut *pending.lock().unwrap());
+    if let Some(first) = appended.first_mut().filter(|first| first["role"] == "user") {
+        first[crate::folds::TURN] = json!(turn_number);
+    }
+    session.history.extend(appended);
     let notes: Vec<String> = {
         let mut sessions = SESSIONS.lock().unwrap();
         sessions.get_mut(session_id).map(|state| std::mem::take(&mut state.notes)).unwrap_or_default()

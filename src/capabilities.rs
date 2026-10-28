@@ -1258,6 +1258,7 @@ fn tools_listing() -> Value {
         cancel: None,
         me: None,
         instructions: String::new(),
+        ..Default::default()
     };
     let entry = |spec: &Value, group: String| {
         let name = spec["function"]["name"].as_str().unwrap_or("").to_string();

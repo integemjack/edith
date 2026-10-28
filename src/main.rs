@@ -12,6 +12,8 @@ mod changes;
 mod checks;
 mod deferred;
 mod downloads;
+mod folds;
+mod history;
 mod home;
 mod http;
 mod instance;

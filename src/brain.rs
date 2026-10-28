@@ -55,6 +55,12 @@ pub struct Context {
     pub me: Option<crate::team::Me>,
     /// 这段会话专用的系统提示（建会话时能力给的；接在主智能体的后面，子智能体不带）
     pub instructions: String,
+    /// v2.86 主智能体这一轮是第几轮（read_history 的轮次、省略步骤的说明按它）；子智能体 None
+    pub history_turn: Option<i64>,
+    /// v2.86 会话原样历史里调过的工具（只留助手消息的 tool_calls）：按需工具按它算——交给模型的那份较早的轮次可能折成了骨架、省略了
+    pub prior_calls: Option<std::sync::Arc<Vec<Value>>>,
+    /// v2.86 这一轮前面几段（交付检查追的、钩子让接着做的）已经接上、还没存档的消息（read_history 看这一轮用）
+    pub pending: Option<std::sync::Arc<std::sync::Mutex<Vec<Value>>>>,
 }
 
 /// 这一轮按什么来（sense 带来的，只认全权的连接；没给的照 EDITH 自己的规则和 config.json）
@@ -107,8 +113,10 @@ impl Prefs {
 
 /// 一轮的结果
 pub struct Turn {
-    /// 这一轮之后的历史（存进会话）
+    /// 这一轮之后交给模型的历史（折叠、压缩过的；接着追一段时用它）
     pub history: Vec<Value>,
+    /// v2.86 这一段接上的消息（原样：存进会话的是它）
+    pub appended: Vec<Value>,
     /// 最终回答
     pub answer: String,
     pub error: Option<String>,
@@ -204,6 +212,15 @@ fn on_demand(context: &Context) -> String {
 
 /// 给模型的工具（只给这一轮许可的）：一直给的（自带的、delegate_task、load_tools、有技能时 use_skill）+ 历史里取回过的按需工具
 /// （按第一次取回的先后接在后面，前面不变）
+/// 历史里调过的工具：只留助手消息的 tool_calls（按需工具按它算，见 deferred::loaded）
+pub fn calls_of(history: &[Value]) -> Vec<Value> {
+    history
+        .iter()
+        .filter(|message| message["role"] == "assistant" && message["tool_calls"].as_array().is_some_and(|calls| !calls.is_empty()))
+        .map(|message| json!({ "role": "assistant", "tool_calls": message["tool_calls"] }))
+        .collect()
+}
+
 pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
     let allowed = &context.tools;
     let name = |spec: &Value| spec["function"]["name"].as_str().unwrap_or("").to_string();
@@ -220,6 +237,10 @@ pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
         specs.push(crate::skills::spec());
     }
     specs.extend(crate::memory::specs().into_iter().filter(|spec| allowed.allows(&name(spec), name(spec) == crate::memory::SEARCH)));
+    // v2.86 看这段会话较早的原文（主智能体的；只读）
+    if context.me.is_none() && allowed.allows(crate::history::NAME, true) {
+        specs.push(crate::history::spec());
+    }
     specs.extend(crate::deferred::specs(context, history));
     // 设置里关掉的工具（config.json 的 disabledTools，Friday 的设置 › 工具）不给
     let disabled = crate::home::disabled_tools();
@@ -593,14 +614,24 @@ pub fn run(
     for mode in modes.into_iter().flatten() {
         extra = [extra, mode].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join("\n\n");
     }
+    // v2.86 按需工具按原样历史里调过的算（主智能体：会话存档；子智能体：它自己的历史）+ 这一段调的
+    let mut calls: Vec<Value> = match &context.prior_calls {
+        Some(prior) => prior.to_vec(),
+        None => calls_of(&history),
+    };
+    let echoes = crate::folds::echoes_reasoning(&model.base_url, &model.model);
     let mut settings = Settings {
         instructions: if extra.is_empty() { base } else { format!("{base}\n\n{extra}") },
-        tools: tool_specs(context, &history),
+        tools: tool_specs(context, &calls),
         temperature: model.temperature,
         enable_thinking: model.enable_thinking,
         max_tool_rounds: MAX_TOOL_ROUNDS,
         continues_when_truncated: true,
         has_dispatch: true,
+        // v2.86 同 Friday：一次运行里越跑越长时折叠较早的步骤（预算两倍），折过的步骤也有上限
+        folding: Some((crate::folds::session_budget(), echoes, crate::folds::special())),
+        folded_budget: crate::folds::session_folded_budget(),
+        history_turn: context.history_turn,
         ..Settings::default()
     };
     // Friday 选的思考档位（这个模型能调的才管用）
@@ -614,9 +645,14 @@ pub fn run(
     }
     let mut brain = Loop::new(config, history);
     brain.begin(settings.clone());
+    // 主智能体：之前几轮归会话的整理管（folds.rs），这一段只折自己的步骤；子智能体整段都折
+    if context.me.is_none() {
+        brain.fold_from_here();
+    }
     brain.append(vec![json!({ "role": "user", "content": user_content(user_text, images, model) })]);
     let finish = |brain: &Loop, answer: String, error: Option<String>, stopped: bool| Turn {
         history: brain.history().to_vec(),
+        appended: brain.appended().to_vec(),
         answer,
         error,
         stopped,
@@ -631,7 +667,7 @@ pub fn run(
             // 本地大模型先问上下文上限：EDITH 不问，按记下的 / 报错里的算
             prepared = brain.prepare(Some(None), None);
         }
-        for key in ["fitted", "folded"] {
+        for key in ["fitted", "folded", "trimmed"] {
             if prepared[key].is_object() {
                 on(Event::Notice("历史太长，压短了较早的部分".into()));
             }
@@ -680,6 +716,9 @@ pub fn run(
                 Outcome { ok: false, text: rejected.to_string() }
             } else if cancel.load(Ordering::Relaxed) {
                 Outcome { ok: false, text: "（用户停下了，没有执行）".into() }
+            } else if name == crate::history::NAME && context.me.is_none() {
+                // v2.86 看这段会话较早的原文：存档 + 这一轮还没存的
+                crate::history::run(&arguments, context, brain.appended())
             } else {
                 execute(&id, &name, &arguments, cwd, cancel, context)
             };
@@ -701,7 +740,10 @@ pub fn run(
         });
         brain.tool_results(results, images.len(), image_message, added, None);
         // 这一步取回了工具（load_tools）、或者调了还没给的按需工具：下一段请求就给它们
-        let tools_next = tool_specs(context, brain.history());
+        if let Some(last) = brain.appended().iter().rev().find(|message| message["tool_calls"].is_array()) {
+            calls.extend(calls_of(std::slice::from_ref(last)));
+        }
+        let tools_next = tool_specs(context, &calls);
         if tools_next.len() != settings.tools.len() {
             settings.tools = tools_next;
             brain.configure(settings.clone());

@@ -2,7 +2,8 @@
 //! 存 OpenAI 格式的历史（不含 system）和几项元数据。
 //!
 //! **只追加**（同 Claude Code）：一行一条——`{"type":"meta",…}`（id、cwd、created、owner，后面的盖前面的）、
-//! `{"type":"message","message":{…}}`、`{"type":"title","title":…}`、`{"type":"reset"}`（上下文压缩后历史整个换了：
+//! `{"type":"message","message":{…}}`、`{"type":"title","title":…}`、`{"type":"folds","marks":{…}}`（v2.86 较早的部分怎么交给模型，
+//! 见 folds.rs；后面的盖前面的，reset 时清掉）、`{"type":"reset"}`（上下文压缩后历史整个换了：
 //! 之前的作废，后面跟着新的全部）。两个大脑用 -c 接着同一个会话也不会互相盖掉，写到一半断电只丢最后半行。
 //! 老的 `<id>.json`（整个文件重写的那种）读到时换成 `.jsonl`。
 
@@ -11,7 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::home;
 
@@ -27,6 +28,8 @@ pub struct Session {
     pub owner: String,
     /// 这段会话专用的系统提示（接在主智能体的后面；建会话时能力给的，如 Friday 助手的人设）
     pub instructions: String,
+    /// v2.86 较早的部分怎么交给模型（folds.rs；历史下标 → 标记）。history 是原样的
+    pub folds: Map<String, Value>,
     /// 文件里已经有的（这个进程看到的）：存的时候只追加多出来的
     saved: Saved,
 }
@@ -39,6 +42,7 @@ struct Saved {
     cwd: String,
     owner: String,
     instructions: String,
+    folds: Map<String, Value>,
 }
 
 /// 分出去的另一支（Friday 改一条重发、切分支时存着的那份历史）记在这个名下：列表里不出现，-c 不接它
@@ -103,6 +107,7 @@ impl Session {
             history: Vec::new(),
             owner: String::new(),
             instructions: String::new(),
+            folds: Map::new(),
             saved: Saved::default(),
         }
     }
@@ -144,8 +149,12 @@ impl Session {
                     }
                 }
                 Some("message") => session.history.push(entry["message"].clone()),
-                Some("reset") => session.history.clear(),
+                Some("reset") => {
+                    session.history.clear();
+                    session.folds.clear();
+                }
                 Some("title") => session.title = field("title").unwrap_or_default(),
+                Some("folds") => session.folds = entry["marks"].as_object().cloned().unwrap_or_default(),
                 _ => {}
             }
         }
@@ -157,6 +166,7 @@ impl Session {
             cwd: session.cwd.clone(),
             owner: session.owner.clone(),
             instructions: session.instructions.clone(),
+            folds: session.folds.clone(),
         };
         session
     }
@@ -222,10 +232,15 @@ impl Session {
         let fresh: &[Value] = if appended {
             &self.history[known..]
         } else {
+            // 历史整个换了（截短、换成另一支）：标记按下标记的，作废（下一轮重新整理）
             lines.push(json!({ "type": "reset" }));
+            self.folds.clear();
             &self.history
         };
         lines.extend(fresh.iter().map(|message| json!({ "type": "message", "message": message })));
+        if self.folds != self.saved.folds && !(self.folds.is_empty() && !appended) {
+            lines.push(json!({ "type": "folds", "marks": self.folds }));
+        }
         if !lines.is_empty() {
             let mut text: String = lines.iter().map(|line| format!("{line}\n")).collect();
             // 上次写到一半断了（最后没有换行）：先换行，别接在那半行后面
@@ -249,6 +264,7 @@ impl Session {
             cwd: self.cwd.clone(),
             owner: self.owner.clone(),
             instructions: self.instructions.clone(),
+            folds: self.folds.clone(),
         };
         OWNERS.lock().unwrap().insert(self.id.clone(), self.owner.clone());
         Ok(())
@@ -356,6 +372,19 @@ mod tests {
         let noted =
             vec![json!({ "role": "user", "content": "（能力「friday」记下了下面这段，不用回复，之后用得着时参考）\n/loop 10m 看 CI" })];
         assert_eq!(first_user_text(&noted), "/loop 10m 看 CI");
+        // v2.86 较早的部分怎么交给模型的标记：存进 folds 行，接着追加不丢；历史整个换了就作废
+        let mut marked = Session::load(&session.id).unwrap();
+        marked.folds.insert("1".into(), json!({ "fold": true }));
+        marked.save().unwrap();
+        marked.history.push(json!({ "role": "user", "content": "再说一句" }));
+        marked.save().unwrap();
+        let reloaded = Session::load(&session.id).unwrap();
+        assert_eq!(reloaded.folds.get("1"), Some(&json!({ "fold": true })));
+        assert_eq!(reloaded.history.len(), 4);
+        let mut rewound = reloaded;
+        rewound.history.truncate(3);
+        rewound.save().unwrap();
+        assert!(Session::load(&session.id).unwrap().folds.is_empty(), "截短了：标记作废");
         // 压缩：历史整个换了
         let mut compacted = Session::load(&session.id).unwrap();
         compacted.history = vec![json!({ "role": "user", "content": "摘要" })];
