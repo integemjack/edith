@@ -106,7 +106,7 @@ true = 分大小写（默认不分）
 
 @@ tool.run_shell
 @// shell：在哪个 shell 里跑（Windows 的 PowerShell / macOS 的 zsh / Linux 的 bash）；shellHint：Windows 上的 platform.shell-hint.powershell
-在 {{shell}} 中执行 shell 命令并返回 stdout/stderr，默认 60 秒超时；编译、跑测试这类要更久的用 timeout_seconds 放宽（最多 600）。{{shellHint}}
+在 {{shell}} 中执行 shell 命令并返回 stdout/stderr。要跑好几分钟、说不准多久的（远端的测试脚本、加载大模型、训练、下载）有 Friday 的终端动作（friday__run_in_terminal）时用它：它跑完或打出你要的话时会主动告诉你，不用一直等着、也不会到点被掐掉。默认 60 秒超时；编译、跑测试这类要更久的用 timeout_seconds 放宽（最多 600）。{{shellHint}}
 
 @@ tool.run_shell.command
 要执行的命令
