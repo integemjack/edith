@@ -80,7 +80,8 @@ worktree 里的会话记在仓库名下，回到仓库 `-c`、`edith sessions` �
 
 照 Claude Code（`src/deferred.rs`、`src/skills.rs`）：工具定义很占地方——说一句「你好」原来 4.8k token 里八成是工具定义，接一个 14 个工具的
 MCP 服务每次请求再多 2.1k，而大多数用不上（改完实测：「你好」3.9k，接着那个 MCP 服务 4.1k，只多 0.2k）。
-- **一直给的**：自带工具、`delegate_task`、`load_tools`（有技能时还有 `use_skill`）。
+- **一直给的**：自带工具（同 Friday v2.92 去掉 `get_current_time`，`web_search` / `fetch_url` 按需）、`delegate_task`、`load_tools`（有技能时还有 `use_skill`）。
+  `read_history` 只在会话折叠过之后给（按需清单里也不列：第一处折叠的位置补一次调用）。
 - **按需的**：能力的动作、MCP 服务的工具、派子智能体的其余工具（`run_workflow`、打回、看记录、追加指示、停掉）。
   系统提示里只列「名字（一句用途）」；模型用 `load_tools` 取回（写工具名、能力 / MCP 服务的名字取回它的全部、或者带 `*` 的前缀），
   取回后这个会话里一直给；派过子智能体的会话自动给管理用的那几个；直接调了没取回的也照样做。取回过的从历史里算，按第一次的先后接在后面，
@@ -94,8 +95,8 @@ MCP 服务每次请求再多 2.1k，而大多数用不上（改完实测：「�
   （`search_keywords`），`find_files` 不给 `pattern` 是列目录（`list_directory`），`delegate_task` 给 `tasks` 是并联派（`run_parallel_tasks`）。
   调进来时换回细分的，权限、批准、钩子、执行都按它；旧名照样能调，限定工具的列表里写合并名也认。edith-friday 的管理类动作在网关那边合
   （`create_tool` 同名就是改、`manage_tools`、`manage_providers`、`manage_commands`）。
-- **系统提示不放会变的东西**：时间（要用 `get_current_time`）、记忆条数这类每轮都变的不写进去，前缀每轮一样，服务商的提示词缓存、本地模型的
-  KV 缓存才接得上。
+- **系统提示不放会变的东西**：时间、记忆条数这类每轮都变的不写进去，前缀每轮一样，服务商的提示词缓存、本地模型的
+  KV 缓存才接得上。时间附在交来的每段话、派给子智能体的任务后面（`edith.now`：「（发出时间：2026年10月29日 星期四 15:40）」，存进历史）。
 
 ## 交付检查
 

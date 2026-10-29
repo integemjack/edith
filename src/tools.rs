@@ -31,10 +31,28 @@ pub const BUILTINS: &[&str] = &[
     "fetch_url",
 ];
 
-/// 自带工具的定义（发给模型的 tools 里的项）
+/// 同 Friday v2.92：按需给的自带工具（搜网页、看网页：.51 上约四分之一的对话用到；在按需清单的「网页」组里）
+pub const DEFERRED: &[&str] = &["web_search", "fetch_url"];
+/// 同 Friday v2.92：不再给模型的（时间附在交来的话后面：mind::now_note）；旧名照样能调
+pub const RETIRED: &[&str] = &["get_current_time"];
+
+/// 自带工具的定义（全部的：设置里列的、执行时核对参数用）
 pub fn specs() -> Vec<Value> {
     let builtins = tool_defs::builtins(&Default::default(), None);
     BUILTINS.iter().filter_map(|name| builtins.iter().find(|tool| tool.name == *name).map(|tool| tool.spec.clone())).collect()
+}
+
+/// 一直给模型的自带工具
+pub fn given_specs() -> Vec<Value> {
+    specs()
+        .into_iter()
+        .filter(|spec| spec["function"]["name"].as_str().is_some_and(|name| !DEFERRED.contains(&name) && !RETIRED.contains(&name)))
+        .collect()
+}
+
+/// 按需给的自带工具
+pub fn deferred_specs() -> Vec<Value> {
+    specs().into_iter().filter(|spec| spec["function"]["name"].as_str().is_some_and(|name| DEFERRED.contains(&name))).collect()
 }
 
 /// 一次工具调用的结果

@@ -326,7 +326,8 @@ fn merged_tools() {
     let requests = std::fs::read_to_string(home.join("requests.jsonl")).unwrap();
     let first: Value = serde_json::from_str(requests.lines().next().unwrap()).unwrap();
     let names: Vec<&str> = first["tools"].as_array().unwrap().iter().filter_map(|tool| tool["function"]["name"].as_str()).collect();
-    for gone in ["search_keywords", "list_directory", "run_parallel_tasks"] {
+    // 同 Friday v2.92：时间不再是工具、网页按需、read_history 折叠过才给
+    for gone in ["search_keywords", "list_directory", "run_parallel_tasks", "get_current_time", "web_search", "fetch_url", "read_history"] {
         assert!(!names.contains(&gone), "{gone} 还单独给了：{names:?}");
     }
     let delegate = first["tools"].as_array().unwrap().iter().find(|tool| tool["function"]["name"] == "delegate_task").unwrap();
@@ -334,7 +335,10 @@ fn merged_tools() {
     // 系统提示不带会变的时间、条数（每轮一样，服务商的提示词缓存才用得上）
     let system = first["messages"][0]["content"].as_str().unwrap();
     assert!(!system.contains("现在：") && !system.contains("条）"), "{system}");
-    assert!(!system.contains("run_parallel_tasks"), "{system}");
+    assert!(!system.contains("run_parallel_tasks") && !system.contains("read_history"), "{system}");
+    assert!(system.contains("网页：web_search（"), "{system}");
+    let said = first["messages"][1]["content"].as_str().unwrap();
+    assert!(said.contains("（发出时间："), "{said}");
 }
 
 #[test]

@@ -33,6 +33,11 @@ pub fn available(context: &Context) -> Vec<Value> {
         .into_iter()
         .filter(|spec| !crate::team::always(context).contains(&name_of(spec)) && allowed.allows(name_of(spec), false))
         .collect();
+    // 同 Friday v2.92：搜网页、看网页按需；read_history 折叠过才给（清单里不列：hidden）
+    specs.extend(crate::tools::deferred_specs().into_iter().filter(|spec| allowed.allows(name_of(spec), false)));
+    if context.me.is_none() && allowed.allows(crate::history::NAME, true) {
+        specs.push(crate::history::spec());
+    }
     specs.extend(crate::capabilities::specs(allowed, &context.session));
     specs.extend(crate::mcp::specs(allowed));
     // 现成的子智能体限定了工具：只列这些（写合并名也认）
@@ -57,10 +62,18 @@ fn summary(spec: &Value) -> String {
     if first.chars().count() > 40 { format!("{}…", first.chars().take(40).collect::<String>()) } else { first.to_string() }
 }
 
+/// 没取回时清单里也不列的：read_history（折叠过的会话由 brain::calls_with_folds 接上；折叠的说明里写着它的名字，直接调也照样做）
+fn hidden(name: &str) -> bool {
+    name == crate::history::NAME
+}
+
 /// 归哪一组（清单里按组列）
 fn group(name: &str) -> String {
     if crate::team::TOOLS.contains(&name) {
         return "派子智能体".into();
+    }
+    if crate::tools::DEFERRED.contains(&name) {
+        return "网页".into();
     }
     let owner = name.split_once(crate::capabilities::SEPARATOR).map_or(name, |(owner, _)| owner);
     if crate::capabilities::is_action(name) { format!("能力「{owner}」") } else { format!("MCP 服务「{owner}」") }
@@ -68,7 +81,7 @@ fn group(name: &str) -> String {
 
 /// 系统提示里的清单（没有按需工具时是空）
 pub fn prompt(context: &Context) -> String {
-    let specs = available(context);
+    let specs: Vec<Value> = available(context).into_iter().filter(|spec| !hidden(name_of(spec))).collect();
     let unknown = crate::mcp::unknown();
     if specs.is_empty() && unknown.is_empty() {
         return String::new();
@@ -209,6 +222,21 @@ mod tests {
 
     fn spec(name: &str) -> Value {
         json!({ "type": "function", "function": { "name": name, "description": "（MCP 服务「fs」）读一个文件。别的说明", "parameters": {} } })
+    }
+
+    #[test]
+    fn read_history_comes_with_the_first_fold() {
+        // 同 Friday v2.92：没折叠过的会话不给 read_history；折叠过的在第一处折叠补一次调用，按先后排在之后取回的前面
+        let specs = vec![spec(crate::history::NAME), spec("rework_agent")];
+        let history = vec![
+            json!({ "role": "user", "content": "第 1 轮" }),
+            json!({ "role": "assistant", "content": "答" }),
+            json!({ "role": "assistant", "tool_calls": [{ "function": { "name": "rework_agent", "arguments": "{}" } }] }),
+        ];
+        assert_eq!(loaded(&crate::brain::calls_with_folds(&history, &Map::new()), &specs), vec!["rework_agent"]);
+        let folds: Map<String, Value> = [("1".to_string(), json!({ "fold": true }))].into_iter().collect();
+        assert_eq!(loaded(&crate::brain::calls_with_folds(&history, &folds), &specs), vec![crate::history::NAME, "rework_agent"]);
+        assert!(hidden(crate::history::NAME) && !hidden("rework_agent"));
     }
 
     #[test]

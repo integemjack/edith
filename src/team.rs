@@ -554,7 +554,7 @@ fn notice(agent: &Agent, text: String) {
 fn first_prompt(agent: &Agent, task: &str) -> String {
     let request = mind::request_of(&agent.session);
     let background = if request.trim().is_empty() { String::new() } else { text("edith.sub.background", &[("request", request)]) };
-    text("edith.sub.task", &[("task", task.to_string()), ("background", background)])
+    text("edith.sub.task", &[("task", task.to_string()), ("background", background), ("now", mind::now_note())])
 }
 
 /// 跑一次（第一次派、打回都走这里），等它交回；返回交给上级的话。parent_cancel：上级停下了它也停

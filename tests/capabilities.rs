@@ -254,7 +254,8 @@ fn sense_starts_a_turn_and_notes() {
     // 模型看到的是标了来源的话；只记下的进了会话
     let requests = std::fs::read_to_string(home.join("requests.jsonl")).unwrap();
     assert!(requests.contains("由能力「cap」（speech）传来，说话的是 小明"), "{requests}");
-    assert!(requests.contains("\"content\": \"亲手打的：只聊天\""), "{requests}");
+    // 同 Friday v2.92：交来的话后面附上发出时间（代替 get_current_time）
+    assert!(requests.contains("\"content\": \"亲手打的：只聊天\\n\\n（发出时间："), "{requests}");
     let id = sessions[0]["id"].as_str().unwrap();
     let stored = common::read_session(&common::project_dir(&home, &work).join("sessions").join(format!("{id}.jsonl"))).to_string();
     assert!(stored.contains("明天下雨") && stored.contains("不用回复"), "{stored}");

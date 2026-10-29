@@ -209,6 +209,19 @@ fn on_demand(context: &Context) -> String {
 /// 给模型的工具（只给这一轮许可的）：一直给的（自带的、delegate_task、load_tools、有技能时 use_skill）+ 历史里取回过的按需工具
 /// （按第一次取回的先后接在后面，前面不变）
 /// 历史里调过的工具：只留助手消息的 tool_calls（按需工具按它算，见 deferred::loaded）
+/// 同 Friday v2.92：主智能体调过的工具 + 存档折叠过时在第一处折叠的位置补一次 read_history（之后一直给它，工具顺序不变）
+pub fn calls_with_folds(history: &[Value], folds: &Map<String, Value>) -> Vec<Value> {
+    let first = folds.keys().filter_map(|key| key.parse::<usize>().ok()).min();
+    let mut calls = Vec::new();
+    for (index, message) in history.iter().enumerate() {
+        if first == Some(index) {
+            calls.push(json!({ "role": "assistant", "tool_calls": [{ "function": { "name": crate::history::NAME, "arguments": "{}" } }] }));
+        }
+        calls.extend(calls_of(std::slice::from_ref(message)));
+    }
+    calls
+}
+
 pub fn calls_of(history: &[Value]) -> Vec<Value> {
     history
         .iter()
@@ -236,7 +249,7 @@ fn usable(context: &Context, specs: &mut Vec<Value>) {
 /// 一直给的自带工具和派发工具（合并前）
 fn core_specs(context: &Context) -> Vec<Value> {
     let allowed = &context.tools;
-    let mut specs: Vec<Value> = tools::specs().into_iter().filter(|spec| allowed.allows(&spec_name(spec), false)).collect();
+    let mut specs: Vec<Value> = tools::given_specs().into_iter().filter(|spec| allowed.allows(&spec_name(spec), false)).collect();
     specs.extend(
         crate::team::specs(context)
             .into_iter()
@@ -262,10 +275,7 @@ pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
         specs.push(crate::skills::spec());
     }
     specs.extend(crate::memory::specs().into_iter().filter(|spec| allowed.allows(&name(spec), name(spec) == crate::memory::SEARCH)));
-    // v2.86 看这段会话较早的原文（主智能体的；只读）
-    if context.me.is_none() && allowed.allows(crate::history::NAME, true) {
-        specs.push(crate::history::spec());
-    }
+    // v2.86 看这段会话较早的原文：同 Friday v2.92 折叠过才给（按需工具里不列，calls_with_folds 在第一处折叠补一次调用）
     specs.extend(crate::deferred::specs(context, history));
     usable(context, &mut specs);
     // 同 Friday v2.90：同一组的合成一个（merge.rs）；并进来的按需成员（run_parallel_tasks）从这里补参数

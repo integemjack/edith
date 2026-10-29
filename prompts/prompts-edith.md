@@ -14,7 +14,6 @@
 环境：
 - 工作目录：{{cwd}}（相对路径都按它算）
 - 系统：{{os}}，命令行：{{shell}}
-- 要知道现在的日期、时间用 get_current_time
 {{capabilities}}
 
 @@ edith.plan-mode
@@ -104,6 +103,11 @@ general（默认）：到哪都适用；project：只跟这个项目有关（用
 （{{source}}在你工作时补充了下面这段{{from}}：和手上的事一起考虑，原来的事照常做完；有冲突以这条为准。）
 {{text}}
 
+@@ edith.now
+@// 同 Friday v2.92 的 turn.now：附在交来的每段话、派给子智能体的任务后面（存进历史，重建时逐字一致）；代替 get_current_time——
+@// 系统提示里不放会变的时间，前缀每轮一样、缓存接得上。now：如「2026年10月29日 星期四 15:40」
+（发出时间：{{now}}）
+
 @@ edith.note
 @// 急缓是「只记下」的：记进会话，不回复
 （{{source}}记下了下面这段{{from}}，不用回复，之后用得着时参考）
@@ -151,7 +155,6 @@ general（默认）：到哪都适用；project：只跟这个项目有关（用
 环境：
 - 工作目录：{{cwd}}（相对路径都按它算）
 - 系统：{{os}}，命令行：{{shell}}
-- 要知道现在的日期、时间用 get_current_time
 
 @@ edith.sub.default-role
 你是通才助手，独立完成交给你的子任务，需要时使用工具。先弄清任务要什么，再动手；不要编造。
@@ -167,9 +170,10 @@ general（默认）：到哪都适用；project：只跟这个项目有关（用
 - 你已经在第 {{depth}} 层了：除非任务明显还能拆成几块独立的部分，否则自己做，不要再往下派。
 
 @@ edith.sub.task
-@// 派给子智能体的第一条消息。task：任务；background：edith.sub.background（没有用户原话时是空）
+@// 派给子智能体的第一条消息。task：任务；background：edith.sub.background（没有用户原话时是空）；now：edith.now
 {{task}}
 {{background}}
+{{now}}
 
 @@ edith.sub.background
 @// request：用户这段对话里最近说的原话

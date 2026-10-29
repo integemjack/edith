@@ -94,6 +94,26 @@ impl Origin {
     }
 }
 
+/// 同 Friday v2.92：交来的话后面附上发出时间（edith.now；代替 get_current_time，存进历史、重建时逐字一致）；子智能体交回的不附
+pub fn now_note() -> String {
+    let now = chrono::Local::now();
+    let weekday = crate::tools::weekday(&now);
+    prompts::text(
+        "edith.now",
+        &[(
+            "now".to_string(),
+            format!("{}年{}月{}日 {weekday} {}", now.format("%Y"), now.format("%-m"), now.format("%-d"), now.format("%H:%M")),
+        )]
+        .into_iter()
+        .collect(),
+        None,
+    )
+}
+
+fn stamped(origin: &Origin, text: String) -> String {
+    if origin.kind == "agent" { text } else { format!("{text}\n\n{}", now_note()) }
+}
+
 struct Input {
     text: String,
     origin: Origin,
@@ -412,11 +432,12 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         me: None,
         instructions: session.instructions.clone(),
         history_turn: Some(turn_number),
-        prior_calls: Some(Arc::new(brain::calls_of(&session.history))),
+        prior_calls: Some(Arc::new(brain::calls_with_folds(&session.history, &session.folds))),
         pending: Some(pending.clone()),
     };
     let recorder = Mutex::new(crate::checks::Recorder::default());
-    let mut text = input.origin.wrap(if input.interjected { "edith.interjection" } else { "edith.input" }, &input.text);
+    let mut text =
+        stamped(&input.origin, input.origin.wrap(if input.interjected { "edith.interjection" } else { "edith.input" }, &input.text));
     // 用户发消息时的钩子（能力管的 UserPromptSubmit，Friday 的 hooks.json）：拦下就不交给模型；补的上下文接在这段后面
     if input.origin.kind != "agent" && crate::capabilities::has_hook("UserPromptSubmit") {
         let fields = json!({ "session_id": session_id, "cwd": cwd.to_string_lossy(), "prompt": input.text });
@@ -444,7 +465,7 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
         for item in &taken {
             emit(session_id, &input.turn, "input", json!({ "text": item.text, "origin": item.origin.to_json() }));
         }
-        taken.iter().map(|item| item.origin.wrap("edith.interjection", &item.text)).collect::<Vec<_>>()
+        taken.iter().map(|item| stamped(&item.origin, item.origin.wrap("edith.interjection", &item.text))).collect::<Vec<_>>()
     };
     if !change.is_empty() {
         emit(session_id, &input.turn, "notice", json!({ "text": change.notice() }));
