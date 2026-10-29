@@ -35,10 +35,13 @@ pub fn available(context: &Context) -> Vec<Value> {
         .collect();
     specs.extend(crate::capabilities::specs(allowed, &context.session));
     specs.extend(crate::mcp::specs(allowed));
-    // 现成的子智能体限定了工具：只列这些
+    // 现成的子智能体限定了工具：只列这些（写合并名也认）
     if let Some(only) = context.me.as_ref().and_then(|me| me.tools.as_ref()) {
-        specs.retain(|spec| only.iter().any(|tool| tool == name_of(spec)));
+        specs.retain(|spec| only.iter().any(|tool| crate::merge::covers(tool, name_of(spec))));
     }
+    // 并进一直给的工具里的（run_parallel_tasks 在 delegate_task 里）不单列
+    let given = crate::brain::given_names(context);
+    specs.retain(|spec| !crate::merge::absorbed(name_of(spec), &given));
     specs
 }
 
@@ -178,7 +181,10 @@ pub fn load(arguments: &Map<String, Value>, context: &Context) -> Outcome {
     for name in &wanted {
         let names = expand(name, &available);
         if names.is_empty() {
-            missing.push(name.clone());
+            match crate::merge::merged_name(name).filter(|merged| merged != name) {
+                Some(merged) => notes.push(format!("{name} 已经并进 {merged}，不用取回，直接调 {merged}")),
+                None => missing.push(name.clone()),
+            }
         }
         for name in names {
             if !found.contains(&name) {
@@ -194,7 +200,7 @@ pub fn load(arguments: &Map<String, Value>, context: &Context) -> Outcome {
         lines.push(format!("没有这些（看系统提示里按需工具的清单）：{}", missing.join("、")));
     }
     lines.extend(notes);
-    Outcome { ok: !found.is_empty(), text: lines.join("\n") }
+    Outcome { ok: !found.is_empty() || missing.is_empty(), text: lines.join("\n") }
 }
 
 #[cfg(test)]

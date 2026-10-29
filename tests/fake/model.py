@@ -107,7 +107,7 @@ class Handler(BaseHTTPRequestHandler):
             elif tools_since:
                 events.append(say("派出去了，等它们回来。"))
             else:
-                events.append(call("run_parallel_tasks", {"tasks": [{"task": "子任务甲", "name": "甲"}, {"task": "子任务乙", "name": "乙"}]}))
+                events.append(call("delegate_task", {"tasks": [{"task": "子任务甲", "name": "甲"}, {"task": "子任务乙", "name": "乙"}]}))
         elif "工作流测试" in first_user:
             if "等你验收" in last_user:
                 ok = "拿到了前一步的结果" in last_user

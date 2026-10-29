@@ -30,31 +30,31 @@
 文件路径
 
 @@ tool.edit_file
-改已有文件：把 old_text 原样换成 new_text，返回改完的那几行（带行号）。old_text 要和文件里的原文一字不差（包括缩进、空格和换行），并且只出现一次——多带几行上下文让它唯一，或者设 replace_all: true 全部替换。同一个文件要改几处就用 edits 一次交（按顺序改，有一处对不上就一处都不改）。改代码、改配置都用它只换要改的那几处，不要整份重写，也不要用 run_shell 拼替换脚本。
+改已有文件：把 old_text 原样换成 new_text，返回改完的那几行（带行号）。old_text 要和原文一字不差（含缩进、换行）且只出现一次：不唯一就多带几行上下文，或设 replace_all。同一文件改几处用 edits 一次交（有一处对不上就都不改）。只换要改的几处，不要整份重写。
 
 @@ tool.edit_file.edits
-同一个文件改几处时用：每项 {old_text, new_text, replace_all?}，按顺序改；给了它就不用上面的 old_text / new_text
+同一文件改几处：每项 {old_text, new_text, replace_all?}，按顺序改；给了它就不用上面的 old_text / new_text
 
 @@ tool.edit_file.new_text
-换成的新内容；空字符串 = 删掉这段
+新内容；空字符串 = 删掉
 
 @@ tool.edit_file.old_text
-要换掉的原文（从文件里原样复制，不带 read_file 加的行号）
+要换掉的原文（不带 read_file 的行号）
 
 @@ tool.edit_file.path
 文件路径
 
 @@ tool.edit_file.replace_all
-true = 文件里所有出现的地方都换
+true = 全部都换
 
 @@ tool.edit_file.edits.new_text
-换成的新内容；空字符串 = 删掉这段
+新内容；空字符串 = 删掉
 
 @@ tool.edit_file.edits.old_text
-要换掉的原文（从文件里原样复制，不带 read_file 加的行号）
+要换掉的原文（不带 read_file 的行号）
 
 @@ tool.edit_file.edits.replace_all
-true = 文件里所有出现的地方都换
+true = 全部都换
 
 @@ tool.list_directory
 列出目录下的文件和子目录。相对路径基于工作目录。
@@ -63,7 +63,7 @@ true = 文件里所有出现的地方都换
 目录路径，如 ~/Desktop 或 .
 
 @@ tool.find_files
-按文件名找文件（含子目录），返回路径（在工作目录下的写相对路径）。比 list_directory 一层层翻、比 run_shell 拼命令快。隐藏目录和 node_modules、build、dist、third_party 这类依赖 / 构建目录不进去找，要找就把 path 直接指过去。
+按文件名找文件（含子目录），返回路径（在工作目录下的写相对路径）；不给 pattern 就列出 path 这一层的文件和子目录。隐藏目录和 node_modules、build、dist、third_party 这类依赖 / 构建目录不进去找，要找就把 path 直接指过去。
 
 @@ tool.find_files.path
 在哪个目录下找；不填是工作目录
@@ -72,7 +72,7 @@ true = 文件里所有出现的地方都换
 文件名通配，不分大小写：*.qml、*Settings*、ChatView.*、*.{cpp,h}；带 / 时按相对 path 的路径匹配，如 src/**/*.swift
 
 @@ tool.search_files
-在文件内容里按正则搜索（含子目录），每处匹配返回「路径:行号: 那一行」，最多列 200 处。查代码、找定义和调用处先用它，再用 read_file 的 offset / limit 只读相关的几段，不要用 run_shell 拼搜索命令。二进制文件和超过 2 MB 的文件不搜；隐藏目录和依赖 / 构建目录不进去搜，要搜就把 path 直接指过去。
+搜文件内容（含子目录）。给 keywords：按关键词找，按字面、不用转义、默认不分大小写，几个词都在一个文件里（不必同一行，文件名里也算）就算，按文件列出、最相关的排前面，每个文件给最相关的几行——只记得几个词（功能名、界面文字、报错）时用它。给 pattern：按正则逐处列出「路径:行号: 那一行」，最多 200 处——要正则或每一处匹配时用它。两个给一个。找到后用 read_file 的 offset / limit 读相关几段。不搜二进制和超过 2 MB 的文件；隐藏目录、依赖 / 构建目录不进，要搜就把 path 指过去。
 
 @@ tool.search_files.glob
 只搜文件名匹配这个通配的文件，如 *.qml、*.{cpp,h}
@@ -84,19 +84,19 @@ true = 不分大小写
 在哪个目录或文件里搜；不填是工作目录
 
 @@ tool.search_files.pattern
-正则表达式，如 openSettings|Key_Comma；按字面找时转义 . ( ) [ ] + * ? 这类字符
+正则，如 openSettings|Key_Comma；按字面找时转义 . ( ) [ ] + * ? 这类字符
 
 @@ tool.search_keywords
-按关键词在文件内容里找（含子目录）：几个词按字面找，不用转义，默认不分大小写；一个文件里几个词都有就算（不用在同一行，文件名里有也算）。结果按文件列出，几个词出现在同一行的、文件名里有的排前面，每个文件给出最相关的几行「行号: 那一行」。不知道代码在哪、只记得几个词（功能名、界面上的字、报错里的几个词）时先用它；要正则或要列出每一处匹配用 search_files。跳过的文件和目录同 search_files。
+按关键词搜文件内容（含子目录）：按字面、不用转义、默认不分大小写；几个词都在一个文件里（不必同一行，文件名里也算）就算。按文件列出，同一行有几个词的、文件名里有的排前面，每个文件给最相关的几行「行号: 那一行」。只记得几个词（功能名、界面文字、报错）时先用它；要正则或每一处匹配用 search_files。跳过的同 search_files。
 
 @@ tool.search_keywords.glob
 只搜文件名匹配这个通配的文件，如 *.qml、*.{cpp,h}
 
 @@ tool.search_keywords.keywords
-要找的词，空格分开，如 openSettings Key_Comma 或 下载 进度 取消；带空格的整句用双引号括起来，如 "no such file" open
+要找的词，空格分开，如 openSettings Key_Comma 或 下载 进度；带空格的整句加双引号，如 "no such file" open
 
 @@ tool.search_keywords.match_any
-true = 有其中任一个词就算（默认要几个词都有）
+true = 有任一个词就算（默认要都有）
 
 @@ tool.search_keywords.match_case
 true = 分大小写（默认不分）
@@ -565,7 +565,8 @@ readOnly（只读）| network（需要联网）| writeFiles（需要写文件）
 用户要的最终成品、怎样算完成（验收时对照它）
 
 @@ tool.run_workflow.steps
-步骤数组（按大致的先后写），每项 {id, task, check, after?, name?, role?, subagent_type?, {{engineField}}work?, thinking?}
+@// v2.84 真模型实测：原来只写「每项 {id, task, check, …}」，glm-5.3-flash 头一次调用 15 次里 6 次整份不带 check、被退回重发；写明三个必填后 0/9
+步骤数组（按大致的先后写）。每一项都必须有 id、task、check 三个字段（check 是这一步的验收标准，哪一步缺了整个工作流会被退回），其余可选：{id, task, check, after?, name?, role?, subagent_type?, {{engineField}}work?, thinking?}
 
 @@ tool.run_workflow.steps.id
 步骤 id，短而不重复，如 research、a1（after 里用它）
@@ -647,51 +648,78 @@ readOnly（只读）| network（需要联网）| writeFiles（需要写文件）
 @// ———— 任务状态 ————
 
 @@ tool.update_task_state
-记下这段对话的任务状态：目标、用户的要求、已确认的决定、进度、之后要用的关键信息，之后每条用户消息后面都会附上最新状态（什么时候记见系统提示的「任务状态」）。只传要改的字段：goal、steps 整体替换；constraints、decisions、facts 只追加新条目，过时的条目写进 remove 删掉。
+记下任务状态（目标、用户要求、已定的决定、进度、之后要用的信息），之后每条用户消息后面附最新状态（何时记见系统提示「任务状态」）。只传要改的字段：goal、steps 整体替换；constraints、decisions、facts 只追加，过时的写进 remove。
 
 @@ tool.update_task_state.constraints
-新增的约束：用户明确提出的要求、偏好、不能做的事（路径、命名、语言、风格等）
+新增约束：用户明确提的要求、偏好、不能做的事（路径、命名、语言、风格等）
 
 @@ tool.update_task_state.decisions
-新增的已确认的决定：选定的方案、用户点头的做法
+新增已确认的决定
 
 @@ tool.update_task_state.facts
-新增的关键信息：之后要用到的文件路径、版本号、网址、命令、名字等
+新增之后要用的信息：路径、版本、网址、命令、名字等
 
 @@ tool.update_task_state.goal
-这段对话要达成什么，尽量用用户的原话
+要达成什么，尽量用用户原话
 
 @@ tool.update_task_state.remove
-要删掉的过时条目：约束、决定、关键信息里的原文或其中一段
+要删的过时条目（原文或其中一段）
 
 @@ tool.update_task_state.steps
-完整的步骤列表（整体替换），每步 {text, status}，status 为 todo、doing 或 done
+完整步骤列表（整体替换），每步 {text, status}，status：todo / doing / done
+
+@@ tool.manage_tools
+管理自定义脚本工具（新建、修改用 create_tool）。action：list 列出全部工具（内置、自定义脚本、MCP）和状态；read 看某个自定义工具的清单和源码，改之前先读；delete 删掉它（移到{{trash}}）。
+
+@@ tool.manage_tools.action
+list / read / delete
+
+@@ tool.mcp_servers
+查找、接入、移除 MCP 服务（Model Context Protocol）。action：search 按关键词查可用的 server 和现成的启动配置（接入前先查，不要猜包名或命令）；add 接入一个 server，拿到它的全部工具（本地的给 command / args，远程的给 url），同名的就是改配置；remove 移除并断开。
+
+@@ tool.mcp_servers.action
+search / add / remove
+
+@@ tool.manage_providers
+管理能力提供方（新建脚本提供方用 create_provider）。action：read 看一个脚本提供方的清单、源码和上次自测结果，改之前先读；delete 删掉脚本提供方（移到{{trash}}，它定义的新能力一起消失）；configure 启用 / 停用某个提供方或它的某项能力，改提供方的选项，或新建一个内置类型的提供方。
+
+@@ tool.manage_providers.action
+read / delete / configure
+
+@@ tool.manage_commands
+新建、改写或删除命令和现成的子智能体（同 Claude Code 的 slash commands、subagents 格式；用命令用 use_command）。kind：command 是命令（用户打「/名字 参数」时把正文当提示词发给你），subagent 是现成的子智能体（派活时用 subagent_type 点它）。action：save 新建或整份改写，delete 删掉（文件移到{{trash}}，只在用户要删或它已经过时时用）。
+
+@@ tool.manage_commands.action
+save / delete
+
+@@ tool.manage_commands.kind
+command（默认）/ subagent
 
 @// ———— 问用户（v2.13 AskUser；主 Agent 和助手共用） ————
 
 @@ tool.ask_user
-拿不准、又没法自己查清时问用户：给 2–4 个选项，用户点一下就能答（也能自己写），不用打一长段字。
-什么时候问：有几种合理的做法、选哪个会明显改变结果（方案、范围、命名、放在哪、要不要动用户的东西），而文件、配置、记录里都查不到答案。能查到的先查；无关紧要、按最合理的理解做也不会白费功夫的，照做并把假设写进结果，不要问。
-怎么问：一个问题一句话；每个选项写清选它意味着什么（detail 一行），你推荐的放第一个并用 recommended 标出来；要问的几件事一次问完（最多 3 题）。不要在回复里写问题等用户打字，用这个工具问。
-问完照回答接着做，不用再确认；用户跳过了就按你推荐的做。
+拿不准又查不清时问用户：给 2–4 个选项，用户点一下就能答（也能自己写）。
+只在几种做法会明显改变结果（方案、范围、命名、位置、动不动用户的东西），且文件、配置、记录里都查不到时问；无关紧要的按最合理的理解做，把假设写进结果。
+一题一句话，每个选项用 detail 写清意味着什么，推荐的放第一个并标 recommended；几件事一次问完（最多 3 题），不要在回复里写问题等用户打字。
+问完照回答接着做，不再确认；用户跳过就按推荐的做。
 
 @@ tool.ask_user.questions
-要问的问题，1–3 个；每题 {question, options, recommended, multiple}
+1–3 题，每题 {question, options, recommended, multiple}
 
 @@ tool.ask_user.questions.question
-问题，一句话
+一句话
 
 @@ tool.ask_user.questions.options
-2–4 个选项，每个 {label, detail}；不用加「其他」，用户总能自己写
+2–4 个，每个 {label, detail}；不用加「其他」
 
 @@ tool.ask_user.questions.options.label
-选项，几个字（显示在按钮上）
+几个字（按钮上的字）
 
 @@ tool.ask_user.questions.options.detail
-一行说明：选它意味着什么（可以不填）
+一行：选它意味着什么（可不填）
 
 @@ tool.ask_user.questions.recommended
-推荐第几个（1 起）；没有倾向就不填
+推荐第几个（1 起），没有就不填
 
 @@ tool.ask_user.questions.multiple
 能多选时填 true
@@ -726,34 +754,34 @@ readOnly（只读）| network（需要联网）| writeFiles（需要写文件）
 返回几个，默认 8，最多 20
 
 @@ tool.search_memory
-按关键词查这台机器的记忆库：用户说过的偏好、事实、决定、纠正，和以前在这台机器、这个项目上踩过的坑（经验）。返回每条的正文、编号、日期。要按用户的习惯做、用户提到以前的事、要这个项目的约定、遇到报错时先查；一次没查到换几个关键词再查。
+按关键词查这台机器的记忆库：用户说过的偏好、事实、决定、纠正，和在这台机器、这个项目上踩过的坑。按用户习惯做事、用户提到以前的事、要项目约定、遇到报错时先查；没查到换关键词再查。
 
 @@ tool.search_memory.query
-关键词，空格分开，像搜索框那样简短，如「提交 署名」「构建 DerivedData」「Liquid Glass 工具栏」
+关键词，空格分开、简短，如「提交 署名」「构建 DerivedData」
 
 @@ tool.search_memory.kind
-只看一种：preference（偏好）、fact（事实）、decision（决定）、correction（纠正）、experience（经验）、habit（习惯）；不填看全部
+只看一种：preference / fact / decision / correction / experience / habit；不填看全部
 
 @@ tool.search_memory.scope
-project（默认）：这个项目的和通用的；all：所有项目的
+project（默认）：这个项目的和通用的；all：所有项目
 
 @@ tool.search_memory.count
-返回几条，默认 8，最多 20
+默认 8，最多 20
 
 @@ tool.save_memory
-把用户明说要记住的当场记进这台机器的记忆库：用户说「记住…」「记一下…」「以后都…」「别再…」「从现在起…」这类一直有效的要求、偏好、事实、决定、纠正时，先用它记下，再接着做这一轮的事，不要只口头答应。记过的那条错了、变了：填 replaces 改掉它（编号在 search_memory 结果、目录里每条后面的方括号里），别再记一条新的。用户没明说的不用记（一轮结束后 Friday 会自动整理）；只是这一次的要求也不用记。
+用户明说要记住的当场记进记忆库：用户说「记住…」「以后都…」「别再…」「从现在起…」这类一直有效的要求、偏好、事实、决定、纠正时，先记下再接着做，不要只口头答应。记过的错了、变了用 replaces 改掉那条（编号在 search_memory 结果和目录里每条后的方括号里），不另记新的。用户没明说的、只管这一次的不用记（一轮结束后会自动整理）。
 
 @@ tool.save_memory.text
-要记的一句话，写成以后能照着做的样子，带上必要的对象和条件，如「提交一律用 integemjack 身份，不加 AI 署名」
+要记的一句话，写成以后能照着做的样子，如「提交一律用 integemjack 身份，不加 AI 署名」
 
 @@ tool.save_memory.kind
-preference（偏好，默认）、fact（事实）、decision（决定）、correction（纠正）
+preference（默认）/ fact / decision / correction
 
 @@ tool.save_memory.scope
-general（默认）：到哪都适用；project：只跟这个项目有关（用户说的明显只是这个项目的约定、路径、构建方法时才填）
+general（默认）：到哪都适用；project：明显只是这个项目的约定、路径、构建方法
 
 @@ tool.save_memory.replaces
-改掉哪条记忆：它后面方括号里的编号（如 m1a2b）；新记一条不填
+要改掉的那条的编号（如 m1a2b）；新记不填
 
 @@ tool.save_skill
 新建或改写一个技能：写进数据目录的 Skills/<name>/SKILL.md，之后的对话用 search_skills 都能找到它。
@@ -771,6 +799,9 @@ SKILL.md 的正文（Markdown）：步骤、要点、例子。开头的 name / d
 
 @@ tool.save_skill.files
 可选：技能带的其他文件，{相对路径: 文本内容}，如 {"scripts/check.py": "…", "template.md": "…"}；给了的写进去（同名的覆盖），没给的已有文件不动
+
+@@ tool.save_skill.delete
+true = 删掉这个技能（只要 name）
 
 @@ tool.delete_skill
 删除一个技能（整个文件夹移到{{trash}}）。只在用户要删，或者这个技能已经过时、照着做会出错时用。

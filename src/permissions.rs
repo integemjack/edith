@@ -64,9 +64,9 @@ impl Tools {
             Tools::All => true,
             Tools::Read => read_only || READ_ONLY.contains(&name),
             Tools::None => false,
-            Tools::Only(names) => {
-                names.iter().any(|pattern| pattern.strip_suffix('*').map_or(pattern == name, |prefix| name.starts_with(prefix)))
-            }
+            Tools::Only(names) => names
+                .iter()
+                .any(|pattern| pattern.strip_suffix('*').map_or(crate::merge::covers(pattern, name), |prefix| name.starts_with(prefix))),
         }
     }
 

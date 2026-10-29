@@ -191,8 +191,7 @@ pub fn prompt() -> String {
         .filter(|item| text(item, "project").is_empty() || text(item, "project") == here)
         .map(|item| line(item, &here))
         .collect();
-    let count = items.iter().filter(|item| active(item)).count();
-    prompt_text("edith.memory", &[("count", count.to_string()), ("pinned", pinned.join("\n"))])
+    prompt_text("edith.memory", &[("pinned", pinned.join("\n"))])
 }
 
 pub fn specs() -> Vec<Value> {

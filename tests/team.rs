@@ -196,7 +196,7 @@ fn parallel_results_come_back_together() {
     assert!((2..=3).contains(&main_turns), "主智能体请求了 {main_turns} 次");
     // 一批两个：同一个调用派的，排第 0、第 1
     let (_, records) = agent_records(&home, &work);
-    let call = call_id(&home, &work, "run_parallel_tasks");
+    let call = call_id(&home, &work, "delegate_task");
     let slots: Vec<(Option<&str>, Option<u64>, Option<&str>)> =
         records.iter().map(|record| (record["call"].as_str(), record["slot"].as_u64(), record["kind"].as_str())).collect();
     assert_eq!(slots, [(Some(call.as_str()), Some(0), Some("parallel")), (Some(call.as_str()), Some(1), Some("parallel"))]);

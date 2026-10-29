@@ -308,6 +308,36 @@ fn risky_tools_need_approval() {
 }
 
 #[test]
+fn merged_tools() {
+    // 同 Friday v2.90：发给模型的是合并后的（search_files、find_files、delegate_task），调进来按参数换回细分的；旧名照样能调
+    let (work, home) = scratch("merged");
+    let model = fake_model(&home.join("requests.jsonl"));
+    std::fs::write(work.join("notes.txt"), "苹果 香蕉\n").unwrap();
+    let ask = |task: &str| {
+        let output = command(&home, model.port, &work, &[task]).output().unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let listed = ask(r#"调用工具 find_files 参数 {"path":"."}"#);
+    assert!(listed.contains("notes.txt"), "{listed}");
+    let found = ask(r#"调用工具 search_files 参数 {"keywords":"香蕉 苹果"}"#);
+    assert!(found.contains("notes.txt"), "{found}");
+    let old = ask(r#"调用工具 search_keywords 参数 {"keywords":"香蕉"}"#);
+    assert!(old.contains("notes.txt"), "{old}");
+    let requests = std::fs::read_to_string(home.join("requests.jsonl")).unwrap();
+    let first: Value = serde_json::from_str(requests.lines().next().unwrap()).unwrap();
+    let names: Vec<&str> = first["tools"].as_array().unwrap().iter().filter_map(|tool| tool["function"]["name"].as_str()).collect();
+    for gone in ["search_keywords", "list_directory", "run_parallel_tasks"] {
+        assert!(!names.contains(&gone), "{gone} 还单独给了：{names:?}");
+    }
+    let delegate = first["tools"].as_array().unwrap().iter().find(|tool| tool["function"]["name"] == "delegate_task").unwrap();
+    assert!(delegate["function"]["parameters"]["properties"]["tasks"].is_object(), "delegate_task 没带 tasks");
+    // 系统提示不带会变的时间、条数（每轮一样，服务商的提示词缓存才用得上）
+    let system = first["messages"][0]["content"].as_str().unwrap();
+    assert!(!system.contains("现在：") && !system.contains("条）"), "{system}");
+    assert!(!system.contains("run_parallel_tasks"), "{system}");
+}
+
+#[test]
 fn upgrades_old_data() {
     let (work, home) = scratch("upgrade");
     let model = fake_model(&home.join("requests.jsonl"));

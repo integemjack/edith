@@ -81,7 +81,7 @@ worktree 里的会话记在仓库名下，回到仓库 `-c`、`edith sessions` �
 照 Claude Code（`src/deferred.rs`、`src/skills.rs`）：工具定义很占地方——说一句「你好」原来 4.8k token 里八成是工具定义，接一个 14 个工具的
 MCP 服务每次请求再多 2.1k，而大多数用不上（改完实测：「你好」3.9k，接着那个 MCP 服务 4.1k，只多 0.2k）。
 - **一直给的**：自带工具、`delegate_task`、`load_tools`（有技能时还有 `use_skill`）。
-- **按需的**：能力的动作、MCP 服务的工具、派子智能体的其余工具（`run_parallel_tasks`、`run_workflow`、打回、看记录、追加指示、停掉）。
+- **按需的**：能力的动作、MCP 服务的工具、派子智能体的其余工具（`run_workflow`、打回、看记录、追加指示、停掉）。
   系统提示里只列「名字（一句用途）」；模型用 `load_tools` 取回（写工具名、能力 / MCP 服务的名字取回它的全部、或者带 `*` 的前缀），
   取回后这个会话里一直给；派过子智能体的会话自动给管理用的那几个；直接调了没取回的也照样做。取回过的从历史里算，按第一次的先后接在后面，
   前面那一大段不变，服务商的提示词缓存不用重算。
@@ -90,6 +90,12 @@ MCP 服务每次请求再多 2.1k，而大多数用不上（改完实测：「�
 - **技能**：`<名字>/SKILL.md`（开头 YAML 头 name / description，和 Claude Code 的 Agent Skills 通用），从项目的 `.edith/skills/`、`.claude/skills/`
   （要信任这个目录）、`~/.edith/skills/`、`~/.claude/skills/`、Friday 的 Skills 目录找。系统提示里只列名字和用途，用到时 `use_skill` 读全文；
   技能文件夹里的脚本、参考资料读的时候不算工作目录外。`edith skills` 列出来。
+- **工具合并**（`src/merge.rs`，同 Friday v2.90）：发给模型的同一组合成一个，参数取并集、靠参数选——`search_files` 给 `keywords` 是按关键词搜
+  （`search_keywords`），`find_files` 不给 `pattern` 是列目录（`list_directory`），`delegate_task` 给 `tasks` 是并联派（`run_parallel_tasks`）。
+  调进来时换回细分的，权限、批准、钩子、执行都按它；旧名照样能调，限定工具的列表里写合并名也认。edith-friday 的管理类动作在网关那边合
+  （`create_tool` 同名就是改、`manage_tools`、`manage_providers`、`manage_commands`）。
+- **系统提示不放会变的东西**：时间（要用 `get_current_time`）、记忆条数这类每轮都变的不写进去，前缀每轮一样，服务商的提示词缓存、本地模型的
+  KV 缓存才接得上。
 
 ## 交付检查
 
@@ -102,8 +108,8 @@ MCP 服务每次请求再多 2.1k，而大多数用不上（改完实测：「�
 ## 子智能体与工作流
 
 照 Friday（`src/team.rs`，规则在 friday-core 的 `agents`、`delivery`、`liveness`）：
-- `delegate_task` / `run_parallel_tasks`：派临时子 Agent。主智能体派的**在后台跑**，立刻返回 id，这一轮可以先结束；做完的结果作为一段话交回
-  这个会话（正在干活就补充进这一轮，闲着就开始新的一轮去验收）；一次 `run_parallel_tasks` 派出的全部做完一起交回，排着的几段交回也并成一轮
+- `delegate_task`（给 `tasks` 是并联，内部是 `run_parallel_tasks`）：派临时子 Agent。主智能体派的**在后台跑**，立刻返回 id，这一轮可以先结束；做完的结果作为一段话交回
+  这个会话（正在干活就补充进这一轮，闲着就开始新的一轮去验收）；一次并联派出的全部做完一起交回，排着的几段交回也并成一轮
   ——一个回来开一轮验收，每轮都要把整段上下文再发一遍（真模型测：6 次请求 3.2 万 token → 4 次 2.1 万）。子 Agent 也能往下派（最多 3 层），等下级做完再返回。
 - `run_workflow`：主智能体给出目标和步骤（任务、验收标准 `check`、依赖 `after`），依赖都做完的同时开始，写了 after 的带着前面的结果再开始，
   前置没做成的不做；全部结束后各步结果连同验收标准一起交回验收。任务里说要用前面的结果（「根据上一步…」）却没写 after 的退回去让它补上

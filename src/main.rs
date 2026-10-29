@@ -19,6 +19,7 @@ mod http;
 mod instance;
 mod mcp;
 mod memory;
+mod merge;
 mod migrate;
 mod mind;
 mod permissions;

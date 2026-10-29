@@ -188,10 +188,6 @@ pub fn instructions(cwd: &Path) -> String {
             ("cwd", cwd.to_string_lossy().into_owned()),
             ("os", format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)),
             ("shell", tools::shell_title()),
-            ("now", {
-                let now = chrono::Local::now();
-                format!("{}（{}）", now.format("%Y-%m-%d %H:%M"), tools::weekday(&now))
-            }),
             ("capabilities", capabilities),
         ]),
         None,
@@ -221,15 +217,44 @@ pub fn calls_of(history: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
+fn spec_name(spec: &Value) -> String {
+    spec["function"]["name"].as_str().unwrap_or("").to_string()
+}
+
+/// 设置里关掉的工具（config.json 的 disabledTools，Friday 的设置 › 工具）不给；现成的子智能体限定了工具：只给这些
+/// （取回按需工具的 load_tools 留着；限定的列表里写合并名也认）
+fn usable(context: &Context, specs: &mut Vec<Value>) {
+    let disabled = crate::home::disabled_tools();
+    specs.retain(|spec| !disabled.contains(&spec_name(spec)));
+    if let Some(only) = context.me.as_ref().and_then(|me| me.tools.as_ref()) {
+        specs.retain(|spec| {
+            only.iter().any(|listed| crate::merge::covers(listed, &spec_name(spec))) || spec_name(spec) == crate::deferred::LOAD
+        });
+    }
+}
+
+/// 一直给的自带工具和派发工具（合并前）
+fn core_specs(context: &Context) -> Vec<Value> {
     let allowed = &context.tools;
-    let name = |spec: &Value| spec["function"]["name"].as_str().unwrap_or("").to_string();
-    let mut specs: Vec<Value> = tools::specs().into_iter().filter(|spec| allowed.allows(&name(spec), false)).collect();
+    let mut specs: Vec<Value> = tools::specs().into_iter().filter(|spec| allowed.allows(&spec_name(spec), false)).collect();
     specs.extend(
         crate::team::specs(context)
             .into_iter()
-            .filter(|spec| crate::team::always(context).contains(&name(spec).as_str()) && allowed.allows(&name(spec), false)),
+            .filter(|spec| crate::team::always(context).contains(&spec_name(spec).as_str()) && allowed.allows(&spec_name(spec), false)),
     );
+    usable(context, &mut specs);
+    specs
+}
+
+/// 一直给的自带工具和派发工具的名字（合并前）：同组的按需工具并进它们，不单列（merge::absorbed）
+pub fn given_names(context: &Context) -> Vec<String> {
+    core_specs(context).iter().map(spec_name).collect()
+}
+
+pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
+    let allowed = &context.tools;
+    let name = spec_name;
+    let mut specs = core_specs(context);
     if !crate::deferred::available(context).is_empty() || !crate::mcp::unknown().is_empty() {
         specs.push(crate::deferred::spec());
     }
@@ -242,14 +267,11 @@ pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
         specs.push(crate::history::spec());
     }
     specs.extend(crate::deferred::specs(context, history));
-    // 设置里关掉的工具（config.json 的 disabledTools，Friday 的设置 › 工具）不给
-    let disabled = crate::home::disabled_tools();
-    specs.retain(|spec| !disabled.contains(&name(spec)));
-    // 现成的子智能体限定了工具：只给这些（取回按需工具的 load_tools 留着）
-    if let Some(only) = context.me.as_ref().and_then(|me| me.tools.as_ref()) {
-        specs.retain(|spec| only.contains(&name(spec)) || name(spec) == crate::deferred::LOAD);
-    }
-    specs
+    usable(context, &mut specs);
+    // 同 Friday v2.90：同一组的合成一个（merge.rs）；并进来的按需成员（run_parallel_tasks）从这里补参数
+    let mut pool: Vec<Value> = crate::team::specs(context).into_iter().filter(|spec| allowed.allows(&name(spec), false)).collect();
+    usable(context, &mut pool);
+    crate::merge::apply(specs, &pool)
 }
 
 fn now_ms() -> i64 {
@@ -282,6 +304,8 @@ fn hook_text(key: &str, name: &str, value: &str) -> String {
 
 /// 用一个工具：调用前后有能力管的钩子（PreToolUse / PostToolUse）就跑
 fn execute(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, cancel: &AtomicBool, context: &Context) -> Outcome {
+    // 合并给模型的工具（merge.rs）换回内部的细分工具：之后权限、批准、钩子、执行都按它
+    let name = &crate::merge::internal(name, arguments);
     let mut outcome = run_tool(call, name, arguments, cwd, cancel, context);
     if outcome.ran && !cancel.load(Ordering::Relaxed) && capabilities::has_hook("PostToolUse") {
         let fields = json!({
@@ -319,7 +343,7 @@ fn run_tool(call: &str, name: &str, arguments: &Map<String, Value>, cwd: &Path, 
     let canonical = tool_aliases::canonical_name(name);
     if let Some(only) = context.me.as_ref().and_then(|me| me.tools.as_ref())
         && name != crate::deferred::LOAD
-        && !only.iter().any(|tool| tool == name || *tool == canonical)
+        && !only.iter().any(|tool| crate::merge::covers(tool, name) || *tool == canonical)
     {
         return refused(format!("你能用的工具只有：{}（{name} 不在里面）", only.join("、")));
     }

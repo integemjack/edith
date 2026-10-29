@@ -228,7 +228,6 @@ pub fn instructions(cwd: &Path, me: &Me) -> String {
         text("edith.sub.nest", &[])
     };
     let role = if me.role.trim().is_empty() { text("edith.sub.default-role", &[]) } else { me.role.clone() };
-    let now = chrono::Local::now();
     text(
         "edith.sub",
         &[
@@ -239,7 +238,6 @@ pub fn instructions(cwd: &Path, me: &Me) -> String {
             ("cwd", cwd.to_string_lossy().into_owned()),
             ("os", format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)),
             ("shell", crate::tools::shell_title()),
-            ("now", format!("{}（{}）", now.format("%Y-%m-%d %H:%M"), crate::tools::weekday(&now))),
         ],
     )
 }
