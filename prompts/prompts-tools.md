@@ -9,7 +9,7 @@
 @// ———— 文件、命令、网页（AgentTools、TerminalTools） ————
 
 @@ tool.read_file
-读取文本文件内容。不给 offset / limit、整个文件不超过 8000 字符时原样返回；文件更长或给了 offset / limit 时按行返回，每行前面带行号，最多 8000 字符，结尾写明共几行、接着从哪行读。大文件先用 search_files 找到行号，再只读那一段。图片文件会作为附件展示给用户，理解图片内容请用 analyze_image。
+读取文本文件内容。不给 offset / limit、整个文件不超过 8000 字符时原样返回；文件更长或给了 offset / limit 时按行返回，每行前面带行号，最多 8000 字符，结尾写明共几行、接着从哪行读。大文件先用 search_files 找到行号，再只读那一段。图片文件：你能看图时图片跟在结果后面直接给你看，看不了图才用 analyze_image。
 
 @@ tool.read_file.limit
 最多读几行；不填读到 8000 字符为止
@@ -883,7 +883,7 @@ true = 删掉这个技能（只要 name）
 @// ———— 能力（CapabilityRegistry；provider 参数见 tool-part.provider） ————
 
 @@ tool.analyze_image
-看一张图片并回答问题：描述内容、读取截图里的文字、识别物体等。图片可以是本地路径（用户附件的路径在消息末尾）或 http(s) 地址。
+让看图模型看一张图片并回答问题：描述内容、读取截图里的文字、识别物体等。图片可以是本地路径或 http(s) 地址。你自己能看图时一般用不着：交来的图已经直接给你了，本地图片用 read_file 看。
 
 @@ tool.analyze_image.image
 图片的本地路径或 URL

@@ -738,6 +738,7 @@ pub fn run(
             _ => return finish(&brain, answer, None, cancel.load(Ordering::Relaxed)),
         }
         let mut results = Vec::new();
+        crate::tools::set_vision(model.supports_vision);
         crate::tools::take_images();
         let mut images: Vec<String> = Vec::new();
         for call in decision["calls"].as_array().into_iter().flatten() {
@@ -769,7 +770,7 @@ pub fn run(
         let image_message = (!images.is_empty()).then(|| {
             let mut parts: Vec<Value> =
                 images.iter().map(|path| json!({ "type": "image_url", "image_url": { "url": format!("{IMAGE_PREFIX}{path}") } })).collect();
-            parts.push(json!({ "type": "text", "text": format!("{}上面是工具截的图", friday_core::engine_loop::IMAGE_MARKER) }));
+            parts.push(json!({ "type": "text", "text": format!("{}上面是工具给的图", friday_core::engine_loop::IMAGE_MARKER) }));
             json!({ "role": "user", "content": parts })
         });
         brain.tool_results(results, images.len(), image_message, added, None);

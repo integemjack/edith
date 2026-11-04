@@ -3,6 +3,7 @@
 mod common;
 
 use common::{edith, fake, fake_model, python, scratch, text};
+use serde_json::{Value, json};
 
 #[test]
 fn writes_checks_and_delivers() {
@@ -93,5 +94,32 @@ fn searches_and_reads_the_web() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     for wanted in ["# 中文页", "# 标题一", "正文段落，下一页[1]", &format!("[1] 下一页 {base}/next")] {
         assert!(stdout.contains(wanted), "少了 {wanted}：{}", text(&output));
+    }
+}
+
+#[test]
+fn read_file_hands_images_to_a_model_that_sees() {
+    // v2.96 同 Friday：read_file 读到图片，模型能看图就跟在工具结果后面交给它（发请求时才读成 base64），看不了图才叫它用 analyze_image
+    for vision in [true, false] {
+        let (work, home) = scratch(if vision { "image-seen" } else { "image-blind" });
+        let model = fake_model(&home.join("requests.jsonl"));
+        std::fs::write(home.join("config.json"), json!({ "supportsVision": vision }).to_string()).unwrap();
+        std::fs::write(work.join("chart.png"), [0x89, b'P', b'N', b'G']).unwrap();
+        let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), r#"调用工具 read_file 参数 {"path":"chart.png"}"#]);
+        assert!(output.status.success(), "{}", text(&output));
+        let requests: Vec<Value> =
+            std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        let messages = requests[1]["messages"].as_array().unwrap();
+        let position = messages.iter().position(|message| message["role"] == "tool").unwrap();
+        let tool = messages[position]["content"].as_str().unwrap();
+        if vision {
+            assert_eq!(tool, "这是图片文件，图片跟在后面给你看了。");
+            let image = messages[position + 1].to_string();
+            assert!(image.contains("data:image/png;base64,iVBORw==") && image.contains("上面是工具给的图"), "{image}");
+        } else {
+            assert_eq!(tool, "这是图片文件。当前模型看不了图：要理解内容请调用 analyze_image。");
+            assert_eq!(messages.len(), position + 1, "{messages:?}");
+        }
     }
 }

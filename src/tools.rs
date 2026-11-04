@@ -67,8 +67,31 @@ thread_local! {
 }
 
 thread_local! {
-    /// 这一步交给模型看的图片（browser_screenshot）：brain 跟在工具结果后面发给能看图的模型
+    /// 这一步交给模型看的图片（browser_screenshot；v2.96 起还有 read_file 读到的图片）：brain 跟在工具结果后面发给能看图的模型
     static IMAGES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// v2.96 这一步的模型看不看得到图（brain 调工具前设）：read_file 读到图片时据此说图跟在后面，还是叫它用 analyze_image
+    static VISION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// brain 调这一步的工具前设：模型看不看得到图
+pub fn set_vision(vision: bool) {
+    VISION.with(|cell| cell.set(vision));
+}
+
+/// 能直接给模型看的图片（brain 发请求时认得的几种）
+fn is_image(path: &str) -> bool {
+    let extension = Path::new(path).extension().and_then(|extension| extension.to_str()).map(str::to_lowercase);
+    matches!(extension.as_deref(), Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"))
+}
+
+/// v2.96 read_file 读到图片（同 Friday）：模型能看图就跟在工具结果后面交给它，看不了才叫它用 analyze_image
+fn read_image(path: &str) -> Outcome {
+    if VISION.with(std::cell::Cell::get) {
+        note_image(path);
+        Outcome::ok("这是图片文件，图片跟在后面给你看了。")
+    } else {
+        Outcome::ok("这是图片文件。当前模型看不了图：要理解内容请调用 analyze_image。")
+    }
 }
 
 /// 这一步有张图要给模型看（这台上的路径）
@@ -242,6 +265,9 @@ pub fn run(
         "list_directory" => output(tool_files::list_directory(&path("path"), &working)),
         "read_file" => {
             let target = path("path");
+            if is_image(&target) && Path::new(&target).is_file() {
+                return Some(read_image(&target));
+            }
             let outcome = output(tool_files::read_file(&target, int(arguments, "offset"), int(arguments, "limit"), &working));
             if outcome.ok {
                 remember(session, &target);

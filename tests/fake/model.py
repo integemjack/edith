@@ -52,7 +52,10 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(m.get("content"), list):
                 m["content"] = "\n".join(part.get("text", "") for part in m["content"] if part.get("type") == "text")
         tools = [m for m in messages if m["role"] == "tool"]
-        last_user = [m for m in messages if m["role"] == "user"][-1]["content"]
+        # 跟在工具结果后面补图的那条（「［工具截图］…」）不算用户的话
+        def said(m):
+            return m["role"] == "user" and not m["content"].startswith("［工具截图］")
+        last_user = [m for m in messages if said(m)][-1]["content"]
         # 「出错测试」：第一次回 400（不会自动重试的那种），之后照常（测重试）
         if "出错测试" in last_user and not os.path.exists(LOG + ".failed"):
             open(LOG + ".failed", "w").close()
@@ -62,7 +65,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         events = []
         called = re.search(r"调用工具 (\S+)(?: 参数 (\{.*\}))?", last_user)
-        last_user_index = max(index for index, m in enumerate(messages) if m["role"] == "user")
+        last_user_index = max(index for index, m in enumerate(messages) if said(m))
         tools_since = [m for m in messages[last_user_index + 1:] if m["role"] == "tool"]
         system = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
         first_user = [m for m in messages if m["role"] == "user"][0]["content"]
