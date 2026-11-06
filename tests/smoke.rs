@@ -23,6 +23,26 @@ fn writes_checks_and_delivers() {
 }
 
 #[test]
+fn switches_to_responses_when_the_model_asks() {
+    let (work, home) = scratch("responses");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), "Responses 测试：写个文件"]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("做完了：走的 Responses"), "{}", text(&output));
+    assert_eq!(std::fs::read_to_string(work.join("resp.txt")).unwrap(), "你好 Responses\n");
+    let requests: Vec<Value> =
+        std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert!(requests[0].get("messages").is_some(), "先走 chat/completions");
+    assert!(requests[1..].iter().all(|request| request.get("input").is_some() && request.get("messages").is_none()));
+    // 第二段：思考、工具调用、结果按顺序带回去
+    let input = requests[2]["input"].as_array().unwrap();
+    let at = |kind: &str| input.iter().position(|item| item["type"] == kind).unwrap_or_else(|| panic!("没有 {kind}：{input:?}"));
+    assert!(at("reasoning") < at("function_call") && at("function_call") < at("function_call_output"));
+    assert_eq!(input[at("reasoning")]["encrypted_content"], "密文");
+    assert_eq!(input[at("function_call")]["call_id"], "call_r");
+}
+
+#[test]
 fn capability_add_and_remove() {
     let (work, home) = scratch("caps");
     let model = fake_model(&home.join("requests.jsonl"));

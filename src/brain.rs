@@ -503,16 +503,23 @@ fn request(
         Ok(endpoint) => endpoint,
         Err(message) => return Request::Failed(message),
     };
-    let url = format!("{base}/chat/completions");
-    let mut body = inline_images(brain.body(include_tools, None), model.supports_vision);
+    let engine_id = model.engine_id();
+    // OpenAI 专有的接口：模型的报错点名要它才换（chat_request::refused 记下，见下面）
+    let responses = chat_request::uses_responses(&engine_id);
+    let url = format!("{base}/{}", if responses { "responses" } else { "chat/completions" });
+    let mut body = inline_images(brain.body(include_tools, None, false), model.supports_vision);
+    if responses {
+        body = friday_core::responses::body(body, &engine_id);
+    }
     if let Some(body) = body.as_object_mut() {
         body.extend(extra);
     }
-    let mut parser = Parser::new(show_reasoning, true);
+    let mut parser = Parser::for_engine(show_reasoning, true, &engine_id);
     let started = now_ms();
     let mut first: Option<i64> = None;
     let mut stream_error: Option<StreamError> = None;
     let mut in_reasoning = false;
+    let mut finished = false;
     let outcome = http::post_sse(&url, &api_key, &body, |data| {
         if cancel.load(Ordering::Relaxed) {
             return false;
@@ -533,7 +540,9 @@ fn request(
             stream_error = Some(error);
             return false;
         }
-        !feed.looped
+        // Responses 接口没有 [DONE]，结束事件就是
+        finished = feed.done;
+        !feed.looped && !feed.done
     });
     let retry = |message: String, delay: f64, on: &mut dyn FnMut(Event)| {
         if attempt >= MAX_ATTEMPTS {
@@ -557,7 +566,7 @@ fn request(
             if !cancel.load(Ordering::Relaxed)
                 && let Some((transient, message)) = chat_stream::interrupted(
                     object.get("finishReason").and_then(Value::as_str),
-                    saw_done || object.get("loop").is_some_and(|found| !found.is_null()),
+                    saw_done || finished || object.get("loop").is_some_and(|found| !found.is_null()),
                 )
             {
                 // 一个字都还没出来就断了：重发；出了一半的照收（模型下一段会接着做）
@@ -575,9 +584,9 @@ fn request(
             retry(format!("网络出错：{message}"), chat_request::retry_delay(attempt, None), on)
         }
         Err(failure @ Failure::Network(_)) => Request::Failed(failure.message()),
-        Err(Failure::Status { status, body, retry_after }) => {
+        Err(Failure::Status { status, body: reply, retry_after }) => {
             let status_code = status as i64;
-            if let Some((prompt_tokens, context_tokens)) = chat_request::context_overflow(status_code, &body) {
+            if let Some((prompt_tokens, context_tokens)) = chat_request::context_overflow(status_code, &reply) {
                 let decision = brain.overflow(prompt_tokens, context_tokens);
                 if decision["retry"].as_bool() == Some(true) && attempt < MAX_ATTEMPTS {
                     on(Event::Notice("上下文太长，压短了重发".into()));
@@ -585,15 +594,22 @@ fn request(
                 }
                 return Request::Failed(format!("上下文超过了模型的上限（{context_tokens}）：开个新会话，或把要做的拆小"));
             }
-            let unsupported = chat_request::unsupported_parameters(status_code, &body);
-            if !unsupported.is_empty() && attempt < MAX_ATTEMPTS {
-                chat_request::remember_unsupported(&model.engine_id(), &unsupported);
-                on(Event::Notice(format!("模型不接受参数 {}，去掉重发", unsupported.join("、"))));
+            // 改了什么记在引擎上，重发时请求体、地址按记下的拼
+            if attempt < MAX_ATTEMPTS
+                && let Some(fixed) = chat_request::refused(status_code, &reply, &body, &engine_id)
+            {
+                on(Event::Notice(match fixed["dropped"].as_array() {
+                    Some(names) => {
+                        let names: Vec<&str> = names.iter().filter_map(Value::as_str).collect();
+                        format!("模型不接受参数 {}，去掉重发", names.join("、"))
+                    }
+                    None => "模型要用 Responses 接口，换过去重发".into(),
+                }));
                 return Request::Retry;
             }
-            match quota::classify(status_code, &body) {
+            match quota::classify(status_code, &reply) {
                 Some(Limit::Usage | Limit::Balance | Limit::Denied) => {
-                    return Request::Failed(Failure::Status { status, body, retry_after }.message());
+                    return Request::Failed(Failure::Status { status, body: reply, retry_after }.message());
                 }
                 Some(Limit::RateLimit) => {
                     return retry(format!("限流（HTTP {status}）"), chat_request::retry_delay(attempt, retry_after), on);
@@ -603,7 +619,7 @@ fn request(
             if status == 429 || status >= 500 {
                 return retry(format!("服务繁忙（HTTP {status}）"), chat_request::retry_delay(attempt, retry_after), on);
             }
-            Request::Failed(Failure::Status { status, body, retry_after }.message())
+            Request::Failed(Failure::Status { status, body: reply, retry_after }.message())
         }
     }
 }

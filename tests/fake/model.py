@@ -46,16 +46,24 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         with open(LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(body, ensure_ascii=False) + "\n")
+        if self.path.endswith("/responses"):
+            return self.responses_api(body)
         messages = body["messages"]
         # 带图片的用户消息是一段段的（text / image_url）：按文字看
         for m in messages:
             if isinstance(m.get("content"), list):
                 m["content"] = "\n".join(part.get("text", "") for part in m["content"] if part.get("type") == "text")
         tools = [m for m in messages if m["role"] == "tool"]
-        # 跟在工具结果后面补图的那条（「［工具截图］…」）不算用户的话
+        # 跟在工具结果后面补图的那条（「［工具图片］…」）不算用户的话
         def said(m):
-            return m["role"] == "user" and not m["content"].startswith("［工具截图］")
+            return m["role"] == "user" and not m["content"].startswith("［工具图片］")
         last_user = [m for m in messages if said(m)][-1]["content"]
+        # 「Responses 测试」：像 GPT-5.4 往后的模型，chat/completions 上不让工具和思考同时开
+        if "Responses 测试" in last_user:
+            payload = json.dumps({"error": {"message": "Function tools with reasoning_effort are not supported for fake in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.", "type": "invalid_request_error", "param": "reasoning_effort", "code": None}}).encode()
+            self.send_response(400); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
+            return
         # 「出错测试」：第一次回 400（不会自动重试的那种），之后照常（测重试）
         if "出错测试" in last_user and not os.path.exists(LOG + ".failed"):
             open(LOG + ".failed", "w").close()
@@ -188,6 +196,29 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
             self.wfile.flush()
         self.wfile.write(b"data: [DONE]\n\n")
+
+
+    def responses_api(self, body):
+        """Responses 接口：先调一次写文件（带思考和加密思考），有工具结果了就交付；用量在结束事件里，没有 [DONE]"""
+        results = [item for item in body["input"] if item.get("type") == "function_call_output"]
+        if results:
+            events = [{"type": "response.output_text.delta", "output_index": 0, "delta": "做完了：走的 Responses，" + results[-1]["output"].splitlines()[0]}]
+        else:
+            args = json.dumps({"path": "resp.txt", "content": "你好 Responses\n"}, ensure_ascii=False)
+            events = [
+                {"type": "response.reasoning_summary_text.delta", "delta": "先想一想"},
+                {"type": "response.output_item.done", "output_index": 0, "item": {"type": "reasoning", "id": "rs_1", "encrypted_content": "密文"}},
+                {"type": "response.output_item.added", "output_index": 1, "item": {"type": "function_call", "id": "fc_1", "call_id": "call_r", "name": "write_file", "arguments": ""}},
+                {"type": "response.function_call_arguments.delta", "output_index": 1, "delta": args[:10]},
+                {"type": "response.function_call_arguments.delta", "output_index": 1, "delta": args[10:]},
+            ]
+        events.append({"type": "response.completed", "response": {"usage": {"input_tokens": 1200, "output_tokens": 30}}})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for event in events:
+            self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
+            self.wfile.flush()
 
 
 server = ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler)
