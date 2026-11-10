@@ -747,6 +747,41 @@ fn sense_brings_mode_thinking_engine_team_and_images() {
 }
 
 #[test]
+fn delegated_results_keep_the_turns_prefs() {
+    let (work, home) = scratch("prefs-agent");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let engine = json!({
+        "id": "second", "title": "第二个", "baseURL": format!("http://127.0.0.1:{}/v1", model.port), "model": "second-model",
+        "apiKeySecret": "SECOND_KEY", "thinking": "effort",
+    });
+    std::fs::write(home.join("config.json"), json!({ "engines": [engine] }).to_string()).unwrap();
+    std::fs::write(home.join("secrets.json"), json!({ "SECOND_KEY": "k" }).to_string()).unwrap();
+    // 派到后台、这一轮先结束；子智能体交回后另开的验收那一轮也要照派它的那一轮的模型、思考档位、权限模式
+    // （以前交回时来源不带这些：验收按默认模型、完全模式下跑命令也要批准）
+    let params = json!({ "text": "派活测试", "kind": "user", "mode": "full", "thinking": "high", "engine": "second" });
+    configure_cap(&home, json!([{ "delay": 0.3, "send": { "jsonrpc": "2.0", "method": "sense", "params": params } }]), "done");
+    let _edith = run(&home, model.port, &work);
+    let main_requests = || -> Vec<Value> {
+        std::fs::read_to_string(home.join("requests.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.contains("你是 EDITH 派出的临时子 Agent"))
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let reviewing = |request: &Value| request["messages"].as_array().unwrap().last().unwrap()["content"].to_string().contains("交回结果");
+    assert!(wait_until(30, || main_requests().iter().any(reviewing)), "没等到验收那一轮：{:?}", received(&home));
+    for request in main_requests() {
+        assert_eq!(
+            (request["model"].as_str(), request["reasoning_effort"].as_str()),
+            (Some("second-model"), Some("high")),
+            "{}",
+            request["messages"].as_array().unwrap().last().unwrap()
+        );
+    }
+}
+
+#[test]
 fn tools_list_for_the_settings_page() {
     let (work, home) = scratch("tools-list");
     let model = fake_model(&home.join("requests.jsonl"));

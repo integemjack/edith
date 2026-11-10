@@ -61,9 +61,10 @@ impl Origin {
         Origin::default()
     }
 
-    /// 子智能体、工作流交回的结果（team.rs）：权限照派它的那一轮
-    pub fn agent(tools: crate::permissions::Tools) -> Origin {
-        Origin { kind: "agent".into(), tools, ..Origin::default() }
+    /// 子智能体、工作流交回的结果（team.rs）：权限、权限模式、思考档位、模型、工作方式都照派它的那一轮
+    /// （不带 prefs 时验收那一轮按默认来：「完全」模式下也要批准、选了别的模型的会话换回默认模型）
+    pub fn agent(tools: crate::permissions::Tools, prefs: brain::Prefs) -> Origin {
+        Origin { kind: "agent".into(), tools, prefs, ..Origin::default() }
     }
 
     pub fn to_json(&self) -> Value {

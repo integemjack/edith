@@ -702,9 +702,9 @@ fn work(agent: &Arc<Agent>, prompt: String, parent_cancel: Option<Arc<AtomicBool
 }
 
 /// 交回主智能体的会话：正在干活就补充进这一轮，闲着就开始新的一轮
-fn deliver(session: &str, report: &str, tools: &Tools) {
+fn deliver(session: &str, report: &str, tools: &Tools, prefs: &crate::brain::Prefs) {
     let urgency = if mind::working(session).is_some() { Urgency::Interject } else { Urgency::Queue };
-    let _ = mind::submit(session, report, Origin::agent(tools.clone()), urgency, None);
+    let _ = mind::submit(session, report, Origin::agent(tools.clone(), prefs.clone()), urgency, None);
 }
 
 /// 主智能体派的：在后台跑，做完交回
@@ -714,7 +714,7 @@ fn background(agent: Arc<Agent>, prompt: String, batch: Option<String>) {
         let report = work(&agent, prompt, None);
         match batch {
             Some(key) => finish_batch(&key, &agent, report),
-            None => deliver(&agent.session, &report, &agent.tools),
+            None => deliver(&agent.session, &report, &agent.tools, &agent.prefs),
         }
         pending(&agent.session, -1);
     });
@@ -724,7 +724,7 @@ fn background(agent: Arc<Agent>, prompt: String, batch: Option<String>) {
 fn finish_batch(key: &str, agent: &Agent, report: String) {
     let ready = {
         let mut batches = BATCHES.lock().unwrap();
-        let Some((waiting, done, _)) = batches.get_mut(key) else { return deliver(&agent.session, &report, &agent.tools) };
+        let Some((waiting, done, _)) = batches.get_mut(key) else { return deliver(&agent.session, &report, &agent.tools, &agent.prefs) };
         waiting.remove(&agent.id);
         done.push(report);
         if waiting.is_empty() { batches.remove(key).map(|(_, done, header)| (done, header)) } else { None }
@@ -735,7 +735,7 @@ fn finish_batch(key: &str, agent: &Agent, report: String) {
         } else {
             text(header, &[("count", done.len().to_string()), ("results", done.join("\n\n"))])
         };
-        deliver(&agent.session, &report, &agent.tools);
+        deliver(&agent.session, &report, &agent.tools, &agent.prefs);
     }
 }
 
@@ -1021,7 +1021,7 @@ fn start_workflow(args: &Map<String, Value>, context: &Context, cwd: &Path, call
         None,
     );
     pending(&context.session, 1);
-    let (session, tools) = (context.session.clone(), context.tools.clone());
+    let (session, tools, prefs) = (context.session.clone(), context.tools.clone(), context.prefs.clone());
     std::thread::spawn(move || {
         run_workflow(&id, &goal, &steps, &agents, &stop);
         WORKFLOWS.lock().unwrap().remove(&id);
@@ -1047,7 +1047,7 @@ fn start_workflow(args: &Map<String, Value>, context: &Context, cwd: &Path, call
                     .collect::<Vec<_>>(),
                 None,
             );
-        deliver(&session, &report, &tools);
+        deliver(&session, &report, &tools, &prefs);
         pending(&session, -1);
     });
     Outcome { ok: true, text: started_text }
