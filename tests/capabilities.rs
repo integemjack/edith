@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::io::Write;
 use std::path::Path;
 use std::process::Child;
 use std::time::{Duration, Instant};
@@ -569,6 +570,46 @@ fn linger_exits_when_idle() {
     assert!(started.elapsed() < Duration::from_secs(20), "闲着没退");
     assert!(text(&output).contains("闲了 2 秒"), "{}", text(&output));
     assert!(std::fs::read_dir(home.join("instances")).map_or(true, |mut dir| dir.next().is_none()), "登记没删");
+}
+
+#[test]
+fn linger_exits_after_upgrade_when_calm() {
+    let (work, home) = scratch("linger-upgrade");
+    let model = fake_model(&home.join("requests.jsonl"));
+    // 拷一份程序来跑（换的是这份，不动 cargo 编的那个）
+    let exe = home.join(if cfg!(windows) { "edith-copy.exe" } else { "edith-copy" });
+    std::fs::copy(env!("CARGO_BIN_EXE_edith"), &exe).unwrap();
+    let command = command(&home, model.port, &work, &["run", "--idle", "--linger", "600", "-C", work.to_str().unwrap()]);
+    let mut child = std::process::Command::new(&exe)
+        .args(command.get_args())
+        .envs(command.get_envs().filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned()))))
+        .current_dir(&work)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let registered = || std::fs::read_dir(home.join("instances")).is_ok_and(|mut dir| dir.next().is_some());
+    assert!(wait_until(20, registered), "没登记");
+    // 装新版本：换掉程序文件（Unix 上像部署脚本那样 mv 盖过去；Windows 上跑着的程序文件不能删，改名后放新的）
+    let fresh = home.join("edith-new");
+    std::fs::copy(env!("CARGO_BIN_EXE_edith"), &fresh).unwrap();
+    std::fs::OpenOptions::new().append(true).open(&fresh).unwrap().write_all(b"\0").unwrap();
+    if cfg!(windows) {
+        std::fs::rename(&exe, home.join("edith-old.exe")).unwrap();
+    }
+    std::fs::rename(&fresh, &exe).unwrap();
+    let started = Instant::now();
+    let exited = wait_until(40, || child.try_wait().unwrap().is_some());
+    if !exited {
+        let _ = child.kill();
+    }
+    let mut stderr = String::new();
+    let _ = std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut stderr);
+    assert!(exited, "换了程序文件、闲着也没退：{stderr}");
+    assert!(stderr.contains("换成了新版本"), "{stderr}");
+    assert!(started.elapsed() < Duration::from_secs(40));
+    assert!(!registered(), "登记没删");
 }
 
 #[test]

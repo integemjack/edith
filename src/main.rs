@@ -428,15 +428,41 @@ fn run(options: Options) -> Result<(), String> {
     };
     // 闲着（没有连接、没在干活）够久了就收拾好退出
     let mut idle_since = std::time::Instant::now();
+    // 程序文件换了（升级装了新版本）、手上没活一阵了：也退出，下次交话时起的就是新版本
+    // （不然客户端一直连着，这个大脑一直是旧版本，升级装上的修复都不生效）
+    let exe = std::env::current_exe().ok();
+    let built = exe.as_deref().and_then(build_stamp);
+    let mut calm_since = std::time::Instant::now();
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        if capabilities::visitors() > 0 || mind::any_working() {
+        let working = mind::any_working();
+        if working {
+            calm_since = std::time::Instant::now();
+        }
+        if capabilities::visitors() > 0 || working {
             idle_since = std::time::Instant::now();
         } else if idle_since.elapsed().as_secs() >= linger {
             eprintln!("闲了 {linger} 秒，没有连接：退出");
             shutdown(0);
         }
+        if calm_since.elapsed().as_secs() >= UPGRADE_CALM_SECONDS
+            && built.is_some()
+            && exe.as_deref().and_then(build_stamp) != built
+            && !mind::any_working()
+        {
+            eprintln!("程序文件换成了新版本、手上没活：退出（下次用时起新的）");
+            shutdown(0);
+        }
     }
+}
+
+/// 程序文件换了之后要闲这么久才退（刚交来的话别赶上退出）
+const UPGRADE_CALM_SECONDS: u64 = 10;
+
+/// 程序文件的大小和修改时间：变了就是换过（没了也算换过）
+fn build_stamp(path: &std::path::Path) -> Option<(u64, std::time::SystemTime)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
 }
 
 /// 要做的事：参数 + 管道送进来的
