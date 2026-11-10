@@ -42,8 +42,21 @@ const DEFAULT_ACTION_TIMEOUT: u64 = 600;
 /// 动作的工具名：<能力名>__<动作名>
 pub const SEPARATOR: &str = "__";
 /// 能被订阅的事件
-pub const EVENT_TYPES: &[&str] =
-    &["turn.started", "input", "text", "thinking", "tool", "result", "stats", "notice", "approval", "done", "agent", "agent.event"];
+pub const EVENT_TYPES: &[&str] = &[
+    "turn.started",
+    "input",
+    "text",
+    "thinking",
+    "tool",
+    "result",
+    "stats",
+    "notice",
+    "approval",
+    "done",
+    "agent",
+    "agent.event",
+    "usage",
+];
 
 /// 一个连着的能力
 pub struct Capability {

@@ -823,6 +823,21 @@ fn delegated_results_keep_the_turns_prefs() {
 }
 
 #[test]
+fn requests_push_usage_to_capabilities() {
+    let (work, home) = scratch("usage-event");
+    let model = fake_model(&home.join("requests.jsonl"));
+    // 订了「*」的能力也收到 usage（一段请求成功：edith-friday 转成 Friday 的 serviceUsage，客户端重查余额 / 用量）
+    let params = json!({ "text": "只聊天", "kind": "user" });
+    configure_cap(&home, json!([{ "delay": 0.3, "send": { "jsonrpc": "2.0", "method": "sense", "params": params } }]), "*");
+    let _edith = run(&home, model.port, &work);
+    let usage = || received(&home).into_iter().find(|message| message["method"] == "event" && message["params"]["type"] == "usage");
+    assert!(wait_until(30, || usage().is_some()), "没收到 usage 事件：{:?}", received(&home));
+    let data = &usage().unwrap()["params"]["data"];
+    assert_eq!(data["observedKey"], format!("http://127.0.0.1:{}/v1|", model.port));
+    assert_eq!(data["observed"], false, "平常的成功不算额度变化");
+}
+
+#[test]
 fn tools_list_for_the_settings_page() {
     let (work, home) = scratch("tools-list");
     let model = fake_model(&home.join("requests.jsonl"));
