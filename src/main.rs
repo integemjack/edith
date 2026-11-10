@@ -31,6 +31,7 @@ mod team;
 mod terminal;
 mod tools;
 mod trust;
+mod usage;
 mod web;
 mod worktree;
 

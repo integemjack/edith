@@ -407,6 +407,7 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 | `tool` | `{id, name, arguments}` | 开始用一个工具（自带的、能力的动作、MCP 服务的） |
 | `result` | `{id, name, ok, text, lines?}` | 用完；改文件、跑命令改了文件的带 `lines: {added, removed}`（增删了几行，界面卡片上的「+N −M」） |
 | `stats` | `{promptTokens, generatedTokens, cachedTokens, promptTime, generateTime, contextParts, contextLimit, contextCompactAt}` | 每段请求的用量（时间是秒；`contextParts` 是上下文各部分的 token：system / tools / user / replies / toolUse） |
+| `usage` | `{observedKey, observed}` | 一段请求成功 / 额度用完了（同 Friday 的「顺手记」）：成功时间、响应头里的限流余量、额度用完的时间和恢复时间记在 `~/.edith/service-usage.json`（键 `observedKey` = 接口地址小写去掉末尾 `/` + `\|` + 密钥名）；`observed` 为真 = 额度刚用完、或用完后头一次成功。额度用完时这一轮不失败：等它恢复（服务说了几点就到点后 30 秒，没说按 10、20、30 分钟、之后每小时试，余额不足每 30 分钟），到点接着做，等的时候推一条 `notice`；停下就不等了 |
 | `notice` | `{text, call?, agent?}` | 顺带说一句：重试、压了上下文、收到补充、动作进度（带 `call`）、交付检查追了提醒、子智能体开始 / 交回 / 被打回（带 `agent`：子智能体的 id） |
 | `approval` | `{call, tool, summary, agent?, waiting, approved?}` | 要批准一件事：`waiting: true` 开始等（问能批准的能力、终端），`false` 答了或没人答（`approved` 批没批；没人答不带）。看状态的（Friday 助手的状态板）用它标「等确认」 |
 | `done` | `{answer, stopped, error}` | 这一轮结束 |

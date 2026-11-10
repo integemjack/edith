@@ -144,6 +144,8 @@ pub struct Model {
     pub supports_vision: bool,
     /// 额外请求参数（JSON 对象的文本，盖掉同名的）
     pub extra_body: String,
+    /// 密钥在密钥库里的名字（engines 里的 apiKeySecret；顶层的模型是空）：顺手记的服务用量按「地址|密钥名」记（usage.rs）
+    pub secret_name: String,
 }
 
 /// 设置里关掉的工具（config.json 的 `disabledTools`，Friday 的 设置 › 工具 经网关改它）
@@ -232,6 +234,7 @@ impl Model {
                 .unwrap_or_default(),
             base_url,
             model,
+            secret_name: String::new(),
         })
     }
 
@@ -255,6 +258,7 @@ impl Model {
             supports_vision: engine.supports_vision,
             extra_body: engine.extra_body.clone(),
             model: engine.model,
+            secret_name,
         })
     }
 

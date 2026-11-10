@@ -38,13 +38,25 @@ impl Failure {
 }
 
 /// POST 一个 JSON、按 SSE 读回来：每个 `data:` 负载交给 on_data（返回 false 就不读了）；读到 [DONE] 返回 Ok(true)，流自己结束 Ok(false)
-pub fn post_sse(url: &str, api_key: &str, body: &Value, mut on_data: impl FnMut(&str) -> bool) -> Result<bool, Failure> {
+/// headers：收到的响应头（名字小写；成功、出错都填，记限流余量、算额度几时恢复用）
+pub fn post_sse(
+    url: &str,
+    api_key: &str,
+    body: &Value,
+    headers: &mut Vec<(String, String)>,
+    mut on_data: impl FnMut(&str) -> bool,
+) -> Result<bool, Failure> {
     let mut request = agent().post(url).header("Content-Type", "application/json").header("Accept", "text/event-stream");
     if !api_key.is_empty() && api_key != "none" {
         request = request.header("Authorization", format!("Bearer {api_key}"));
     }
     let mut response = request.send(body.to_string()).map_err(|error| Failure::Network(error.to_string()))?;
     let status = response.status().as_u16();
+    *headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_lowercase(), value.to_string())))
+        .collect();
     if !(200..300).contains(&status) {
         let retry_after =
             response.headers().get("retry-after").and_then(|value| value.to_str().ok()).and_then(friday_core::chat_request::header_seconds);

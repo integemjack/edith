@@ -226,3 +226,21 @@ fn stdin_that_never_closes_does_not_hang() {
     }
     assert!(finished, "标准输入不关就一直卡着");
 }
+
+#[test]
+fn quota_waits_and_usage_is_noted() {
+    let (work, home) = scratch("quota");
+    let model = fake_model(&home.join("requests.jsonl"));
+    // 第一次回额度用完（智谱 1308）：不失败，等它恢复（测试里最多等 1 秒）后接着做这一段
+    let output = common::command(&home, model.port, &work, &["额度测试"]).env("EDITH_QUOTA_WAIT_MAX", "1").output().unwrap();
+    let all = text(&output);
+    assert!(output.status.success(), "{all}");
+    assert!(all.contains("额度用完了") && all.contains("额度恢复了，接着做完"), "{all}");
+    // 顺手记的用量：同 Friday 的 service-usage.json（键 = 地址|密钥名，命令行给的模型没有密钥名）
+    let file: Value = serde_json::from_slice(&std::fs::read(home.join("service-usage.json")).unwrap()).unwrap();
+    let entry = &file["services"][format!("http://127.0.0.1:{}/v1|", model.port)];
+    assert_eq!(entry["quotaKind"], "usage", "{file}");
+    assert!(entry["okAt"].as_str() >= entry["quotaAt"].as_str(), "恢复后的成功记在用完之后：{entry}");
+    assert_eq!(entry["limits"][0]["remaining"], 99.0, "{entry}");
+    assert!(entry["resumeAt"].is_string(), "Retry-After 算出的恢复时间：{entry}");
+}

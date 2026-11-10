@@ -425,9 +425,41 @@ fn dispatch(
 }
 
 enum Request {
-    Done { pass: engine_loop::Pass, started: i64, finished: i64, first: Option<i64> },
+    Done {
+        pass: engine_loop::Pass,
+        started: i64,
+        finished: i64,
+        first: Option<i64>,
+    },
     Retry,
     Failed(String),
+    /// 额度用完 / 余额不足（同 Friday：等它恢复后接着做，不算进重试次数）：服务说了几点恢复就是 resume_at
+    Quota {
+        kind: quota::WaitKind,
+        resume_at: Option<chrono::DateTime<chrono::Utc>>,
+        message: String,
+    },
+}
+
+/// 记下这次请求的用量（usage.rs，同 Friday 的顺手记），推 usage 事件给能力（edith-friday 转成 Friday 的 serviceUsage）
+fn note_usage(model: &Model, context: &Context, observed: bool) {
+    let key = crate::usage::observed_key(&model.base_url, &model.secret_name);
+    crate::mind::emit(&context.session, &context.turn, "usage", json!({ "observedKey": key, "observed": observed }));
+}
+
+fn wait_kind(limit: Limit) -> Option<quota::WaitKind> {
+    match limit {
+        Limit::Usage => Some(quota::WaitKind::Usage),
+        Limit::Balance => Some(quota::WaitKind::Balance),
+        Limit::RateLimit | Limit::Denied => None,
+    }
+}
+
+fn kind_name(kind: quota::WaitKind) -> &'static str {
+    match kind {
+        quota::WaitKind::Usage => "usage",
+        quota::WaitKind::Balance => "balance",
+    }
 }
 
 /// 发一段请求、读完流
@@ -520,7 +552,8 @@ fn request(
     let mut stream_error: Option<StreamError> = None;
     let mut in_reasoning = false;
     let mut finished = false;
-    let outcome = http::post_sse(&url, &api_key, &body, |data| {
+    let mut headers: Vec<(String, String)> = Vec::new();
+    let outcome = http::post_sse(&url, &api_key, &body, &mut headers, |data| {
         if cancel.load(Ordering::Relaxed) {
             return false;
         }
@@ -552,11 +585,19 @@ fn request(
         wait(delay, cancel);
         Request::Retry
     };
+    let header = |name: &str| headers.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.clone());
+    let now = chrono::Utc::now();
+    let resume = |seconds: Option<f64>| seconds.map(|seconds| now + chrono::Duration::milliseconds((seconds * 1000.0).round() as i64));
     match outcome {
         Ok(saw_done) => {
             match stream_error {
                 Some(StreamError::RateLimit { message }) => return retry(message, chat_request::retry_delay(attempt, None), on),
-                Some(StreamError::Quota { message, .. }) => return Request::Failed(format!("额度用完了：{message}")),
+                Some(StreamError::Quota { limit, reset, message }) => {
+                    return match wait_kind(limit) {
+                        Some(kind) => Request::Quota { kind, resume_at: resume(reset), message },
+                        None => Request::Failed(format!("额度用完了：{message}")),
+                    };
+                }
                 Some(StreamError::Failed { message }) => return Request::Failed(message),
                 None => {}
             }
@@ -578,6 +619,8 @@ fn request(
                 }
                 on(Event::Notice(message));
             }
+            let recovered = crate::usage::note_success(&model.base_url, &model.secret_name, &header, now);
+            note_usage(model, context, recovered);
             Request::Done { pass: engine_loop::pass_from(object), started, finished: now_ms(), first }
         }
         Err(Failure::Network(message)) if first.is_none() => {
@@ -608,7 +651,12 @@ fn request(
                 return Request::Retry;
             }
             match quota::classify(status_code, &reply) {
-                Some(Limit::Usage | Limit::Balance | Limit::Denied) => {
+                Some(limit @ (Limit::Usage | Limit::Balance)) => {
+                    let kind = wait_kind(limit).unwrap();
+                    let message = Failure::Status { status, body: reply.clone(), retry_after }.message();
+                    return Request::Quota { kind, resume_at: resume(quota::reset_delay(header, &reply, now)), message };
+                }
+                Some(Limit::Denied) => {
                     return Request::Failed(Failure::Status { status, body: reply, retry_after }.message());
                 }
                 Some(Limit::RateLimit) => {
@@ -725,10 +773,29 @@ pub fn run(
         let include_tools = prepared["includeTools"].as_bool().unwrap_or(true);
         let show_reasoning = prepared["showReasoning"].as_bool().unwrap_or(true);
         let mut attempt = 1;
+        let mut quota_waits = 0;
         let (pass, started, finished, first) = loop {
             match request(&mut brain, model, context, include_tools, show_reasoning, attempt, cancel, on) {
                 Request::Done { pass, started, finished, first } => break (pass, started, finished, first),
                 Request::Retry => attempt += 1,
+                Request::Quota { kind, resume_at, message } => {
+                    // 同 Friday：额度用完等它恢复（服务说了几点就到点后 30 秒，没说按 10、20、30 分钟、之后每小时试；余额每 30 分钟），
+                    // 到点接着做这一段（已经做完的步骤不重做）；停下就不等了
+                    quota_waits += 1;
+                    let now = chrono::Utc::now();
+                    crate::usage::note_quota(&model.base_url, &model.secret_name, kind_name(kind), resume_at, now);
+                    note_usage(model, context, true);
+                    let planned = quota::wait_for(kind, resume_at, quota_waits, now);
+                    let text = quota::wait_text(kind, planned.resume_at, planned.known, now);
+                    on(Event::Notice(format!("{text}（{}）", message.chars().take(200).collect::<String>())));
+                    let mut seconds = (planned.resume_at - now).num_milliseconds().max(0) as f64 / 1000.0;
+                    // 测试用：最多等这么多秒（真用时没有这个变量）
+                    if let Some(most) = std::env::var("EDITH_QUOTA_WAIT_MAX").ok().and_then(|value| value.parse::<f64>().ok()) {
+                        seconds = seconds.min(most);
+                    }
+                    wait(seconds, cancel);
+                    attempt = 1;
+                }
                 Request::Failed(message) => {
                     if prepared["wrapUp"].as_bool() == Some(true) {
                         let text = brain.wrap_up_failed();

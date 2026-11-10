@@ -71,6 +71,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(400); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
             return
+        # 「额度测试」：第一次回智谱的 1308（几小时的使用上限用完，带 Retry-After），之后照常回一句
+        if "额度测试" in last_user and not os.path.exists(LOG + ".quota"):
+            open(LOG + ".quota", "w").close()
+            payload = json.dumps({"error": {"code": "1308", "message": "已达到 5 小时的使用上限"}}, ensure_ascii=False).encode()
+            self.send_response(429); self.send_header("Content-Type", "application/json"); self.send_header("Retry-After", "1")
+            self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
+            return
         events = []
         called = re.search(r"调用工具 (\S+)(?: 参数 (\{.*\}))?", last_user)
         last_user_index = max(index for index, m in enumerate(messages) if said(m))
@@ -152,6 +159,8 @@ class Handler(BaseHTTPRequestHandler):
             events.append(chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_t", "type": "function", "function": {"name": called.group(1), "arguments": called.group(2) or "{}"}}]}, "tool_calls"))
         elif called:
             events.append(chunk({"role": "assistant", "content": "结果：" + tools_since[-1]["content"]}, "stop"))
+        elif "额度测试" in last_user:
+            events.append(chunk({"role": "assistant", "content": "额度恢复了，接着做完"}, "stop"))
         elif "只聊天" in last_user:
             events.append(chunk({"role": "assistant", "content": "你好，"}))
             events.append(chunk({"content": "我是 EDITH。"}, "stop"))
@@ -191,6 +200,10 @@ class Handler(BaseHTTPRequestHandler):
         events.append({"choices": [], "usage": {"prompt_tokens": 1200, "completion_tokens": 30}})
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
+        # 限流余量（OpenAI 系的写法）：EDITH 顺手记下（service-usage.json）
+        self.send_header("x-ratelimit-limit-requests", "100")
+        self.send_header("x-ratelimit-remaining-requests", "99")
+        self.send_header("x-ratelimit-reset-requests", "6m0s")
         self.end_headers()
         for event in events:
             self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode())
