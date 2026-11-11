@@ -73,6 +73,20 @@ impl Printer {
                 let brief = brief(&data["arguments"]);
                 self.side(&format!("\x1b[36m{tag}▸ {}\x1b[0m {brief}", data["name"].as_str().unwrap_or("")));
             }
+            // OpenCode 的智能体跑的工具：开始时一行、做完一行（等确认的说一声）
+            "external" => match data["status"].as_str().unwrap_or("") {
+                "running" => {
+                    let brief = brief(&data["input"]);
+                    self.side(&format!("\x1b[36m{tag}▸ {}\x1b[0m {brief}", data["name"].as_str().unwrap_or("")));
+                }
+                "waiting" => self.side(&format!("\x1b[33m{tag}  ? 等你确认（回复「允许」放行）\x1b[0m")),
+                status => {
+                    let text = data["output"].as_str().unwrap_or("");
+                    let first = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").chars().take(100).collect::<String>();
+                    let mark = if status == "success" { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+                    self.side(&format!("  {mark} \x1b[2m{first}\x1b[0m"));
+                }
+            },
             "result" => {
                 let text = data["text"].as_str().unwrap_or("");
                 let first = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("").chars().take(100).collect::<String>();

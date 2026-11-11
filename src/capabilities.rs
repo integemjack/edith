@@ -51,6 +51,8 @@ pub const EVENT_TYPES: &[&str] = &[
     "result",
     "stats",
     "notice",
+    // 别处执行的工具的活动（OpenCode 的智能体跑的，只显示）
+    "external",
     "approval",
     "done",
     "agent",
@@ -1370,8 +1372,16 @@ pub fn is_action(full_name: &str) -> bool {
 // MARK: - 两个口子：模型地址、钩子
 
 /// 模型的真地址（model.endpoint）：`{baseURL, apiKey?, body?}`——body 并进请求体（如 Friday 本地模型的 x_friday）。
-/// 能力可能要先拉起模型服务（下好的模型、friday-llm），最多等 3 分钟
-pub fn model_endpoint(base_url: &str, model: &str, session: &str, agent: Option<&str>) -> Result<Value, String> {
+/// 能力可能要先拉起模型服务（下好的模型、friday-llm），最多等 3 分钟。
+/// cwd、mode：这段会话的工作目录、这一轮的权限模式（OpenCode 那种自己干活的模型按它们在哪做、问不问）
+pub fn model_endpoint(
+    base_url: &str,
+    model: &str,
+    session: &str,
+    agent: Option<&str>,
+    cwd: &str,
+    mode: Option<&str>,
+) -> Result<Value, String> {
     let capability = native()
         .into_iter()
         .find(|capability| capability.full() && capability.models.iter().any(|prefix| base_url.starts_with(prefix.as_str())))
@@ -1379,7 +1389,7 @@ pub fn model_endpoint(base_url: &str, model: &str, session: &str, agent: Option<
     capability
         .request(
             "model.endpoint",
-            json!({ "baseURL": base_url, "model": model, "session": session, "agent": agent }),
+            json!({ "baseURL": base_url, "model": model, "session": session, "agent": agent, "cwd": cwd, "mode": mode }),
             Duration::from_secs(180),
             None,
         )

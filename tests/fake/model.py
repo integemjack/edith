@@ -151,6 +151,13 @@ class Handler(BaseHTTPRequestHandler):
                 events.append(say("写好了 s.py"))
             else:
                 events.append(call("write_file", {"path": "s.py", "content": "print(1)\n"}))
+        elif "OpenCode 测试" in last_user:
+            # 学 Friday 的 OpenCode 桥：工具是它自己跑的，活动放在 chunk 顶层的 x_friday.tool（只显示）；请求里不该带工具
+            tool = {"id": "oc_1", "name": "read", "title": "读取文件", "summary": "a.txt", "input": {"filePath": "a.txt"}}
+            events.append(chunk({"role": "assistant", "content": "先看看。"}))
+            events.append(dict(chunk({}), x_friday={"tool": dict(tool, status="running")}))
+            events.append(dict(chunk({}), x_friday={"tool": dict(tool, status="success", output="内容 42")}))
+            events.append(chunk({"content": "带不带工具：" + ("带了" if body.get("tools") else "没带")}, "stop"))
         elif "原样回答：" in last_user and not called:
             # 「原样回答：X」：把 X 原样答出来（定时任务的 /loop next、/loop done 这类单独一行的指令）
             events.append(say(last_user.split("原样回答：", 1)[1]))

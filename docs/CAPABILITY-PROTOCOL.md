@@ -357,11 +357,14 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 模型的 `baseURL` 不是 `http(s)://`、又有全权的能力在 `models` 里报了它的前缀（Friday 的本地模型 `power://llm`）：每段请求前问一次，
 
 ```json
-{"jsonrpc": "2.0", "id": 31, "method": "model.endpoint", "params": {"baseURL": "power://llm", "model": "Qwen/Qwen3-8B-GGUF:Q4_K_M", "session": "…", "agent": null}}
+{"jsonrpc": "2.0", "id": 31, "method": "model.endpoint", "params": {"baseURL": "power://llm", "model": "Qwen/Qwen3-8B-GGUF:Q4_K_M", "session": "…", "agent": null, "cwd": "/home/me/proj", "mode": "auto"}}
 ```
 
-`agent` 是子 Agent 要的（它的 id；主智能体的是 `null`）。回 `{baseURL, apiKey?, body?}`：真地址（OpenAI 兼容，EDITH 往 `<baseURL>/chat/completions` 发）、密钥（不给用配置里的）、要并进请求体的字段
+`agent` 是子 Agent 要的（它的 id；主智能体的是 `null`）；`cwd` 是工作目录，`mode` 是这一轮的权限模式（`auto` / `plan` / `full`，客户端没选是 `null`）。回 `{baseURL, apiKey?, body?}`：真地址（OpenAI 兼容，EDITH 往 `<baseURL>/chat/completions` 发）、密钥（不给用配置里的）、要并进请求体的字段
 （Friday 本地模型的 `x_friday`）。能力可以先拉起模型服务再回，最多等 3 分钟；回错误这一轮就失败，`error.message` 给用户看。
+
+`power://opencode`（Friday 的 OpenCode 能力，[Friday.Powers 的 opencode-protocol.md](https://github.com/integemjack/Friday.Powers/blob/main/docs/opencode-protocol.md)）：活交给 OpenCode 自己的智能体（它自己的提示词和工具），
+EDITH 不发自己的工具、截断了不追「接着写」、不做交付追问、不跑一轮结束的 `Stop` 钩子（追的话会被当成用户说的下一句）；它跑的工具发成 `external` 事件。
 
 ### 6.7 `hook`（请求）
 
@@ -409,6 +412,7 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 | `stats` | `{promptTokens, generatedTokens, cachedTokens, promptTime, generateTime, contextParts, contextLimit, contextCompactAt}` | 每段请求的用量（时间是秒；`contextParts` 是上下文各部分的 token：system / tools / user / replies / toolUse） |
 | `usage` | `{observedKey, observed}` | 一段请求成功 / 额度用完了（同 Friday 的「顺手记」）：成功时间、响应头里的限流余量、额度用完的时间和恢复时间记在 `~/.edith/service-usage.json`（键 `observedKey` = 接口地址小写去掉末尾 `/` + `\|` + 密钥名）；`observed` 为真 = 额度刚用完、或用完后头一次成功。额度用完时这一轮不失败：等它恢复（服务说了几点就到点后 30 秒，没说按 10、20、30 分钟、之后每小时试，余额不足每 30 分钟），到点接着做，等的时候推一条 `notice`；停下就不等了 |
 | `notice` | `{text, call?, agent?}` | 顺带说一句：重试、压了上下文、收到补充、动作进度（带 `call`）、交付检查追了提醒、子智能体开始 / 交回 / 被打回（带 `agent`：子智能体的 id） |
+| `external` | `{id, name, input, status, output?}` | 别处执行的工具的活动，只显示（Friday 的 OpenCode 能力：OpenCode 自己的智能体跑的工具，模型流里 chunk 顶层的 `x_friday.tool`）：同一个 `id` 先 `running`，再 `success` / `failed` / `waiting`（等用户确认：用户下一句回「允许」就放行）。这一轮的都记在回答那条消息的 `x_edith_tools`（`[{id, name, input, status, output, offset}]`，`offset` = 它出现时这一轮已写了几个字） |
 | `approval` | `{call, tool, summary, agent?, waiting, approved?}` | 要批准一件事：`waiting: true` 开始等（问能批准的能力、终端），`false` 答了或没人答（`approved` 批没批；没人答不带）。看状态的（Friday 助手的状态板）用它标「等确认」 |
 | `done` | `{answer, stopped, error}` | 这一轮结束 |
 | `agent` | Agent | 一个子 Agent 派出来、开始、开始 / 用完一个工具、交回、没做成、被停掉、被打回（状态变了就推一次） |

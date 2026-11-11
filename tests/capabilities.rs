@@ -181,6 +181,36 @@ fn model_endpoint_and_hooks() {
 }
 
 #[test]
+fn opencode_model_shows_external_tools() {
+    // Friday 的 OpenCode 能力（power://opencode）：EDITH 的工具不发，桥报的工具活动发成 external 事件、记进存档，
+    // 一轮结束的钩子、交付追问都不跑（会被桥当成用户说的下一句）
+    let (work, home) = scratch("opencode");
+    let model = fake_model(&home.join("requests.jsonl"));
+    configure_openings(&home, model.port, "change", "");
+    let output = command(&home, model.port, &work, &["-C", work.to_str().unwrap(), "OpenCode 测试"])
+        .env("EDITH_BASE_URL", "power://opencode")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("带不带工具：没带"), "{}", text(&output));
+    assert!(text(&output).contains("read") && text(&output).contains("内容 42"), "终端没显示工具活动：{}", text(&output));
+    assert_eq!(requests(&home).len(), 1, "只该请求一次（不追问、不续写）");
+    let messages = received(&home);
+    assert!(hooks(&messages, "Stop").is_empty(), "OpenCode 的模型不该跑一轮结束的钩子");
+    let sessions = common::read_sessions(&home, &work);
+    let history = sessions[0]["history"].as_array().unwrap();
+    let answer = history.iter().rev().find(|message| message["role"] == "assistant").unwrap();
+    let tools = answer["x_edith_tools"].as_array().expect("回答上没记工具活动");
+    assert_eq!(tools.len(), 1, "{tools:?}");
+    assert_eq!(
+        (tools[0]["id"].as_str(), tools[0]["status"].as_str(), tools[0]["output"].as_str()),
+        (Some("oc_1"), Some("success"), Some("内容 42"))
+    );
+    assert_eq!(tools[0]["offset"], 4, "出现在「先看看。」之后");
+}
+
+#[test]
 fn hook_denies_and_describes_approval() {
     // 拦下：动作不做，原因交给模型
     let (work, home) = scratch("hook-deny");

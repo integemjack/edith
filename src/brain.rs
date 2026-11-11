@@ -37,6 +37,14 @@ pub enum Event {
     Stats(Value),
     /// 顺带说一句（重试、压了上下文……）
     Notice(String),
+    /// 别处执行的工具的活动（Friday 的 OpenCode 能力：OpenCode 自己的智能体跑的工具，流里 chunk 顶层的 x_friday.tool）：
+    /// 只显示、不执行；同一个 id 先 running，再 success / failed / waiting（等用户确认，用户回「允许」就放行）
+    External { id: String, name: String, input: Value, status: String, output: Option<String> },
+}
+
+/// 这个模型是 Friday 的 OpenCode 能力（power://opencode）：交给 OpenCode 自己的智能体做，EDITH 的工具、追问都不给它
+pub fn is_opencode(model: &Model) -> bool {
+    model.base_url == "power://opencode"
 }
 
 /// 这一轮在哪个会话、是哪一轮（能力的动作要知道）、能用哪些工具（话是谁交来的定的）
@@ -514,7 +522,9 @@ fn endpoint(model: &Model, context: &Context) -> Result<(String, String, Map<Str
         return Ok((model.base_url.clone(), model.api_key.clone(), Map::new()));
     }
     let agent = context.me.as_ref().map(|me| me.id.as_str());
-    let endpoint = capabilities::model_endpoint(&model.base_url, &model.model, &context.session, agent)?;
+    let cwd = crate::home::workspace().to_string_lossy().into_owned();
+    let endpoint =
+        capabilities::model_endpoint(&model.base_url, &model.model, &context.session, agent, &cwd, context.prefs.mode.as_deref())?;
     let base = endpoint["baseURL"].as_str().filter(|base| !base.is_empty()).ok_or("能力回的模型地址是空的")?;
     let key = endpoint["apiKey"].as_str().map(str::to_string).unwrap_or_else(|| model.api_key.clone());
     Ok((base.trim_end_matches('/').to_string(), key, endpoint["body"].as_object().cloned().unwrap_or_default()))
@@ -568,6 +578,17 @@ fn request(
                 "</think>" => in_reasoning = false,
                 _ => on(if in_reasoning { Event::Thinking(piece) } else { Event::Text(piece) }),
             }
+        }
+        // OpenCode 的桥：它自己的智能体跑的工具（只显示）
+        for tool in feed.tools {
+            let text = |key: &str| tool[key].as_str().unwrap_or("").to_string();
+            on(Event::External {
+                id: text("id"),
+                name: text("name"),
+                input: tool["input"].clone(),
+                status: tool["status"].as_str().unwrap_or("running").to_string(),
+                output: tool["output"].as_str().map(str::to_string),
+            });
         }
         if let Some(error) = feed.error {
             stream_error = Some(error);
@@ -690,7 +711,8 @@ pub fn run(
         model: model.model.clone(),
         base_url: model.base_url.clone(),
         supports_vision: model.supports_vision,
-        supports_tools: true,
+        // OpenCode 用它自己的工具（EDITH 的不发）
+        supports_tools: !is_opencode(model),
         thinking: model.thinking.clone(),
         extra_body: model.extra_body.clone(),
     };
@@ -724,7 +746,8 @@ pub fn run(
         temperature: model.temperature,
         enable_thinking: model.enable_thinking,
         max_tool_rounds: MAX_TOOL_ROUNDS,
-        continues_when_truncated: true,
+        // OpenCode：被截断时也不追一条「接着写」（桥会当成用户说的下一句）
+        continues_when_truncated: !is_opencode(model),
         has_dispatch: true,
         // v2.86 同 Friday：一次运行里越跑越长时折叠较早的步骤（预算两倍），折过的步骤也有上限
         folding: Some((crate::folds::session_budget(), echoes, crate::folds::special())),
