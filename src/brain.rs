@@ -42,9 +42,12 @@ pub enum Event {
     External { id: String, name: String, input: Value, status: String, output: Option<String> },
 }
 
-/// 这个模型是 Friday 的 OpenCode 能力（power://opencode）：交给 OpenCode 自己的智能体做，EDITH 的工具、追问都不给它
-pub fn is_opencode(model: &Model) -> bool {
-    model.base_url == "power://opencode"
+/// 交给别的智能体做的 Friday 能力（power.json 的 agentChat）：OpenCode、Claude Code（用户自己的 Claude Code 和它的登录）
+pub const AGENT_POWERS: [&str; 2] = ["power://opencode", "power://claudecode"];
+
+/// 这个模型是交给别的智能体做的 Friday 能力：活交给那边自己的智能体，EDITH 的工具、追问都不给它
+pub fn is_agent_power(model: &Model) -> bool {
+    AGENT_POWERS.contains(&model.base_url.as_str())
 }
 
 /// 这一轮在哪个会话、是哪一轮（能力的动作要知道）、能用哪些工具（话是谁交来的定的）
@@ -711,8 +714,8 @@ pub fn run(
         model: model.model.clone(),
         base_url: model.base_url.clone(),
         supports_vision: model.supports_vision,
-        // OpenCode 用它自己的工具（EDITH 的不发）
-        supports_tools: !is_opencode(model),
+        // OpenCode / Claude Code 用它自己的工具（EDITH 的不发）
+        supports_tools: !is_agent_power(model),
         thinking: model.thinking.clone(),
         extra_body: model.extra_body.clone(),
     };
@@ -746,8 +749,8 @@ pub fn run(
         temperature: model.temperature,
         enable_thinking: model.enable_thinking,
         max_tool_rounds: MAX_TOOL_ROUNDS,
-        // OpenCode：被截断时也不追一条「接着写」（桥会当成用户说的下一句）
-        continues_when_truncated: !is_opencode(model),
+        // OpenCode / Claude Code：被截断时也不追一条「接着写」（桥会当成用户说的下一句）
+        continues_when_truncated: !is_agent_power(model),
         has_dispatch: true,
         // v2.86 同 Friday：一次运行里越跑越长时折叠较早的步骤（预算两倍），折过的步骤也有上限
         folding: Some((crate::folds::session_budget(), echoes, crate::folds::special())),

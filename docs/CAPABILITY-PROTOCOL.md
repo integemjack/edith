@@ -363,7 +363,7 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 `agent` 是子 Agent 要的（它的 id；主智能体的是 `null`）；`cwd` 是工作目录，`mode` 是这一轮的权限模式（`auto` / `plan` / `full`，客户端没选是 `null`）。回 `{baseURL, apiKey?, body?}`：真地址（OpenAI 兼容，EDITH 往 `<baseURL>/chat/completions` 发）、密钥（不给用配置里的）、要并进请求体的字段
 （Friday 本地模型的 `x_friday`）。能力可以先拉起模型服务再回，最多等 3 分钟；回错误这一轮就失败，`error.message` 给用户看。
 
-`power://opencode`（Friday 的 OpenCode 能力，[Friday.Powers 的 opencode-protocol.md](https://github.com/integemjack/Friday.Powers/blob/main/docs/opencode-protocol.md)）：活交给 OpenCode 自己的智能体（它自己的提示词和工具），
+`power://opencode`、`power://claudecode`（Friday 的 OpenCode、Claude Code 能力，Friday.Powers 的 [opencode-protocol.md](https://github.com/integemjack/Friday.Powers/blob/main/docs/opencode-protocol.md)、[claudecode-protocol.md](https://github.com/integemjack/Friday.Powers/blob/main/docs/claudecode-protocol.md)）：活交给那边自己的智能体（它自己的提示词和工具），
 EDITH 不发自己的工具、截断了不追「接着写」、不做交付追问、不跑一轮结束的 `Stop` 钩子（追的话会被当成用户说的下一句）；它跑的工具发成 `external` 事件。
 
 ### 6.7 `hook`（请求）

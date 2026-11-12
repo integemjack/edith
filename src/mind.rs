@@ -502,9 +502,9 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
     let request = request_of(session_id);
     let delegates = context.tools.allows("delegate_task", false);
     let mut checked = std::collections::HashSet::new();
-    // 计划模式交的就是计划：不追「只交了方案」这类提醒（同 Friday）。OpenCode 的模型不追：活是它自己的智能体干的，
+    // 计划模式交的就是计划：不追「只交了方案」这类提醒（同 Friday）。OpenCode / Claude Code 的模型不追：活是它自己的智能体干的，
     // 它停下来问权限时那句「回复『允许』…」又像在把事交回给用户——追的提醒会被桥当成用户说的下一句（同 Friday）
-    let opencode = brain::is_opencode(&model);
+    let opencode = brain::is_agent_power(&model);
     while !opencode && !turn.stopped && turn.error.is_none() && !cancel.load(Ordering::Relaxed) && !context.prefs.plan() {
         let followup = crate::checks::main_followup(&request, &recorder.lock().unwrap().blocks, delegates, &checked);
         let Some(followup) = followup else { break };
