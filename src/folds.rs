@@ -34,11 +34,14 @@ pub fn session_folded_budget() -> i64 {
     session_budget() / 4
 }
 
-/// 结果不能截的工具：派子智能体、打回的（结果是子智能体交回的结论）
-pub fn special() -> Special {
+/// 结果不能截的工具：派子智能体、打回的（结果是子智能体交回的结论）。
+/// history：主智能体有 read_history，折叠的工具结果中间的说明让它用那个看全文（提示词 context-fold.tool-result）；
+/// 子智能体没有，只说重新调用只读的工具（.sub）——以前一律写「重新调用工具」，照做会把有副作用的命令再跑一遍（同 Friday）
+pub fn special(history: bool) -> Special {
     Special {
         task_state: String::new(),
         whole: ["delegate_task", "run_parallel_tasks", "rework_agent", "run_workflow"].map(str::to_string).to_vec(),
+        history: if history { crate::history::NAME.to_string() } else { String::new() },
     }
 }
 
@@ -341,7 +344,8 @@ fn prepend(entry: &mut Value, note: &str) {
 
 /// 照标记拼出交给模型的历史（没有 x_ 键；给模型看的截图只留最近两张）
 pub fn render(history: &[Value], marks: &Map<String, Value>, echoes: bool) -> Vec<Value> {
-    let special = special();
+    // 会话这一层的折叠只有主智能体有（它能用 read_history 看原文）
+    let special = special(true);
     let mut out: Vec<Value> = Vec::new();
     let mut omitted: Vec<i64> = Vec::new();
     let mut said: Vec<(i64, String)> = Vec::new();
@@ -435,7 +439,7 @@ fn tokens(entries: &[Value]) -> i64 {
 
 /// 一段（start..end）按标记交给模型的估算 token
 fn rendered_tokens(history: &[Value], marks: &Map<String, Value>, indices: impl Iterator<Item = usize>, echoes: bool) -> i64 {
-    let special = special();
+    let special = special(true);
     indices.filter_map(|index| view(history, marks, index, echoes, &special)).map(|entry| tokens(std::slice::from_ref(&entry))).sum()
 }
 
@@ -695,6 +699,22 @@ mod tests {
         assert!(fold_with(&history, &mut again, false, 3_000).is_empty(), "再整理一次不动（前缀缓存不失效）");
         assert_eq!(render(&history, &again, false), rendered, "两次拼出来逐字一致");
         assert_eq!(next_turn(&history), 13);
+    }
+
+    /// 折叠的工具结果中间的说明：主智能体（有 read_history）让它用那个看全文，子智能体只说重新调用只读的工具（同 Friday）
+    #[test]
+    fn folded_notes() {
+        setup();
+        let long = "长".repeat(3_000);
+        let main = folding::tool_result("run_shell", &long, &special(true));
+        assert!(main.contains("要看全文用 read_history") && !main.contains("重新调用"), "{}", &main[900..]);
+        let sub = folding::tool_result("run_shell", &long, &special(false));
+        assert!(sub.contains("重新调用只读的工具") && !sub.contains("read_history"), "{}", &sub[900..]);
+        assert_eq!(special(true).history, crate::history::NAME);
+        // 提示词里没有的段会写成「【缺提示词」：这几段自带的那份都要有
+        for key in ["context-fold.tool-result", "context-fold.tool-result.sub", "tool.check_job.wait_seconds"] {
+            assert!(friday_core::prompts::contains(key, None), "{key}");
+        }
     }
 
     /// 没超预算不动；没有标记的旧会话每条用户消息开一轮；省掉的几步后面紧接着用户消息时说明单独一条回答

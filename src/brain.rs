@@ -753,7 +753,7 @@ pub fn run(
         continues_when_truncated: !is_agent_power(model),
         has_dispatch: true,
         // v2.86 同 Friday：一次运行里越跑越长时折叠较早的步骤（预算两倍），折过的步骤也有上限
-        folding: Some((crate::folds::session_budget(), echoes, crate::folds::special())),
+        folding: Some((crate::folds::session_budget(), echoes, crate::folds::special(context.history_turn.is_some()))),
         folded_budget: crate::folds::session_folded_budget(),
         history_turn: context.history_turn,
         ..Settings::default()

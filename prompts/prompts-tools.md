@@ -78,7 +78,7 @@ true = 全部都换
 只搜文件名匹配这个通配的文件，如 *.qml、*.{cpp,h}
 
 @@ tool.search_files.ignore_case
-true = 不分大小写
+给 pattern 时用：true = 不分大小写（默认分；keywords 的大小写看 match_case）
 
 @@ tool.search_files.path
 在哪个目录或文件里搜；不填是工作目录
@@ -96,10 +96,10 @@ true = 不分大小写
 要找的词，空格分开，如 openSettings Key_Comma 或 下载 进度；带空格的整句加双引号，如 "no such file" open
 
 @@ tool.search_keywords.match_any
-true = 有任一个词就算（默认要都有）
+给 keywords 时用：true = 有任一个词就算（默认要都有）
 
 @@ tool.search_keywords.match_case
-true = 分大小写（默认不分）
+给 keywords 时用：true = 分大小写（默认不分；pattern 的大小写看 ignore_case）
 
 @@ tool.search_keywords.path
 在哪个目录或文件里搜；不填是工作目录
@@ -136,7 +136,7 @@ true = 分大小写（默认不分）
 读哪个终端：编号（结果里给的 8 位）或标题里的字；不填读最近有输出的
 
 @@ tool.read_terminal.wait_for
-等到输出里出现这段字再读（可以是正则，不分大小写，如 Build succeeded|error）；命令结束了也不再等。等构建、测试、服务起来时用它，不要 sleep 干等
+等到输出里出现这段字再读（可以是正则，不分大小写，如 Build succeeded|error）；命令结束了也不再等。等构建、测试、服务起来时用它，不要 sleep 干等；会主动给你发消息的命令（跑完、打出标记行自己送来的，如 friday__run_in_terminal 开的）不用它守着
 
 @@ tool.read_terminal.wait_seconds
 最多等几秒，默认 300，最多 600；只给它不给 wait_for 就等到命令结束
@@ -465,7 +465,7 @@ readOnly（只读）| network（需要联网）| writeFiles（需要写文件）
 提供方 id
 
 @@ tool.configure_capability
-启用 / 停用某个提供方或它的某项能力（看图、看视频、生成图片、生成视频、说话），改提供方的选项，或新建一个提供方。有允许的提供方提供某项能力时，对应工具（analyze_image、generate_image 等）才会出现；每次调用用哪个提供方由你在工具的 provider 参数里决定。先用 get_diagnostics 查看现状。
+启用 / 停用某个提供方或它的某项能力（看图、看视频、生成图片、生成视频、听录音、说话），改提供方的选项，或新建一个提供方。有允许的提供方提供某项能力时，对应工具（analyze_image、generate_image 等）才会出现；内置这六项用哪个模型由用户在设置里选（没选就自动挑），调用时 provider 不用填，脚本提供方带来的新能力才用 provider 指定。先用 get_diagnostics 查看现状。
 
 @@ tool.configure_capability.enabled
 打开（true，默认）还是关闭（false）
@@ -489,7 +489,7 @@ readOnly（只读）| network（需要联网）| writeFiles（需要写文件）
 
 @@ tool.delegate_task
 @// engineHint：按活自动挑时是 tool-part.engine-pool（列出可选的大脑，前面空一行），否则空（模型由设置定，系统提示和 work 参数里说了）
-派一个临时子 Agent 独立完成一个子任务，返回它的最终结果（主 Agent 派的在后台跑：立刻返回 id，做完结果自动送回来）。子 Agent 再往下派时，交给下级的必须是自己任务里的一部分，不能原样往下传（主 Agent 可以把用户的整个任务交给一个子 Agent）。它交回结果后先不销毁，等你验收：不合格用 rework_agent 打回。{{engineHint}}
+派临时子 Agent 独立完成子任务，交回最终结果（主 Agent 派的在后台跑：立刻返回 id，做完结果自动送回来）。一件事给 task；几件互不依赖的事给 tasks（任务数组）一次并行派出：需要几个派几个，同时跑几个由系统按接口限流定，其余自动排队。子 Agent 再往下派时，交给下级的必须是自己任务里的一部分，不能原样往下传（主 Agent 可以把用户的整个任务交给一个子 Agent）。它交回结果后先不销毁，等你验收：不合格用 rework_agent 打回。{{engineHint}}
 
 @@ tool.delegate_task.background
 子 Agent 往下派时用（主 Agent 派的一律在后台）：true = 后台运行，立刻返回它的 id，你接着做别的；它中途的汇报和最终结果会自动送到你这里。不填 = 等它做完再返回
@@ -511,7 +511,7 @@ readOnly（只读）| network（需要联网）| writeFiles（需要写文件）
 系统提示「现成的子智能体」里列着的名字：照它写好的角色和工具派（这时 role 可以不填）。没有列出现成的子智能体时不填
 
 @@ tool.delegate_task.task
-完整、自包含的任务：子 Agent 看不到这段对话，写全背景、输入（文件路径等）、要交付的成品和怎样算做完
+只派一个时给它（并行派几个用 tasks）。完整、自包含的任务：子 Agent 看不到这段对话，写全背景、输入（文件路径等）、要交付的成品和怎样算做完
 
 @@ tool.delegate_task.thinking
 子 Agent 的深度思考：off / low / medium / high；不填按 work 定（look 低、change 中、hard 高，没填 work 按中），不会超过这段对话设的档位
@@ -532,7 +532,7 @@ readOnly（只读）| network（需要联网）| writeFiles（需要写文件）
 
 @@ tool.run_parallel_tasks.tasks
 @// engineField：按活自动挑时是「engine?, 」，否则空
-任务数组，每项 {task, role?, subagent_type?, name?, {{engineField}}work?, thinking?}
+要同时派几个互不依赖的子任务时给它（代替 task）：任务数组，每项 {task, role?, subagent_type?, name?, {{engineField}}work?, thinking?}——角色、名字、work 这些写在每一项里
 
 @@ tool.run_parallel_tasks.tasks.engine
 @// 只有按活自动挑时才有这个参数
@@ -610,7 +610,7 @@ readOnly（只读）| network（需要联网）| writeFiles（需要写文件）
 从记录的第几个字开始读（0 起）；不填给开头和结尾
 
 @@ tool.rework_agent
-验收不合格时打回：写清哪里不合格、要交付的成品是什么，原来那个子 Agent 带着它已有的上下文（读过的文件、试过的路）接着做，做完返回新的结果。只能打回由你派出、已经交回结果（或因为模型服务出错失败、结果里写着「会话还留着」）的子 Agent（id 是它结果末尾运行记录 id 的前 8 位）：会保留到下一轮（用户对结果追问、纠正时直接打回它接着改）。打回两三次还不行，就换提示词重新派发（重写角色、换做法、拆得更细或换个大脑），框架会把之前走不通的路附给新的子 Agent。
+验收不合格时打回：写清哪里不合格、要交付的成品是什么，原来那个子 Agent 带着它已有的上下文（读过的文件、试过的路）接着做，做完返回新的结果。只能打回由你派出、已经交回结果（或因为模型服务出错失败、结果里写着「会话还留着」）的子 Agent（id 是它结果末尾运行记录 id 的前 8 位）：会保留到下一轮（用户对结果追问、纠正时直接打回它接着改）。打回三次还不行，就换提示词重新派发（重写角色、换做法、拆得更细或换个大脑），框架会把之前走不通的路附给新的子 Agent。
 
 @@ tool.rework_agent.feedback
 验收意见：哪里不合格、缺什么、要交付的成品和怎样算做完
@@ -634,6 +634,7 @@ readOnly（只读）| network（需要联网）| writeFiles（需要写文件）
 子 Agent 的 id
 
 @@ tool.wait_agents
+@// 同 Friday v2.90 不再给模型（merge.rs）：后台子 Agent 做完会自己送回，结束前也会等下级；旧名照样能调
 手头没有别的事、只想等后台子 Agent 时用：等到它们有中途汇报或结果（默认最多 120 秒），返回收到的内容。不用它也行：汇报和结果会在你做完当前一步时自动送到。
 
 @@ tool.wait_agents.seconds
@@ -681,13 +682,13 @@ list / read / delete
 search / add / remove
 
 @@ tool.manage_providers
-管理能力提供方（新建脚本提供方用 create_provider）。action：read 看一个脚本提供方的清单、源码和上次自测结果，改之前先读；delete 删掉脚本提供方（移到{{trash}}，它定义的新能力一起消失）；configure 启用 / 停用某个提供方或它的某项能力，改提供方的选项，或新建一个内置类型的提供方。
+管理能力提供方（新建脚本提供方用 create_provider）。action：read 看一个脚本提供方的清单、源码和上次自测结果，改之前先读；delete 删掉脚本提供方（移到{{trash}}，它定义的新能力一起消失）；configure 启用 / 停用某个提供方或它的某项能力，改提供方的选项，或新建一个内置类型的提供方。read、delete 用 id 指脚本提供方；configure 用 provider 指提供方、kind 指能力。
 
 @@ tool.manage_providers.action
 read / delete / configure
 
 @@ tool.manage_commands
-新建、改写或删除命令和现成的子智能体（同 Claude Code 的 slash commands、subagents 格式；用命令用 use_command）。kind：command 是命令（用户打「/名字 参数」时把正文当提示词发给你），subagent 是现成的子智能体（派活时用 subagent_type 点它）。action：save 新建或整份改写，delete 删掉（文件移到{{trash}}，只在用户要删或它已经过时时用）。
+新建、改写或删除命令和现成的子智能体（同 Claude Code 的 slash commands、subagents 格式；用命令用 use_command）。kind：command 是命令（用户打「/名字 参数」时把正文当提示词发给你），subagent 是现成的子智能体（派活时用 subagent_type 点它）。action：save 新建或整份改写，delete 删掉（文件移到{{trash}}，只在用户要删或它已经过时时用）。kind 是 subagent 时：description 写什么时候派它，content 是它的角色说明（它的系统提示词：它是谁、怎么做、交回什么），tools 限定它能用的工具，model 是档位；argument_hint、allowed_tools、disable_model_invocation 只对命令有用。
 
 @@ tool.manage_commands.action
 save / delete
@@ -757,7 +758,7 @@ command（默认）/ subagent
 按关键词查这台机器的记忆库：用户说过的偏好、事实、决定、纠正，和在这台机器、这个项目上踩过的坑。按用户习惯做事、用户提到以前的事、要项目约定、遇到报错时先查；没查到换关键词再查。
 
 @@ tool.search_memory.query
-关键词，空格分开、简短，如「提交 署名」「构建 DerivedData」
+关键词，空格分开、简短，如「提交 署名」「构建 缓存目录」
 
 @@ tool.search_memory.kind
 只看一种：preference / fact / decision / correction / experience / habit；不填看全部
@@ -772,7 +773,7 @@ project（默认）：这个项目的和通用的；all：所有项目
 用户明说要记住的当场记进记忆库：用户说「记住…」「以后都…」「别再…」「从现在起…」这类一直有效的要求、偏好、事实、决定、纠正时，先记下再接着做，不要只口头答应。记过的错了、变了用 replaces 改掉那条（编号在 search_memory 结果和目录里每条后的方括号里），不另记新的。用户没明说的、只管这一次的不用记（一轮结束后会自动整理）。用户禁止的事（不许用哪台机器、别做什么操作）写成一句「不许…」，200 字以内：这样的规矩每个新会话开头都会带上，不用等谁搜到。
 
 @@ tool.save_memory.text
-要记的一句话，写成以后能照着做的样子，如「提交一律用 integemjack 身份，不加 AI 署名」
+要记的一句话，写成以后能照着做的样子，如「提交说明一律用中文，不加 AI 署名」
 
 @@ tool.save_memory.kind
 preference（默认）/ fact / decision / correction
@@ -919,7 +920,7 @@ true = 删掉这个技能（只要 name）
 尺寸，如 1024x1024、1280x720，或比例 16:9、9:16、1:1；不填用默认
 
 @@ tool.generate_video
-按文字（可附一张参考图）生成一段短视频。这是异步任务：调用后立刻返回任务 ID，通常要等 1–5 分钟，之后用 check_job 查询并取回视频。
+生成一段短视频：按文字描述，可附一张参考图。这是异步任务：调用后立刻返回任务 ID，通常要等 1–5 分钟——接着调 check_job，它会等到视频出来再返回，拿到视频再交付；不要只告诉用户「稍后来查」。
 
 @@ tool.generate_video.duration
 时长（秒），默认 5
@@ -965,10 +966,13 @@ true = 删掉这个技能（只要 name）
 音色，名字取决于提供方（百炼 Qwen3-TTS：Cherry、Ethan、Dylan…；豆包：zh_female_… 这样的音色 ID；OpenAI：alloy、nova…）；不填用设置里的默认音色
 
 @@ tool.check_job
-查询 generate_video 等异步任务的进度。完成后会把结果文件下载下来展示给用户并返回路径；未完成就告诉用户稍后再查（间隔至少 30 秒，不要连续轮询）。
+等 generate_video 等异步任务做完并取回结果：默认一直等到它做完再返回（最多等 wait_seconds 秒），完成后把结果文件下载下来展示给用户并返回路径。到时间还没做完就再调一次接着等，拿到结果再交付；不要把「稍后再查」交给用户。
 
 @@ tool.check_job.job_id
 任务 ID
+
+@@ tool.check_job.wait_seconds
+最多等几秒，默认 300，最多 600；0 = 只看一眼现在的进度、不等
 
 @// ———— 助手（AssistantTools） ————
 
