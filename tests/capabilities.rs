@@ -181,12 +181,10 @@ fn model_endpoint_and_hooks() {
 }
 
 #[test]
-fn opencode_model_shows_external_tools() {
-    // Friday 的 OpenCode / Claude Code 能力（power://opencode、power://claudecode）：EDITH 的工具不发，桥报的工具活动发成 external 事件、
+fn agent_power_model_shows_external_tools() {
+    // Friday 的 Claude Code 能力（power://claudecode）：EDITH 的工具不发，桥报的工具活动发成 external 事件、
     // 记进存档，一轮结束的钩子、交付追问都不跑（会被桥当成用户说的下一句）
-    for base in ["power://opencode", "power://claudecode"] {
-        agent_power_turn(base);
-    }
+    agent_power_turn("power://claudecode");
 }
 
 fn agent_power_turn(base: &str) {
@@ -194,11 +192,11 @@ fn agent_power_turn(base: &str) {
     let model = fake_model(&home.join("requests.jsonl"));
     configure_openings(&home, model.port, "change", "");
     let output =
-        command(&home, model.port, &work, &["-C", work.to_str().unwrap(), "OpenCode 测试"]).env("EDITH_BASE_URL", base).output().unwrap();
+        command(&home, model.port, &work, &["-C", work.to_str().unwrap(), "外部智能体测试"]).env("EDITH_BASE_URL", base).output().unwrap();
     assert!(output.status.success(), "{}", text(&output));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("带不带工具：没带"), "{}", text(&output));
-    assert!(text(&output).contains("read") && text(&output).contains("内容 42"), "终端没显示工具活动：{}", text(&output));
+    assert!(text(&output).contains("Read") && text(&output).contains("内容 42"), "终端没显示工具活动：{}", text(&output));
     assert_eq!(requests(&home).len(), 1, "只该请求一次（不追问、不续写）");
     let messages = received(&home);
     assert!(hooks(&messages, "Stop").is_empty(), "{base} 的模型不该跑一轮结束的钩子");
@@ -209,7 +207,7 @@ fn agent_power_turn(base: &str) {
     assert_eq!(tools.len(), 1, "{tools:?}");
     assert_eq!(
         (tools[0]["id"].as_str(), tools[0]["status"].as_str(), tools[0]["output"].as_str()),
-        (Some("oc_1"), Some("success"), Some("内容 42"))
+        (Some("cc_1"), Some("success"), Some("内容 42"))
     );
     assert_eq!(tools[0]["offset"], 4, "出现在「先看看。」之后");
 }

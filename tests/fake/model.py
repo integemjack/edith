@@ -151,9 +151,9 @@ class Handler(BaseHTTPRequestHandler):
                 events.append(say("写好了 s.py"))
             else:
                 events.append(call("write_file", {"path": "s.py", "content": "print(1)\n"}))
-        elif "OpenCode 测试" in last_user:
-            # 学 Friday 的 OpenCode 桥：工具是它自己跑的，活动放在 chunk 顶层的 x_friday.tool（只显示）；请求里不该带工具
-            tool = {"id": "oc_1", "name": "read", "title": "读取文件", "summary": "a.txt", "input": {"filePath": "a.txt"}}
+        elif "外部智能体测试" in last_user:
+            # 学 Friday 的 Claude Code 桥：工具是它自己跑的，活动放在 chunk 顶层的 x_friday.tool（只显示）；请求里不该带工具
+            tool = {"id": "cc_1", "name": "Read", "title": "读取文件", "summary": "a.txt", "input": {"file_path": "a.txt"}}
             events.append(chunk({"role": "assistant", "content": "先看看。"}))
             events.append(dict(chunk({}), x_friday={"tool": dict(tool, status="running")}))
             events.append(dict(chunk({}), x_friday={"tool": dict(tool, status="success", output="内容 42")}))

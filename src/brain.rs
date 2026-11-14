@@ -37,13 +37,14 @@ pub enum Event {
     Stats(Value),
     /// 顺带说一句（重试、压了上下文……）
     Notice(String),
-    /// 别处执行的工具的活动（Friday 的 OpenCode 能力：OpenCode 自己的智能体跑的工具，流里 chunk 顶层的 x_friday.tool）：
+    /// 别处执行的工具的活动（Friday 的 Claude Code 能力：Claude Code 自己的智能体跑的工具，流里 chunk 顶层的 x_friday.tool）：
     /// 只显示、不执行；同一个 id 先 running，再 success / failed / waiting（等用户确认，用户回「允许」就放行）
     External { id: String, name: String, input: Value, status: String, output: Option<String> },
 }
 
-/// 交给别的智能体做的 Friday 能力（power.json 的 agentChat）：OpenCode、Claude Code（用户自己的 Claude Code 和它的登录）
-pub const AGENT_POWERS: [&str; 2] = ["power://opencode", "power://claudecode"];
+/// 交给别的智能体做的 Friday 能力（power.json 的 agentChat）：Claude Code（用户自己的 Claude Code 和它的登录）；
+/// 2026-11-14 去掉了 OpenCode（同 Friday）
+pub const AGENT_POWERS: [&str; 1] = ["power://claudecode"];
 
 /// 这个模型是交给别的智能体做的 Friday 能力：活交给那边自己的智能体，EDITH 的工具、追问都不给它
 pub fn is_agent_power(model: &Model) -> bool {
@@ -582,7 +583,7 @@ fn request(
                 _ => on(if in_reasoning { Event::Thinking(piece) } else { Event::Text(piece) }),
             }
         }
-        // OpenCode 的桥：它自己的智能体跑的工具（只显示）
+        // Claude Code 的桥：它自己的智能体跑的工具（只显示）
         for tool in feed.tools {
             let text = |key: &str| tool[key].as_str().unwrap_or("").to_string();
             on(Event::External {
@@ -714,7 +715,7 @@ pub fn run(
         model: model.model.clone(),
         base_url: model.base_url.clone(),
         supports_vision: model.supports_vision,
-        // OpenCode / Claude Code 用它自己的工具（EDITH 的不发）
+        // Claude Code 用它自己的工具（EDITH 的不发）
         supports_tools: !is_agent_power(model),
         thinking: model.thinking.clone(),
         extra_body: model.extra_body.clone(),
@@ -749,7 +750,7 @@ pub fn run(
         temperature: model.temperature,
         enable_thinking: model.enable_thinking,
         max_tool_rounds: MAX_TOOL_ROUNDS,
-        // OpenCode / Claude Code：被截断时也不追一条「接着写」（桥会当成用户说的下一句）
+        // Claude Code：被截断时也不追一条「接着写」（桥会当成用户说的下一句）
         continues_when_truncated: !is_agent_power(model),
         has_dispatch: true,
         // v2.86 同 Friday：一次运行里越跑越长时折叠较早的步骤（预算两倍），折过的步骤也有上限

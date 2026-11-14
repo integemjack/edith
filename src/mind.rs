@@ -451,7 +451,7 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
             text = format!("{text}\n\n{note}");
         }
     }
-    // OpenCode 的智能体跑的工具（只显示）：这一轮记下来，存进回答那条消息的 x_edith_tools（id、name、input、status、output、
+    // Claude Code 的智能体跑的工具（只显示）：这一轮记下来，存进回答那条消息的 x_edith_tools（id、name、input、status、output、
     // offset = 它出现时这一轮已经写了多少字，网关按它插回文字中间）；同一个 id 后来的状态盖前面的
     let externals: Mutex<Vec<Value>> = Mutex::new(Vec::new());
     let written = std::sync::atomic::AtomicUsize::new(0);
@@ -502,10 +502,10 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
     let request = request_of(session_id);
     let delegates = context.tools.allows("delegate_task", false);
     let mut checked = std::collections::HashSet::new();
-    // 计划模式交的就是计划：不追「只交了方案」这类提醒（同 Friday）。OpenCode / Claude Code 的模型不追：活是它自己的智能体干的，
+    // 计划模式交的就是计划：不追「只交了方案」这类提醒（同 Friday）。Claude Code 的模型不追：活是它自己的智能体干的，
     // 它停下来问权限时那句「回复『允许』…」又像在把事交回给用户——追的提醒会被桥当成用户说的下一句（同 Friday）
-    let opencode = brain::is_agent_power(&model);
-    while !opencode && !turn.stopped && turn.error.is_none() && !cancel.load(Ordering::Relaxed) && !context.prefs.plan() {
+    let agent_power = brain::is_agent_power(&model);
+    while !agent_power && !turn.stopped && turn.error.is_none() && !cancel.load(Ordering::Relaxed) && !context.prefs.plan() {
         let followup = crate::checks::main_followup(&request, &recorder.lock().unwrap().blocks, delegates, &checked);
         let Some(followup) = followup else { break };
         checked.insert(followup.kind);
@@ -519,7 +519,7 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
     }
     // 一轮结束时的钩子（能力管的 Stop）：不让停就把它说的当一条用户消息接着做，最多 3 次（同 Friday）
     for round in 0..3 {
-        if opencode || turn.stopped || turn.error.is_some() || cancel.load(Ordering::Relaxed) || !crate::capabilities::has_hook("Stop") {
+        if agent_power || turn.stopped || turn.error.is_some() || cancel.load(Ordering::Relaxed) || !crate::capabilities::has_hook("Stop") {
             break;
         }
         let fields = json!({
@@ -547,7 +547,7 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
     if let Some(first) = appended.first_mut().filter(|first| first["role"] == "user") {
         first[crate::folds::TURN] = json!(turn_number);
     }
-    // OpenCode 的工具活动记在这一轮最后那条回答上（x_ 开头的键存着、发给模型前去掉）
+    // Claude Code 的工具活动记在这一轮最后那条回答上（x_ 开头的键存着、发给模型前去掉）
     let externals = std::mem::take(&mut *externals.lock().unwrap());
     if !externals.is_empty()
         && let Some(answer) = appended.iter_mut().rev().find(|message| message["role"] == "assistant")
@@ -564,7 +564,7 @@ fn run_turn(session_id: &str, input: &Input, cancel: &Arc<AtomicBool>) -> Value 
     json!({ "answer": turn.answer, "stopped": turn.stopped, "error": turn.error.or(saved) })
 }
 
-/// 回答那条消息上记的 OpenCode 工具活动（[{id, name, input, status, output, offset}]；网关画成只显示的工具行）
+/// 回答那条消息上记的 Claude Code 工具活动（[{id, name, input, status, output, offset}]；网关画成只显示的工具行）
 pub const EXTERNAL_TOOLS: &str = "x_edith_tools";
 
 pub fn event_json(event: &Event) -> (&'static str, Value) {

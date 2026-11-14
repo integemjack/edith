@@ -73,7 +73,7 @@ impl Printer {
                 let brief = brief(&data["arguments"]);
                 self.side(&format!("\x1b[36m{tag}▸ {}\x1b[0m {brief}", data["name"].as_str().unwrap_or("")));
             }
-            // OpenCode 的智能体跑的工具：开始时一行、做完一行（等确认的说一声）
+            // Claude Code 的智能体跑的工具：开始时一行、做完一行（等确认的说一声）
             "external" => match data["status"].as_str().unwrap_or("") {
                 "running" => {
                     let brief = brief(&data["input"]);
