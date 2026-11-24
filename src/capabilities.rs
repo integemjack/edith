@@ -851,7 +851,15 @@ impl Capability {
                     if uuid::Uuid::parse_str(&id).is_err() {
                         return Err(invalid(format!("id 要是 UUID：{id}")));
                     }
-                    if let Some(existing) = Session::load(&id).filter(|existing| self.owns(&existing.id)) {
+                    if let Some(mut existing) = Session::load(&id).filter(|existing| self.owns(&existing.id)) {
+                        // 全权的能力给了不一样的专用系统提示（Friday 助手的人设改了）：换成新的，下一轮起用它
+                        if self.full()
+                            && let Some(instructions) = params.get("instructions").and_then(Value::as_str)
+                            && existing.instructions != instructions
+                        {
+                            existing.instructions = instructions.to_string();
+                            existing.save().map_err(|message| (protocol::INTERNAL_ERROR, message))?;
+                        }
                         return Ok(existing.summary());
                     }
                     session.id = id;

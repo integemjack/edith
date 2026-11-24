@@ -1033,6 +1033,9 @@ true = 删掉这个技能（只要 name）
 @@ tool.send_to_session.interject
 它在忙时插进当前这一轮（默认否）
 
+@@ tool.send_to_session.extra
+会话做完后，这句是用户要的范围之外、你自己想到还可以做的事时带上（默认否）：不直接发给它，先发一张「还可以做的」卡片给用户，他点「开始」才发
+
 @@ tool.send_to_session.session
 会话：短号（#3f2a）、机器 + 短号（mac-mini #3f2a），或完整 id
 

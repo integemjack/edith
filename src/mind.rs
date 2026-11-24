@@ -39,6 +39,11 @@ impl Urgency {
     }
 }
 
+/// 落款（Origin.from）以它结尾：助手写的那句用户在卡片上点了「是 / 开始」才发来（Friday 仓库 qt/docs/ASSISTANT.md §19）
+const CONFIRMED_SUFFIX: &str = "· 用户已确认";
+/// 落款以它结尾：直达的用户原话（「#短号 …」），不是助手转达的
+const VERBATIM_SUFFIX: &str = "· 原话";
+
 /// 话从哪来：终端（capability 为空）或某个能力
 #[derive(Debug, Clone, Default)]
 pub struct Origin {
@@ -84,13 +89,31 @@ impl Origin {
         }
     }
 
-    /// 交给模型的那段话（终端里打的原样；子智能体交回的自带说明，也原样）
+    /// 助手替用户转达的（全权的连接说是 user、又带了落款 from：Friday 的助手发给会话的）：前面加一行说明——「」里是用户原话，
+    /// 其余是助手的建议、不是用户的决定（同 Friday 的 AgentRunner.relayNote）。落款以「· 用户已确认」结尾的是用户在卡片上点了
+    /// 「是 / 开始」才发的，说明写成「用户看过、点了同意」；以「· 原话」结尾的是直达的用户原话，不加。不是转达的回 None
+    fn relayed(&self, text: &str) -> Option<String> {
+        let from = self.from.trim();
+        if self.capability.is_empty() || self.kind != "user" || from.is_empty() || from.ends_with(VERBATIM_SUFFIX) {
+            return None;
+        }
+        let key = if from.ends_with(CONFIRMED_SUFFIX) { "edith.confirmed" } else { "edith.relayed" };
+        let args = [("from", from.to_string()), ("text", text.to_string())];
+        Some(prompts::text(key, &args.into_iter().map(|(k, v)| (k.to_string(), v)).collect(), None))
+    }
+
+    /// 交给模型的那段话（终端里打的原样；子智能体交回的自带说明，也原样；助手替用户转达的带转达说明）
     fn wrap(&self, key: &str, text: &str) -> String {
-        if (self.is_user() && key == "edith.input") || (self.capability.is_empty() && self.kind == "agent") {
+        if self.capability.is_empty() && self.kind == "agent" {
             return text.to_string();
         }
-        let from = if self.from.is_empty() { String::new() } else { format!("，说话的是 {}", self.from) };
-        let args = [("source", self.source()), ("from", from), ("text", text.to_string())];
+        let relayed = self.relayed(text);
+        if self.is_user() && key == "edith.input" {
+            return relayed.unwrap_or_else(|| text.to_string());
+        }
+        // 落款已经写在转达说明里的，不再说一遍「说话的是」
+        let from = if self.from.is_empty() || relayed.is_some() { String::new() } else { format!("，说话的是 {}", self.from) };
+        let args = [("source", self.source()), ("from", from), ("text", relayed.unwrap_or_else(|| text.to_string()))];
         prompts::text(key, &args.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(), None)
     }
 }

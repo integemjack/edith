@@ -161,7 +161,7 @@ EDITH                                  能力
 |---|---|---|
 | `text` | 是 | 内容（文字） |
 | `kind` | 否 | 哪种感知（同 `senses` 里的 `kind`）。`"user"`：用户自己打的字（Friday 客户端、`edith attach`），交给模型时同终端里打的、不标来源——只有全权的连接能这样说，客人说了也照能力传来的标 |
-| `from` | 否 | 说话的是谁（聊天渠道里的用户名、哪台设备……） |
+| `from` | 否 | 说话的是谁（聊天渠道里的用户名、哪台设备……）。全权的连接说 `kind: "user"` 又带了 `from`：是**助手替用户转达的**（Friday 的助手发给会话的，`from` 是落款，如「助手」「Friday 个人助理 · SChat」）——交给模型时前面加一行说明（`edith.relayed`：「」里是用户原话，其余是助手的理解和建议、用户没点过头，不能当成用户已经拍板；同 Friday 的 relayNote）。落款以「· 用户已确认」结尾的是助手写的那句用户在卡片上点了「是 / 开始」才发的（`edith.confirmed`：用户看过、点了同意，可以当成用户的决定；Friday 仓库 qt/docs/ASSISTANT.md §19）；以「· 原话」结尾的是直达的用户原话，不加说明 |
 | `urgency` | 否 | 急缓（[§4.3](#43-急缓urgency)），默认 `queue` |
 | `session` | 否 | 交给哪个会话：会话 id（写开头几位也行，要唯一）、`"focus"`（默认）、`"new"`（在焦点会话的工作目录新开一个） |
 | `mode` | 否 | 这一轮的权限模式（同 Friday）：`auto` 删除类、改系统的才问；`plan` 先给计划、照 EDITH 的规则问；`full` 都不问。读敏感的文件、访问本机 / 内网什么模式都问。不写照 EDITH 的规则（[§6.5](#65-approve请求)） |
@@ -226,7 +226,7 @@ EDITH                                  能力
 | 方法 | 参数 | 回话 |
 |---|---|---|
 | `sessions.list` | 无 | `[{id, title, cwd, created, updated, working, turn?, queue?}]`，新的在前；在干活的带 `turn: {id, text}`（哪一轮、交来的原话，后连上来的界面据此接着显示），排着的带 `queue: [{turn, text}]` |
-| `sessions.create` | `{cwd?, focus?, id?, instructions?, owner?}` | 新会话 `{id, title, cwd, created, updated, owner?}`；`cwd` 默认焦点会话的工作目录；`focus: true` 顺便设成焦点；`id`：用这个 UUID（客户端先定好 id 再建，比如 Friday 的网关），这个 id 已经有了就回那段会话。全权的连接还能给：`instructions`——这段会话专用的系统提示，接在主智能体的后面（子智能体不带；存在会话里）；`owner`——「#」开头的名下（如 `#assistant`），Friday 的会话列表不列（同分出去的另一支 `#branch`） |
+| `sessions.create` | `{cwd?, focus?, id?, instructions?, owner?}` | 新会话 `{id, title, cwd, created, updated, owner?}`；`cwd` 默认焦点会话的工作目录；`focus: true` 顺便设成焦点；`id`：用这个 UUID（客户端先定好 id 再建，比如 Friday 的网关），这个 id 已经有了就回那段会话。全权的连接还能给：`instructions`——这段会话专用的系统提示，接在主智能体的后面（子智能体不带；存在会话里；这个 id 已经有了、给的又和存着的不一样时换成新的，下一轮起用它——Friday 助手的人设改了这样跟上）；`owner`——「#」开头的名下（如 `#assistant`），Friday 的会话列表不列（同分出去的另一支 `#branch`） |
 | `sessions.get` | `{id}` | 会话全文：上面的字段 + `history`（OpenAI 格式的历史）+ `working`（在干的那一轮的 id 或 `null`）+ `focus` |
 | `sessions.focus` | `{id}` | `{focus}`：设焦点 |
 | `sessions.stop` | `{id?}` | `{stopping}`：停下正在干的一轮（排着的也不干了）；不给 `id` 是焦点会话 |

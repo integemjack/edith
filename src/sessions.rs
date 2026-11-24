@@ -302,17 +302,23 @@ fn first_user_text(history: &[Value]) -> String {
         .find(|entry| entry.get("role").and_then(Value::as_str) == Some("user"))
         .and_then(|entry| entry.get("content").and_then(Value::as_str))
         .unwrap_or("");
-    // 能力交来、记下、补充的：去掉给模型标来源的那一行（edith.input / note / interjection）
-    let text = match text.split_once('\n') {
-        Some((first, rest))
-            if first.starts_with('（')
-                && first.ends_with('）')
-                && ["传来", "记下了下面这段", "补充了下面这段"].iter().any(|mark| first.contains(mark)) =>
-        {
-            rest
+    // 能力交来、记下、补充的、助手替用户转达的：去掉给模型标来源的那一行（edith.input / note / interjection / relayed / confirmed；
+    // 补充进来的转达有两行）
+    let mut text = text;
+    for _ in 0..2 {
+        match text.split_once('\n') {
+            Some((first, rest))
+                if first.starts_with('（')
+                    && first.ends_with('）')
+                    && ["传来", "记下了下面这段", "补充了下面这段", "替用户转达的", "点了同意才发给你"]
+                        .iter()
+                        .any(|mark| first.contains(mark)) =>
+            {
+                text = rest;
+            }
+            _ => break,
         }
-        _ => text,
-    };
+    }
     text.replace('\n', " ")
 }
 
@@ -372,6 +378,14 @@ mod tests {
         let noted =
             vec![json!({ "role": "user", "content": "（能力「friday」记下了下面这段，不用回复，之后用得着时参考）\n/loop 10m 看 CI" })];
         assert_eq!(first_user_text(&noted), "/loop 10m 看 CI");
+        // 助手替用户转达的那一行说明也不算（补充进来的有两行）
+        let relayed = vec![
+            json!({ "role": "user", "content": "（这条是「助手」替用户转达的：「」里引的是用户原话；其余是助手的建议。）\n把「跑测试」做完" }),
+        ];
+        assert_eq!(first_user_text(&relayed), "把「跑测试」做完");
+        let interjected = vec![json!({ "role": "user", "content":
+            "（用户在你工作时补充了下面这段：和手上的事一起考虑。）\n（这条是「助手 · 用户已确认」发的：助手写的这句话用户看过、点了同意才发给你，可以当成用户的决定照着做。）\n顺手把注册页也改了" })];
+        assert_eq!(first_user_text(&interjected), "顺手把注册页也改了");
         // v2.86 较早的部分怎么交给模型的标记：存进 folds 行，接着追加不丢；历史整个换了就作废
         let mut marked = Session::load(&session.id).unwrap();
         marked.folds.insert("1".into(), json!({ "fold": true }));

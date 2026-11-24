@@ -269,6 +269,10 @@ fn sense_starts_a_turn_and_notes() {
             { "delay": 1.5, "send": request(7, "sense", json!({ "text": "明天下雨", "urgency": "note" })) },
             // 全权的连接说是用户自己打的：交给模型时不标来源
             { "delay": 0.3, "send": request(9, "sense", json!({ "text": "亲手打的：只聊天", "kind": "user" })) },
+            // 助手替用户转达的（说是 user、又带了落款）：前面加一行转达说明；用户点了头才发的、直达的原话各是各的说法
+            { "delay": 0.5, "send": request(10, "sense", json!({ "text": "转达的：只聊天", "kind": "user", "from": "助手" })) },
+            { "delay": 0.5, "send": request(11, "sense", json!({ "text": "点了头的：只聊天", "kind": "user", "from": "助手 · 用户已确认" })) },
+            { "delay": 0.5, "send": request(12, "sense", json!({ "text": "直达的：只聊天", "kind": "user", "from": "助手 · SChat · 原话" })) },
             { "delay": 1.5, "send": request(8, "sessions.list", json!({})) },
         ]),
         "done,turn.started",
@@ -289,6 +293,24 @@ fn sense_starts_a_turn_and_notes() {
     assert!(requests.contains("由能力「cap」（speech）传来，说话的是 小明"), "{requests}");
     // 同 Friday v2.92：交来的话后面附上发出时间（代替 get_current_time）
     assert!(requests.contains("\"content\": \"亲手打的：只聊天\\n\\n（发出时间："), "{requests}");
+    // 助手转达的：「」里是用户原话、其余是助手的建议；用户在卡片上点了头的写成「看过、点了同意」；直达的原话不加说明
+    assert!(
+        requests.contains("\"content\": \"（这条是「助手」替用户转达的：「」里引的是用户原话；")
+            && requests.contains("用户没点过头，不能当成用户已经拍板。）\\n转达的：只聊天\\n\\n（发出时间："),
+        "{requests}"
+    );
+    assert!(
+        requests.contains(
+            "\"content\": \"（这条是「助手 · 用户已确认」发的：助手写的这句话用户看过、点了同意才发给你，可以当成用户的决定照着做。）\\n点了头的：只聊天\\n\\n（发出时间："
+        ),
+        "{requests}"
+    );
+    assert!(requests.contains("\"content\": \"直达的：只聊天\\n\\n（发出时间："), "{requests}");
+    assert_eq!(
+        started.iter().filter(|event| event["data"]["origin"]["from"] == "助手 · 用户已确认").count(),
+        1,
+        "落款随「开始」事件带出去"
+    );
     let id = sessions[0]["id"].as_str().unwrap();
     let stored = common::read_session(&common::project_dir(&home, &work).join("sessions").join(format!("{id}.jsonl"))).to_string();
     assert!(stored.contains("明天下雨") && stored.contains("不用回复"), "{stored}");
@@ -509,6 +531,9 @@ fn session_instructions_and_session_only_actions() {
         { "delay": 0.1, "send": request(2, "sessions.create", json!({ "id": other, "cwd": work })) },
         { "delay": 0.1, "send": request(3, "ask", json!({ "session": mine, "text": "只聊天" })) },
         { "delay": 0.1, "send": request(4, "ask", json!({ "session": other, "text": "只聊天" })) },
+        // 已经有这段会话：给了不一样的专用系统提示（助手的人设改了）就换成新的，下一轮起用它
+        { "delay": 1.0, "send": request(5, "sessions.create", json!({ "id": mine, "cwd": work, "instructions": "你是测试助手：新的人设。", "owner": "#assistant" })) },
+        { "delay": 0.1, "send": request(6, "ask", json!({ "session": mine, "text": "只聊天" })) },
     ]);
     configure_cap(&home, script, "done");
     let config = std::fs::read_to_string(home.join("capabilities.json"))
@@ -516,14 +541,17 @@ fn session_instructions_and_session_only_actions() {
         .replace(r#""CAP_RECEIVES""#, &format!(r#""CAP_ACTION_SESSIONS":"{mine}","CAP_RECEIVES""#));
     std::fs::write(home.join("capabilities.json"), config).unwrap();
     let _edith = run(&home, model.port, &work);
-    assert!(wait_until(30, || response(&received(&home), 4).is_some()), "{:?}", received(&home));
+    assert!(wait_until(30, || response(&received(&home), 6).is_some()), "{:?}", received(&home));
     assert_eq!(response(&received(&home), 1).unwrap()["result"]["owner"], "#assistant");
+    assert_eq!(response(&received(&home), 5).unwrap()["result"]["id"], mine);
     let requests: Vec<Value> =
         std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
     let systems: Vec<String> =
         requests.iter().map(|request| request["messages"][0]["content"].as_str().unwrap_or("").to_string()).collect();
     let assistant = systems.iter().find(|system| system.contains("你是测试助手")).cloned().unwrap_or_default();
     assert!(assistant.contains("你是测试助手：只管派活。") && assistant.contains("cap__remember"), "{assistant}");
+    let renewed = systems.iter().rev().find(|system| system.contains("你是测试助手")).cloned().unwrap_or_default();
+    assert!(renewed.contains("你是测试助手：新的人设。") && !renewed.contains("只管派活"), "{renewed}");
     let plain = systems.iter().find(|system| !system.contains("你是测试助手")).cloned().unwrap_or_default();
     assert!(!plain.is_empty() && !plain.contains("你是测试助手") && !plain.contains("cap__remember"), "{plain}");
 }
