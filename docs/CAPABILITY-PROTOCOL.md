@@ -118,7 +118,7 @@ EDITH                                  能力
 | `protocolVersion` | 是 | `"1"` |
 | `capability.title` / `version` / `description` | 否 | 给人和模型看的名字、版本、一句话 |
 | `senses` | 否 | 会主动传来什么：`[{kind, description}]`。`kind` 是自己定的词（`speech`、`message`、`vision`、`file`、`sensor`……），写进模型看到的来源里 |
-| `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?, readOnly?, sessions?, exclusive?, holds?, releases?}]`。`readOnly: true`：不改东西（只读权限的一轮也能用）；`sessions`（会话 id 的列表）：只给这几段会话用，别的会话看不到、硬调也拒绝（如 Friday 助手管会话的工具只给助手那段；换了用 `capability.update`）；`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600；后三个标记给[共享设备](https://github.com/integemjack/edith.tools/blob/main/docs/DEVICES.md)的仲裁用 |
+| `actions` | 否 | 能做的动作：`[{name, description, parameters, timeoutSeconds?, readOnly?, sessions?, always?, exclusive?, holds?, releases?}]`。`readOnly: true`：不改东西（只读权限的一轮也能用）；`sessions`（会话 id 的列表）：只给这几段会话用，别的会话看不到、硬调也拒绝（如 Friday 助手管会话的工具只给助手那段；换了用 `capability.update`）；`always: true`（要和 `sessions` 一起写）：不按需加载、一直给那几段会话（能力的动作平时要模型先 `load_tools` 取回；为用这些动作开的会话不用多占一轮，2026-11-26）；`name` 只能是字母、数字、`-`、`_`（不合规的忽略）；`parameters` 是 JSON Schema（同 OpenAI 的工具参数）；`timeoutSeconds` 默认 600；后三个标记给[共享设备](https://github.com/integemjack/edith.tools/blob/main/docs/DEVICES.md)的仲裁用 |
 | `receives` | 否 | 要收哪些事件（[§7](#7-事件event)）；`["*"]` 是全部，不写是都不要 |
 | `sessions` | 否 | `"all"`（默认）：所有会话的事件；`"focus"`：只要焦点会话的 |
 | `name` | 否 | 叫什么：只对主令牌的连接有用（不写是 `client`；重名的、和配置里能力重名的 EDITH 加 `-2`、`-3`……）；专用令牌、中转的名字由大脑定，这里写的不管 |

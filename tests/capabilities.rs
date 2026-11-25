@@ -556,6 +556,39 @@ fn session_instructions_and_session_only_actions() {
     assert!(!plain.is_empty() && !plain.contains("你是测试助手") && !plain.contains("cap__remember"), "{plain}");
 }
 
+/// 2026-11-26 动作声明了 always（要和 sessions 一起）：不按需加载，一直给那几段会话——请求的工具里直接有它，按需的清单里不列；
+/// 别的会话照样看不到（Friday 助手管会话的工具：先 load_tools 取回要多占一轮，设了每次最多调用工具几轮时第一次只剩一轮）
+#[test]
+fn always_actions_are_given_to_their_sessions() {
+    let (work, home) = scratch("always-actions");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let (mine, other) = ("9a0c2c4e-7a1b-4c55-9d3e-2b6f1a0e9c11", "2d2e3f40-5a6b-4c7d-8e9f-a0b1c2d3e4f5");
+    let script = json!([
+        { "delay": 0.3, "send": request(1, "sessions.create", json!({ "id": mine, "cwd": work, "instructions": "你是测试助手。", "owner": "#assistant" })) },
+        { "delay": 0.1, "send": request(2, "sessions.create", json!({ "id": other, "cwd": work })) },
+        { "delay": 0.1, "send": request(3, "ask", json!({ "session": mine, "text": "只聊天" })) },
+        { "delay": 0.1, "send": request(4, "ask", json!({ "session": other, "text": "只聊天" })) },
+    ]);
+    configure_cap(&home, script, "done");
+    let config = std::fs::read_to_string(home.join("capabilities.json"))
+        .unwrap()
+        .replace(r#""CAP_RECEIVES""#, &format!(r#""CAP_ACTION_SESSIONS":"{mine}","CAP_ACTION_ALWAYS":"1","CAP_RECEIVES""#));
+    std::fs::write(home.join("capabilities.json"), config).unwrap();
+    let _edith = run(&home, model.port, &work);
+    assert!(wait_until(30, || response(&received(&home), 4).is_some()), "{:?}", received(&home));
+    let requests: Vec<Value> =
+        std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+    let tools = |request: &Value| -> Vec<String> {
+        request["tools"].as_array().into_iter().flatten().filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string)).collect()
+    };
+    let system = |request: &Value| request["messages"][0]["content"].as_str().unwrap_or("").to_string();
+    let assistant = requests.iter().find(|request| system(request).contains("你是测试助手")).expect("助手那段没发请求");
+    assert!(tools(assistant).contains(&"cap__remember".to_string()), "{:?}", tools(assistant));
+    assert!(!system(assistant).contains("cap__remember（"), "按需清单里不该再列：{}", system(assistant));
+    let plain = requests.iter().find(|request| !system(request).contains("你是测试助手")).expect("别的会话没发请求");
+    assert!(!tools(plain).contains(&"cap__remember".to_string()) && !system(plain).contains("cap__remember"), "{:?}", tools(plain));
+}
+
 /// 像 Friday 的网关那样连进来：主令牌、说自己能批准；返回读到的消息的通道和写的一头
 fn connect_as_approver(home: &Path) -> (std::net::TcpStream, std::sync::mpsc::Receiver<Value>) {
     use std::io::{BufRead, BufReader, Write};

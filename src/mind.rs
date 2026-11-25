@@ -604,6 +604,7 @@ pub fn event_json(event: &Event) -> (&'static str, Value) {
         }
         Event::Stats(stats) => ("stats", stats.clone()),
         Event::Notice(text) => ("notice", json!({ "text": text })),
+        Event::Quota { text, kind, resume_at } => ("notice", json!({ "text": text, "quota": { "kind": kind, "resumeAt": resume_at } })),
         Event::External { id, name, input, status, output } => {
             let mut data = json!({ "id": id, "name": name, "input": input, "status": status });
             if let Some(output) = output {

@@ -1334,11 +1334,27 @@ fn tools_listing() -> Value {
 
 /// 能力的动作交给模型的工具定义：名字「<能力名>__<动作名>」（tools：这一轮许可的）
 pub fn specs(tools: &permissions::Tools, session: &str) -> Vec<Value> {
+    specs_where(tools, session, false)
+}
+
+/// 2026-11-26 声明了 `always: true` 的动作（只给它 `sessions` 里那几段会话的，如 Friday 助手管会话的工具）：不按需加载，一直给——
+/// 这些会话就是为了用它们开的，先 load_tools 取回要多占一轮工具调用（助手设置了每次最多调用工具几轮时，第一次用只剩一轮）
+pub fn always_specs(tools: &permissions::Tools, session: &str) -> Vec<Value> {
+    specs_where(tools, session, true)
+}
+
+/// 能给这段会话的动作的定义：always 为真只要一直给的，为假只要按需的
+fn specs_where(tools: &permissions::Tools, session: &str, always: bool) -> Vec<Value> {
     let mut specs = Vec::new();
     for capability in native() {
         for action in &capability.actions() {
             let name = action["name"].as_str().unwrap_or("");
             if !tools.allows(&format!("{}{SEPARATOR}{name}", capability.name), read_only(action)) || !for_session(action, session) {
+                continue;
+            }
+            // 一直给的只认限定了会话的（全局的能力动作仍按需：所有会话都会多出它们的定义）
+            let given = action.get("always").and_then(Value::as_bool) == Some(true) && action.get("sessions").is_some_and(Value::is_array);
+            if given != always {
                 continue;
             }
             let description = action.get("description").and_then(Value::as_str).unwrap_or("");

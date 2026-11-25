@@ -37,6 +37,9 @@ pub enum Event {
     Stats(Value),
     /// 顺带说一句（重试、压了上下文……）
     Notice(String),
+    /// 2026-11-26 额度用完 / 余额不足，在等它恢复（同 Friday 的「等额度」）：发出去还是 notice（text 给人看），数据里多带
+    /// quota {kind: usage / balance, resumeAt}——看会话动静的（Friday 助手的状态板）据此标「等额度」，不当成卡住
+    Quota { text: String, kind: String, resume_at: String },
     /// 别处执行的工具的活动（Friday 的 Claude Code 能力：Claude Code 自己的智能体跑的工具，流里 chunk 顶层的 x_friday.tool）：
     /// 只显示、不执行；同一个 id 先 running，再 success / failed / waiting（等用户确认，用户回「允许」就放行）
     External { id: String, name: String, input: Value, status: String, output: Option<String> },
@@ -291,6 +294,8 @@ pub fn tool_specs(context: &Context, history: &[Value]) -> Vec<Value> {
         specs.push(crate::skills::spec());
     }
     specs.extend(crate::memory::specs().into_iter().filter(|spec| allowed.allows(&name(spec), name(spec) == crate::memory::SEARCH)));
+    // 能力声明了一直给的动作（Friday 助手管会话的工具，只给助手那段会话）：不经 load_tools
+    specs.extend(crate::capabilities::always_specs(allowed, &context.session));
     // v2.86 看这段会话较早的原文：同 Friday v2.92 折叠过才给（按需工具里不列，calls_with_folds 在第一处折叠补一次调用）
     specs.extend(crate::deferred::specs(context, history));
     usable(context, &mut specs);
@@ -670,12 +675,14 @@ fn request(
             if attempt < MAX_ATTEMPTS
                 && let Some(fixed) = chat_request::refused(status_code, &reply, &body, &engine_id)
             {
-                on(Event::Notice(match fixed["dropped"].as_array() {
-                    Some(names) => {
+                on(Event::Notice(match (fixed["note"].as_str(), fixed["dropped"].as_array()) {
+                    // 思考关不掉 / 只认某几档（friday-core 2026-11-26）：它说改成了什么
+                    (Some(note), _) => note.to_string(),
+                    (None, Some(names)) => {
                         let names: Vec<&str> = names.iter().filter_map(Value::as_str).collect();
                         format!("模型不接受参数 {}，去掉重发", names.join("、"))
                     }
-                    None => "模型要用 Responses 接口，换过去重发".into(),
+                    (None, None) => "模型要用 Responses 接口，换过去重发".into(),
                 }));
                 return Request::Retry;
             }
@@ -819,7 +826,11 @@ pub fn run(
                     note_usage(model, context, true);
                     let planned = quota::wait_for(kind, resume_at, quota_waits, now);
                     let text = quota::wait_text(kind, planned.resume_at, planned.known, now);
-                    on(Event::Notice(format!("{text}（{}）", message.chars().take(200).collect::<String>())));
+                    on(Event::Quota {
+                        text: format!("{text}（{}）", message.chars().take(200).collect::<String>()),
+                        kind: kind_name(kind).to_string(),
+                        resume_at: planned.resume_at.to_rfc3339(),
+                    });
                     let mut seconds = (planned.resume_at - now).num_milliseconds().max(0) as f64 / 1000.0;
                     // 测试用：最多等这么多秒（真用时没有这个变量）
                     if let Some(most) = std::env::var("EDITH_QUOTA_WAIT_MAX").ok().and_then(|value| value.parse::<f64>().ok()) {
