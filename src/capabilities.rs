@@ -815,6 +815,23 @@ impl Capability {
             "ping" => Ok(json!({})),
             "sense" => self.sense(params),
             "ask" => self.ask(params),
+            // 2026-11-25 替用户答一件正在等批准的（Friday 助手按设置自己批、用户在聊天工具里点了批准）：只有全权的连接能
+            "approvals.resolve" => {
+                if !self.full() {
+                    return Err((protocol::NOT_PERMITTED, "没有权限：只有全权的连接能替用户批准".into()));
+                }
+                let text = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or("");
+                if text("session").is_empty() || text("call").is_empty() {
+                    return Err(invalid("要给 session、call"));
+                }
+                let decision = match text("decision") {
+                    "allow" => crate::approval::Decision::Allow,
+                    "always" => crate::approval::Decision::Always,
+                    "deny" => crate::approval::Decision::Deny(text("reason").to_string()),
+                    other => return Err(invalid(format!("decision 只能是 allow / always / deny，不是 {other}"))),
+                };
+                Ok(json!({ "resolved": crate::approval::resolve(text("session"), text("call"), text("agent"), decision) }))
+            }
             "sessions.list" => Ok(Value::Array(
                 sessions::list()
                     .iter()
@@ -1501,6 +1518,11 @@ pub fn ask_approval(who: Option<&str>, request: &Value, cancel: &AtomicBool) -> 
     let mut outcome = None;
     let mut waiting = approvers.len();
     while waiting > 0 && !cancel.load(Ordering::Relaxed) {
+        // 别处替用户答了（approvals.resolve）：算它的，问着的收 approve.cancel
+        if let Some(decision) = crate::approval::take_answer(request) {
+            outcome = Some(decision);
+            break;
+        }
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok((name, reply)) => {
                 waiting -= 1;

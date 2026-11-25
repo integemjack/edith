@@ -353,6 +353,20 @@ EDITH 问能批准的人：这一轮是这个能力交来的、它声明了 `app
 问着的那个断了也接着等下一个；开始等时推一条 `notice`），Friday 客户端关了再打开、换一台设备连上来照样能批。
 `--auto`、`~/.edith/config.json` 的 `permissions` 见 [EDITH.md](EDITH.md#信任与审批)。
 
+#### `approvals.resolve`（能力发来的请求）
+
+全权的连接替用户答一件正在等批准的（2026-11-25；edith-friday 的助手用：设置里允许它自己批、或用户在聊天工具里点了「批准 / 拒绝」）：
+
+```json
+{"jsonrpc": "2.0", "id": 9, "method": "approvals.resolve", "params": {
+  "session": "…", "call": "call_8f2…", "agent": null, "decision": "allow", "reason": "…"
+}}
+```
+
+`session`、`call`、`agent` 对上 `approval` 事件里那一件（`agent` 主智能体的不写或 null）；`decision` 是 `allow` / `always` / `deny`
+（`reason` 只在 `deny` 时交给模型）。回话 `{"resolved": true}`：答上了，正问着的能力收 `approve.cancel`；`false`：没在等（答过了、没这件、
+客人的会话——客人的只能它自己批）。客人连接发来回 `NOT_PERMITTED`。
+
 ### 6.6 `model.endpoint`（请求）
 
 模型的 `baseURL` 不是 `http(s)://`、又有全权的能力在 `models` 里报了它的前缀（Friday 的本地模型 `power://llm`）：每段请求前问一次，

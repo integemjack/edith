@@ -31,6 +31,35 @@ use crate::permissions::Tools;
 
 /// 等批准最多多久
 const WAIT: Duration = Duration::from_secs(600);
+
+/// 2026-11-25 正在等批准的（键 waiting_key）→ 别处替用户答的决定（approvals.resolve：Friday 助手按设置自己批、用户在聊天工具里点了批准）。
+/// 等着的那件（ask）和问审批人的循环（capabilities::ask_approval）都看它，谁先到算谁的；问着的 Friday 客户端照样收 approve.cancel
+static ANSWERED: LazyLock<Mutex<HashMap<String, Option<Decision>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 一件待批准的键：会话 / 工具调用 / 子 Agent（主智能体的为空）
+pub fn waiting_key(session: &str, call: &str, agent: &str) -> String {
+    format!("{session}/{call}/{agent}")
+}
+
+fn request_key(request: &Value) -> String {
+    waiting_key(request["session"].as_str().unwrap_or(""), request["call"].as_str().unwrap_or(""), request["agent"].as_str().unwrap_or(""))
+}
+
+/// 别处替用户答一件正在等的（approvals.resolve）：答上了回 true；没在等（答过了、没这件）回 false
+pub fn resolve(session: &str, call: &str, agent: &str, decision: Decision) -> bool {
+    match ANSWERED.lock().unwrap().get_mut(&waiting_key(session, call, agent)) {
+        Some(slot @ None) => {
+            *slot = Some(decision);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// 这件有没有被别处答了（拿走）
+pub fn take_answer(request: &Value) -> Option<Decision> {
+    ANSWERED.lock().unwrap().get_mut(&request_key(request)).and_then(Option::take)
+}
 /// 一直开着的大脑（edith run）：没人能批时不马上不做，等能批准的连上来（Friday 客户端断了又连上、换一台设备打开），最多 WAIT
 static WAIT_FOR_APPROVER: AtomicBool = AtomicBool::new(false);
 
@@ -477,10 +506,27 @@ pub fn check(
 
 /// 问谁（见 ask_once）；一直开着的大脑没人能批时等一个连上来（问着的断了也接着等），等到 WAIT 或这一轮被停下
 fn ask(request: &Value, origin: &str, guest: bool, cancel: &AtomicBool) -> Option<Decision> {
+    // 等着时别处能替用户答（approvals.resolve）；客人的不行（客人不能替自己放开审批）
+    let key = request_key(request);
+    if !guest {
+        ANSWERED.lock().unwrap().insert(key.clone(), None);
+    }
+    let decision = ask_waiting(request, origin, guest, cancel);
+    ANSWERED.lock().unwrap().remove(&key);
+    decision
+}
+
+fn ask_waiting(request: &Value, origin: &str, guest: bool, cancel: &AtomicBool) -> Option<Decision> {
     let deadline = Instant::now() + WAIT;
     let mut told = false;
     loop {
+        if let Some(decision) = take_answer(request) {
+            return Some(decision);
+        }
         if let Some(decision) = ask_once(request, origin, guest, cancel) {
+            return Some(decision);
+        }
+        if let Some(decision) = take_answer(request) {
             return Some(decision);
         }
         if !WAIT_FOR_APPROVER.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
@@ -576,6 +622,20 @@ fn terminal(request: &Value, cancel: &AtomicBool) -> Option<Decision> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answered_elsewhere_only_while_waiting() {
+        // approvals.resolve：只有正在等的那件能被别处答；答过一次就不能再答；等着的拿走这个决定
+        let request = json!({ "session": "s-resolve", "call": "call_1", "agent": null });
+        assert!(!resolve("s-resolve", "call_1", "", Decision::Allow), "没在等");
+        ANSWERED.lock().unwrap().insert(request_key(&request), None);
+        assert!(resolve("s-resolve", "call_1", "", Decision::Deny("先别删".into())));
+        assert!(!resolve("s-resolve", "call_1", "", Decision::Allow), "已经答过了");
+        assert!(!resolve("s-resolve", "call_2", "", Decision::Allow), "不是这件");
+        assert_eq!(take_answer(&request), Some(Decision::Deny("先别删".into())));
+        assert_eq!(take_answer(&request), None);
+        ANSWERED.lock().unwrap().remove(&request_key(&request));
+    }
 
     #[test]
     fn rules_and_addresses() {
