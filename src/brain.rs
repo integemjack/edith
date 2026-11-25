@@ -87,6 +87,9 @@ pub struct Prefs {
     /// 工作方式：workflow = 工作流（主智能体先定完整流程交给子智能体，回来验收）；default = EDITH 原来的（需要时自己派）；
     /// 没给时按 edith --workflow（DEFAULT_WORKFLOW）
     pub team: Option<String>,
+    /// 2026-11-25 每次最多连着调几轮工具（1–10；Friday 助手设置的 toolRounds，助手会话用）：到了就不带工具再请求一次、交付已有的结果。
+    /// 只管主智能体（派的子智能体照 EDITH 自己的上限）；没给照 MAX_TOOL_ROUNDS
+    pub tool_rounds: Option<i64>,
 }
 
 /// edith --workflow：这个进程里没指明工作方式的都按工作流
@@ -107,6 +110,7 @@ impl Prefs {
             engine: text("engine", &[]).filter(|engine| !engine.is_empty()),
             // Friday 的任务模式「工作流」原始值是 ultra
             team: text("team", &["workflow", "ultra", "default"]).map(|team| if team == "ultra" { "workflow".into() } else { team }),
+            tool_rounds: params.get("toolRounds").and_then(Value::as_i64).filter(|rounds| (1..=10).contains(rounds)),
         }
     }
 
@@ -749,7 +753,8 @@ pub fn run(
         tools: tool_specs(context, &calls),
         temperature: model.temperature,
         enable_thinking: model.enable_thinking,
-        max_tool_rounds: MAX_TOOL_ROUNDS,
+        // 请求数 = 轮数 + 1（到上限时不带工具再请求一次，交付已有的结果；同 Friday 助手）
+        max_tool_rounds: context.prefs.tool_rounds.filter(|_| context.me.is_none()).map_or(MAX_TOOL_ROUNDS, |rounds| rounds + 1),
         // Claude Code：被截断时也不追一条「接着写」（桥会当成用户说的下一句）
         continues_when_truncated: !is_agent_power(model),
         has_dispatch: true,
@@ -893,5 +898,23 @@ pub fn run(
             settings.tools = tools_next;
             brain.configure(settings.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Prefs;
+    use serde_json::json;
+
+    #[test]
+    fn tool_rounds_only_takes_one_to_ten() {
+        // Friday 助手设置「每次最多调用工具几轮」（1–10）；别的值、没给都当没设（照 EDITH 自己的上限）
+        assert_eq!(Prefs::from_params(&json!({ "toolRounds": 4 })).tool_rounds, Some(4));
+        assert_eq!(Prefs::from_params(&json!({ "toolRounds": 1 })).tool_rounds, Some(1));
+        assert_eq!(Prefs::from_params(&json!({ "toolRounds": 10 })).tool_rounds, Some(10));
+        for odd in [json!(0), json!(11), json!(-3), json!("4"), json!(2.5)] {
+            assert_eq!(Prefs::from_params(&json!({ "toolRounds": odd })).tool_rounds, None, "{odd}");
+        }
+        assert_eq!(Prefs::from_params(&json!({})).tool_rounds, None);
     }
 }
