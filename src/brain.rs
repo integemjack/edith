@@ -1,8 +1,10 @@
 //! 大脑：一轮对话——用户的话 → 调模型（流式）→ 有工具调用就用工具、把结果交回模型 → 直到给出最终回答。
 //! 决定都在 friday-core 的 engine_loop（截断续写、复读、工具轮次上限、上下文压缩、统计），这里只发请求、读流、用工具。
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use friday_core::chat_stream::{self, Parser, StreamError};
@@ -487,13 +489,49 @@ fn kind_name(kind: quota::WaitKind) -> &'static str {
 /// 图片在历史里只记路径（file://…，存档不变大）：发请求时才读成 base64；模型看不了图、文件没了的换成一句话
 const IMAGE_PREFIX: &str = "file://";
 
-fn user_content(text: &str, images: &[String], model: &Model) -> Value {
-    if images.is_empty() || !model.supports_vision {
+/// 带图的用户消息：图记路径。模型看不了图也照样记（发请求时 inline_images 换成写着路径的一句话，模型能照路径调 analyze_image；
+/// 存档里留着图，换成能看图的模型时还能看）
+fn user_content(text: &str, images: &[String]) -> Value {
+    if images.is_empty() {
         return json!(text);
     }
     let mut parts = vec![json!({ "type": "text", "text": text })];
     parts.extend(images.iter().map(|path| json!({ "type": "image_url", "image_url": { "url": format!("{IMAGE_PREFIX}{path}") } })));
     Value::Array(parts)
+}
+
+/// 2026-11-26 接口说过不收图的模型（引擎 id；同 Friday 的 visionRefused）：这个进程里之后不再给它图。也写回 config.json
+/// （home::remember_no_vision），下次读进来就是看不了
+static NO_VISION: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// 这个模型现在能不能看图：没定的在线模型读进来就当能看（friday-core engines.rs），接口拒收过的不能
+fn sees(model: &Model) -> bool {
+    model.supports_vision && !NO_VISION.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&model.engine_id())
+}
+
+/// 2026-11-26 带着图被拒、接口说这个模型不收图（chat_request::refused 的 `vision: false`）：记成看不了（这个进程里 + config.json），
+/// 这个循环历史里每条带图的消息末尾先写上图在哪，再由 Loop::drop_images 去掉图、接上说明（vision.refused-images）——
+/// 重发时不再带图，之后工具的图也不再接上，模型要看就照路径调 analyze_image
+fn refuse_images(brain: &mut Loop, model: &Model) {
+    NO_VISION.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(model.engine_id());
+    let _ = home::remember_no_vision(&model.base_url, &model.model);
+    let labeled: Vec<Value> = brain
+        .history()
+        .iter()
+        .cloned()
+        .map(|mut message| {
+            if let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) {
+                let paths: Vec<String> = parts
+                    .iter()
+                    .filter_map(|part| part["image_url"]["url"].as_str()?.strip_prefix(IMAGE_PREFIX).map(str::to_string))
+                    .collect();
+                parts.extend(paths.into_iter().map(|path| json!({ "type": "text", "text": format!("（附了一张图片：{path}）") })));
+            }
+            message
+        })
+        .collect();
+    brain.set_history(labeled);
+    brain.drop_images(None);
 }
 
 fn image_type(path: &str) -> &'static str {
@@ -562,7 +600,7 @@ fn request(
     // OpenAI 专有的接口：模型的报错点名要它才换（chat_request::refused 记下，见下面）
     let responses = chat_request::uses_responses(&engine_id);
     let url = format!("{base}/{}", if responses { "responses" } else { "chat/completions" });
-    let mut body = inline_images(brain.body(include_tools, None, false), model.supports_vision);
+    let mut body = inline_images(brain.body(include_tools, None, false), sees(model));
     if responses {
         body = friday_core::responses::body(body, &engine_id);
     }
@@ -675,8 +713,11 @@ fn request(
             if attempt < MAX_ATTEMPTS
                 && let Some(fixed) = chat_request::refused(status_code, &reply, &body, &engine_id)
             {
+                if fixed["vision"] == json!(false) {
+                    refuse_images(brain, model);
+                }
                 on(Event::Notice(match (fixed["note"].as_str(), fixed["dropped"].as_array()) {
-                    // 思考关不掉 / 只认某几档（friday-core 2026-11-26）：它说改成了什么
+                    // 思考关不掉 / 只认某几档、不收图（friday-core 2026-11-26）：它说改成了什么
                     (Some(note), _) => note.to_string(),
                     (None, Some(names)) => {
                         let names: Vec<&str> = names.iter().filter_map(Value::as_str).collect();
@@ -725,7 +766,7 @@ pub fn run(
         engine_id: model.engine_id(),
         model: model.model.clone(),
         base_url: model.base_url.clone(),
-        supports_vision: model.supports_vision,
+        supports_vision: sees(model),
         // Claude Code 用它自己的工具（EDITH 的不发）
         supports_tools: !is_agent_power(model),
         thinking: model.thinking.clone(),
@@ -786,7 +827,7 @@ pub fn run(
     if context.me.is_none() {
         brain.fold_from_here();
     }
-    brain.append(vec![json!({ "role": "user", "content": user_content(user_text, images, model) })]);
+    brain.append(vec![json!({ "role": "user", "content": user_content(user_text, images) })]);
     let finish = |brain: &Loop, answer: String, error: Option<String>, stopped: bool| Turn {
         history: brain.history().to_vec(),
         appended: brain.appended().to_vec(),
@@ -864,7 +905,7 @@ pub fn run(
             _ => return finish(&brain, answer, None, cancel.load(Ordering::Relaxed)),
         }
         let mut results = Vec::new();
-        crate::tools::set_vision(model.supports_vision);
+        crate::tools::set_vision(sees(model));
         crate::tools::take_images();
         let mut images: Vec<String> = Vec::new();
         for call in decision["calls"].as_array().into_iter().flatten() {

@@ -119,11 +119,15 @@ fn searches_and_reads_the_web() {
 
 #[test]
 fn read_file_hands_images_to_a_model_that_sees() {
-    // v2.96 同 Friday：read_file 读到图片，模型能看图就跟在工具结果后面交给它（发请求时才读成 base64），看不了图才叫它用 analyze_image
+    // v2.96 同 Friday：read_file 读到图片，模型能看图就跟在工具结果后面交给它（发请求时才读成 base64），看不了图才叫它用 analyze_image。
+    // 2026-11-26 起没定的在线模型先当能看（什么都没写的就是能看），看不了的是手动设过的（visionChecked「manual|接口地址|模型名」）
     for vision in [true, false] {
         let (work, home) = scratch(if vision { "image-seen" } else { "image-blind" });
         let model = fake_model(&home.join("requests.jsonl"));
-        std::fs::write(home.join("config.json"), json!({ "supportsVision": vision }).to_string()).unwrap();
+        if !vision {
+            let manual = format!("manual|http://127.0.0.1:{}/v1|fake", model.port);
+            std::fs::write(home.join("config.json"), json!({ "supportsVision": false, "visionChecked": manual }).to_string()).unwrap();
+        }
         std::fs::write(work.join("chart.png"), [0x89, b'P', b'N', b'G']).unwrap();
         let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), r#"调用工具 read_file 参数 {"path":"chart.png"}"#]);
         assert!(output.status.success(), "{}", text(&output));
@@ -142,4 +146,40 @@ fn read_file_hands_images_to_a_model_that_sees() {
             assert_eq!(messages.len(), position + 1, "{messages:?}");
         }
     }
+}
+
+#[test]
+fn a_model_refusing_images_gets_them_stripped_and_is_remembered() {
+    // 2026-11-26 同 Friday：没定的在线模型先当能看，第一次带图发出去时确认——接口说不收图（智谱 coding 端点 glm-5.3 的 1210
+    // 「messages.content.type 参数非法，取值范围 ['text']」）就把图换成说明（写着图在哪）重发、记成看不了，之后不再给它图
+    let (work, home) = scratch("image-refused");
+    let model = fake_model(&home.join("requests.jsonl"));
+    std::fs::write(work.join("chart.png"), [0x89, b'P', b'N', b'G']).unwrap();
+    let task = r#"不收图测试：调用工具 read_file 参数 {"path":"chart.png"}"#;
+    let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), task]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("看不了图：有说明、有路径"), "{}", text(&output));
+    assert!(text(&output).contains("模型不收图，去掉 1 张图重发"), "{}", text(&output));
+    let read = || -> Vec<Value> {
+        std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+    };
+    let requests = read();
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    // 第二段带着图（被拒），重发的那段没有图、图的位置换成了路径和说明
+    assert!(requests[1].to_string().contains("data:image/png;base64,"));
+    let resent = requests[2].to_string();
+    assert!(!resent.contains("image_url") && resent.contains("这里原来的图片没有发出去") && resent.contains("chart.png）"), "{resent}");
+    // 记在 config.json：之后读进来就是看不了
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(home.join("config.json")).unwrap()).unwrap();
+    assert_eq!(config["supportsVision"], json!(false));
+    assert_eq!(config["visionChecked"], json!(format!("http://127.0.0.1:{}/v1|fake", model.port)));
+    // 再来一次：read_file 直接说看不了图（不再把图接上），请求里没有图、不再被拒
+    let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), task]);
+    assert!(output.status.success(), "{}", text(&output));
+    let again = &read()[3..];
+    assert_eq!(again.len(), 2, "{again:?}");
+    assert!(again.iter().all(|request| !request.to_string().contains("image_url")), "{again:?}");
+    let messages = again[1]["messages"].as_array().unwrap();
+    let tool = messages.iter().rev().find(|message| message["role"] == "tool").unwrap();
+    assert_eq!(tool["content"], "这是图片文件。当前模型看不了图：要理解内容请调用 analyze_image。");
 }

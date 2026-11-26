@@ -227,7 +227,7 @@ impl Model {
             thinking,
             enable_thinking: config.get("enableThinking").and_then(Value::as_bool).unwrap_or(false),
             temperature: config.get("temperature").and_then(Value::as_f64).unwrap_or(0.7),
-            supports_vision: config.get("supportsVision").and_then(Value::as_bool).unwrap_or(false),
+            supports_vision: top_vision(&config, &base_url, &model),
             extra_body: config
                 .get("extraBody")
                 .map(|extra| if extra.is_string() { extra.as_str().unwrap().to_string() } else { extra.to_string() })
@@ -268,9 +268,110 @@ impl Model {
     }
 }
 
+/// 2026-11-26 顶层那个模型能不能看图：和 engines 里的一样按 friday-core 的规则（同 Friday 的 EngineConfig::applyingVisionDefault）——
+/// 确认过（visionChecked 是「接口地址|模型名」）或手动设过（「manual|接口地址|模型名」）的照 supportsVision，没定的在线模型先当能看，
+/// 第一次带图发出去时确认（接口拒收就记看不了，见 remember_no_vision）；本地大模型（power://）按 supportsVision
+fn top_vision(config: &Value, base_url: &str, model: &str) -> bool {
+    let entry = json!({
+        "baseURL": base_url,
+        "model": model,
+        "supportsVision": config.get("supportsVision").and_then(Value::as_bool).unwrap_or(false),
+        "visionChecked": config.get("visionChecked").and_then(Value::as_str).unwrap_or(""),
+    });
+    friday_core::engines::normalize(vec![entry]).pop().is_some_and(|engine| engine.supports_vision)
+}
+
+/// 2026-11-26 接口说这个模型不收图（chat_request::refused 的 `vision: false`）：在 config.json 里记成看不了
+/// （同 Friday 的 VisionProbes::refused：supportsVision false、visionChecked「接口地址|模型名」，之后读进来就是看不了、不再给它图）。
+/// engines 里接口地址、模型名对得上的都记；顶层那个（环境变量盖掉的按盖掉后的）对得上也记。返回记了几处
+pub fn remember_no_vision(base_url: &str, model: &str) -> Result<usize, String> {
+    let path = dir().join("config.json");
+    let mut config = read_json(&path).unwrap_or_else(|| json!({}));
+    if !config.is_object() {
+        config = json!({});
+    }
+    let text = |key: &str, variable: &str| {
+        std::env::var(variable)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| config.get(key).and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_default()
+    };
+    let top = (text("baseURL", "EDITH_BASE_URL").trim_end_matches('/').to_string(), text("model", "EDITH_MODEL"));
+    let marked = mark_no_vision(&mut config, base_url, model, &top);
+    if marked > 0 {
+        // 里面可能有密钥（顶层的 apiKey）：换名后照原来的权限（edith-friday 写的是只有自己能读）
+        let permissions = std::fs::metadata(&path).ok().map(|meta| meta.permissions());
+        write_json(&path, &config)?;
+        match permissions {
+            Some(permissions) => {
+                let _ = std::fs::set_permissions(&path, permissions);
+            }
+            #[cfg(unix)]
+            None => {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            #[cfg(not(unix))]
+            None => {}
+        }
+    }
+    Ok(marked)
+}
+
+/// remember_no_vision 改 config.json 的那部分：top 是顶层那个模型的（接口地址、模型名），环境变量盖掉的按盖掉后的
+fn mark_no_vision(config: &mut Value, base_url: &str, model: &str, top: &(String, String)) -> usize {
+    let mut marked = 0;
+    for entry in config.get_mut("engines").and_then(Value::as_array_mut).into_iter().flatten() {
+        let raw = entry.get("baseURL").and_then(Value::as_str).unwrap_or("").to_string();
+        if raw.trim_end_matches('/') != base_url || entry.get("model").and_then(Value::as_str) != Some(model) {
+            continue;
+        }
+        entry["supportsVision"] = json!(false);
+        entry["visionChecked"] = json!(format!("{raw}|{model}"));
+        marked += 1;
+    }
+    if top.0 == base_url && top.1 == model {
+        config["supportsVision"] = json!(false);
+        config["visionChecked"] = json!(format!("{base_url}|{model}"));
+        marked += 1;
+    }
+    marked
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    /// 2026-11-26 没定的在线模型先当能看，接口拒收后记成看不了（engines 里对得上的、顶层那个），之后读进来就是看不了
+    #[test]
+    fn vision_defaults_and_refusals() {
+        use serde_json::json;
+        let top = |config: &serde_json::Value| super::top_vision(config, "https://x/v1", "m");
+        assert!(top(&json!({})));
+        assert!(top(&json!({ "supportsVision": false })), "没确认过的 false 不算定了");
+        assert!(!top(&json!({ "supportsVision": false, "visionChecked": "manual|https://x/v1|m" })));
+        assert!(top(&json!({ "supportsVision": false, "visionChecked": "https://x/v1|old" })), "换了模型名的重新当没定");
+        assert!(!super::top_vision(&json!({}), "power://llm", "q"), "本地大模型按 supportsVision");
+
+        let mut config = json!({ "baseURL": "https://other/v1", "model": "m", "engines": [
+            { "id": "a", "baseURL": "https://x/v1/", "model": "m" },
+            { "id": "b", "baseURL": "https://x/v1", "model": "n", "supportsVision": true },
+        ] });
+        assert_eq!(super::mark_no_vision(&mut config, "https://x/v1", "m", &("https://other/v1".into(), "m".into())), 1);
+        assert_eq!(config["engines"][0]["supportsVision"], json!(false));
+        assert_eq!(config["engines"][0]["visionChecked"], json!("https://x/v1/|m"));
+        assert_eq!(config["engines"][1]["supportsVision"], json!(true));
+        assert!(config.get("visionChecked").is_none());
+        let engine = friday_core::engines::normalize(vec![config["engines"][0].clone()]).pop().unwrap();
+        assert!(!engine.supports_vision && engine.vision_settled());
+        // 顶层那个（环境变量盖掉的按盖掉后的）
+        assert_eq!(
+            super::mark_no_vision(&mut config, "http://127.0.0.1:9/v1", "fake", &("http://127.0.0.1:9/v1".into(), "fake".into())),
+            1
+        );
+        assert!(!super::top_vision(&config, "http://127.0.0.1:9/v1", "fake"));
+    }
 
     #[test]
     fn project_keys_do_not_collide() {

@@ -49,6 +49,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.endswith("/responses"):
             return self.responses_api(body)
         messages = body["messages"]
+        has_image = any(isinstance(m.get("content"), list) and any(part.get("type") == "image_url" for part in m["content"]) for m in messages)
         # 带图片的用户消息是一段段的（text / image_url）：按文字看
         for m in messages:
             if isinstance(m.get("content"), list):
@@ -76,6 +77,12 @@ class Handler(BaseHTTPRequestHandler):
             open(LOG + ".quota", "w").close()
             payload = json.dumps({"error": {"code": "1308", "message": "已达到 5 小时的使用上限"}}, ensure_ascii=False).encode()
             self.send_response(429); self.send_header("Content-Type", "application/json"); self.send_header("Retry-After", "1")
+            self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
+            return
+        # 「不收图测试」：像智谱 coding 端点的 glm-5.3（2026-11-26 实测），请求里带着图就回 1210
+        if "不收图测试" in last_user and has_image:
+            payload = json.dumps({"error": {"code": "1210", "message": "messages.content.type 参数非法，取值范围 ['text']"}}, ensure_ascii=False).encode()
+            self.send_response(400); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
             return
         events = []
@@ -161,6 +168,10 @@ class Handler(BaseHTTPRequestHandler):
         elif "原样回答：" in last_user and not called:
             # 「原样回答：X」：把 X 原样答出来（定时任务的 /loop next、/loop done 这类单独一行的指令）
             events.append(say(last_user.split("原样回答：", 1)[1]))
+        elif "不收图测试" in last_user and tools_since and "图片跟在后面" in tools_since[-1]["content"]:
+            noted = "有说明" if "这里原来的图片没有发出去" in everything else "没说明"
+            located = "有路径" if "chart.png）" in everything else "没路径"
+            events.append(say(f"看不了图：{noted}、{located}"))
         elif called and not tools_since:
             # 「调用工具 X」：调 X（没参数），再把结果原样答出来
             events.append(chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_t", "type": "function", "function": {"name": called.group(1), "arguments": called.group(2) or "{}"}}]}, "tool_calls"))

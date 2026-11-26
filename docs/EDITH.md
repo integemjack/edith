@@ -157,7 +157,13 @@ MCP 服务每次请求再多 2.1k，而大多数用不上（改完实测：「�
   密钥按名字在 `secrets.json`（`{名字: 值}`，只有自己能读；没有看同名的环境变量）。`defaultEngine` 选默认用哪个；`sense` 带 `engine` 的那一轮用那个，
   它派的子 Agent 跟着用。Friday 的模型菜单、设置 › 服务与密钥经 edith-friday 读写的就是这几样。
 - **思考档位**：`sense` 带 `thinking`（off / low / medium / high / ultra）的那一轮按它开关、分档（这个模型能调的才管用）；不带照 `enableThinking`。
-- **图片**：`sense` 带 `images`（这台上的路径），模型能看图（`supportsVision`）时随这段话给它；历史里只记 `file://路径`，发请求时才读成 base64（存档不变大）。
+- **图片**：`sense` 带 `images`（这台上的路径），模型能看图（`supportsVision`）时随这段话给它；历史里只记 `file://路径`，发请求时才读成 base64（存档不变大），
+  看不了图的换成写着路径的一句话（模型能照路径调 analyze_image）。
+- **能不能看图用到时才确认**（2026-11-26，同 Friday）：确认过 / 手动设过的（`visionChecked` 是「接口地址|模型名」/「manual|接口地址|模型名」）照
+  `supportsVision`，没定的在线模型（顶层那个、`engines` 里的，规则在 friday-core 读引擎表时）一律先当能看；第一次带图发出去时接口说不收图
+  （`chat_request::refused` 返回 `vision: false`，如智谱 coding 端点 glm-5.3 的 1210「messages.content.type 参数非法，取值范围 ['text']」）：
+  这个循环里带图的消息先写上图在哪、再由 `Loop::drop_images` 去掉图接上说明（提示词 `vision.refused-images`）重发，之后工具的图也不再接上；
+  这个模型记成看不了（这个进程里一份，`config.json` 里对得上的 `engines` 和顶层那个写 `supportsVision: false` + `visionChecked`，`home::remember_no_vision`）。
 - **记忆库**（`src/memory.rs`，同 Friday 的 MEMORY.md 精简）：`memory.json`，一条是 `{id（m + 4 位）, kind, text, project, pinned, source, state, uses, …}`。
   模型用 `save_memory` 把用户明说要记住的当场记下（`replaces` 改掉记过的那条），`search_memory` 按关键词查（这个项目的和通用的，没有再找全部项目）；
   常驻的（pinned）每轮放进系统提示。Friday 的 设置 › 记忆 经 edith-friday 直接改这份文件。
@@ -202,7 +208,8 @@ edith friday [install | uninstall | status]   装成这台的 Friday 服务端�
 管道送进来的也算要做的事（`cat 报错.log | edith "看看怎么回事"`）：给了参数时最多等 1.5 秒（从脚本、定时任务、别的智能体里起的 edith，
 标准输入常常是一直不关的管子），没给参数就读到底。
 
-大脑用哪个模型：`~/.edith/config.json`（`{"baseURL", "apiKey", "model", "thinking"?, "temperature"?, "enableThinking"?, "supportsVision"?, "extraBody"?}`），
+大脑用哪个模型：`~/.edith/config.json`（`{"baseURL", "apiKey", "model", "thinking"?, "temperature"?, "enableThinking"?, "supportsVision"?, "visionChecked"?, "extraBody"?}`；
+`supportsVision` 没确认过时在线模型先当能看，见[模型、记忆、设置](#模型记忆设置)的「能不能看图」），
 环境变量 `EDITH_BASE_URL` / `EDITH_API_KEY` / `EDITH_MODEL` 盖掉同名的；几个模型、密钥库见[模型、记忆、设置](#模型记忆设置)。
 
 全局 `~/.edith`（`EDITH_HOME` 换地方）：
