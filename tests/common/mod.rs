@@ -81,7 +81,7 @@ pub fn project_dir(home: &Path, workspace: &Path) -> PathBuf {
     home.join("projects").join(format!("{}-{hash}", readable.trim_matches('-')))
 }
 
-/// 读一个会话文件（只追加的 .jsonl，同 sessions.rs 放一遍）：{id, owner?（不是空才有）, title, history}
+/// 读一个会话文件（只追加的 .jsonl，同 sessions.rs 放一遍）：{id, cwd, owner?（不是空才有）, title, history}
 pub fn read_session(path: &Path) -> serde_json::Value {
     use serde_json::{Value, json};
     let mut session = json!({ "history": [] });
@@ -90,6 +90,9 @@ pub fn read_session(path: &Path) -> serde_json::Value {
         match entry["type"].as_str() {
             Some("meta") => {
                 session["id"] = entry["id"].clone();
+                if let Some(cwd) = entry["cwd"].as_str() {
+                    session["cwd"] = json!(cwd);
+                }
                 match entry["owner"].as_str() {
                     Some(owner) if !owner.is_empty() => session["owner"] = json!(owner),
                     Some(_) => {

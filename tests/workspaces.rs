@@ -78,10 +78,14 @@ impl Drop for Running {
 }
 
 fn start_run(home: &Path, port: u16, dir: &Path) -> Running {
+    start_run_with(home, port, dir, &["run"])
+}
+
+fn start_run_with(home: &Path, port: u16, dir: &Path, arguments: &[&str]) -> Running {
     let before: Vec<Value> = registry(home);
     let log = home.join(format!("run-{}.log", before.len()));
     let stderr = std::fs::File::create(&log).unwrap();
-    let mut child = command(home, port, dir, &["run"]).stdout(std::process::Stdio::null()).stderr(stderr).spawn().unwrap();
+    let mut child = command(home, port, dir, arguments).stdout(std::process::Stdio::null()).stderr(stderr).spawn().unwrap();
     let pid = child.id();
     // 认它自己的那份登记（进程号），不按条数：别的登记可能同时被清掉
     let appeared = wait_until(20, || registry(home).iter().any(|entry| entry["pid"] == pid));
@@ -167,6 +171,23 @@ fn worktree_only_when_asked_and_cleaned_when_unchanged() {
     drop(second);
     let instances = edith(&home, model.port, &repo, &["instances"]);
     assert!(String::from_utf8_lossy(&instances.stdout).contains("没有在跑的大脑"), "{}", text(&instances));
+}
+
+#[test]
+fn attach_to_an_idle_brain_works_in_its_workspace() {
+    // run --idle 不开会话、没有焦点：attach 新开的会话在大脑的工作目录里（以前退回家目录，相对路径的文件找不到）
+    let (work, home) = scratch("idle-attach");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let running = start_run_with(&home, model.port, &work, &["run", "--idle"]);
+    assert_eq!(session_files(&home, &work), 0, "--idle 不该开会话");
+    let output = edith(&home, model.port, &work, &["attach", "只聊天"]);
+    assert!(output.status.success() && String::from_utf8_lossy(&output.stderr).contains("正在跑的大脑上"), "{}", text(&output));
+    drop(running);
+    let sessions = common::read_sessions(&home, &work);
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    let cwd = sessions[0]["cwd"].as_str().expect("会话没记工作目录");
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    assert_eq!(real(Path::new(cwd)), real(&work), "attach 新开的会话该在大脑的工作目录");
 }
 
 #[test]

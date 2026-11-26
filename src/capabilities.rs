@@ -1278,9 +1278,10 @@ fn submit_failure(message: String) -> Failure {
     (code, message)
 }
 
-/// 新会话用焦点会话的工作目录（没有焦点用家目录）
+/// 新会话用焦点会话的工作目录；没有焦点（`run --idle` 起的）用大脑的工作目录——同不带 --idle 时开的那个焦点会话，
+/// 相对路径的文件才找得到（以前退回家目录：attach 交的事在家目录里找不到文件，写的绝对路径也落到工作目录外面要批准）
 fn focus_cwd() -> String {
-    Session::load(&mind::focus()).map(|session| session.cwd).unwrap_or_else(|| home::user_home().to_string_lossy().into_owned())
+    Session::load(&mind::focus()).map(|session| session.cwd).unwrap_or_else(|| home::workspace().to_string_lossy().into_owned())
 }
 
 fn native() -> Vec<Arc<Capability>> {
