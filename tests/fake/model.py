@@ -124,6 +124,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(400); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
             return
+        # 「限流测试」：前 7 次回智谱免费模型的 429 1305（Retry-After 0），之后照常——以前退避 5 次就判这一轮失败，同 Friday 后不算进重试次数；
+        # 「长限流测试」：前 3 次回 429，测试把累计时限设成 2 秒：超过了转成等额度（EDITH_QUOTA_WAIT_MAX 1 秒）再接着做
+        for word, times in (("长限流测试", 3), ("限流测试", 7)):
+            if word in last_user:
+                counter = LOG + ".ratelimit"
+                count = int(open(counter).read()) if os.path.exists(counter) else 0
+                if count < times:
+                    open(counter, "w").write(str(count + 1))
+                    payload = json.dumps({"error": {"code": "1305", "message": "该模型当前访问量过大，请您稍后再试"}}, ensure_ascii=False).encode()
+                    self.send_response(429); self.send_header("Content-Type", "application/json"); self.send_header("Retry-After", "0")
+                    self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
+                    return
+                break
         # 「额度测试」：第一次回智谱的 1308（几小时的使用上限用完，带 Retry-After），之后照常回一句
         if "额度测试" in last_user and not os.path.exists(LOG + ".quota"):
             open(LOG + ".quota", "w").close()

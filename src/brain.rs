@@ -22,6 +22,11 @@ use crate::vision::{self, sees};
 const MAX_TOOL_ROUNDS: i64 = 200;
 /// 一段请求出错（断网、繁忙、限流）最多重试几次
 const MAX_ATTEMPTS: i64 = 6;
+/// 被限流（HTTP 429）累计最多等多久（秒）：同 Friday 的 OpenAIChatEngine——限流不算进重试次数，等一会儿重发，
+/// 累计等了 10 分钟还不行、或服务说要等更久，当成额度用完（这一轮先停下，到点接着做）。EDITH_RATE_LIMIT_PATIENCE 只给测试用
+fn rate_limit_patience() -> f64 {
+    std::env::var("EDITH_RATE_LIMIT_PATIENCE").ok().and_then(|value| value.parse::<f64>().ok()).unwrap_or(600.0)
+}
 
 /// 干活过程中交给外面（终端、对外接口）的事
 #[derive(Debug, Clone)]
@@ -465,6 +470,12 @@ enum Request {
         images: bool,
     },
     Retry,
+    /// 被限流（HTTP 429）：等多久、要不要转成等额度由 run 按累计等了多久定（同 Friday），不算进重试次数。reset：服务说的多久后恢复（秒）
+    RateLimited {
+        status: u16,
+        reset: Option<f64>,
+        message: String,
+    },
     Failed(String),
     /// 额度用完 / 余额不足（同 Friday：等它恢复后接着做，不算进重试次数）：服务说了几点恢复就是 resume_at
     Quota {
@@ -807,7 +818,8 @@ fn request(
                     return Request::Failed(Failure::Status { status, body: reply, retry_after }.message());
                 }
                 Some(Limit::RateLimit) => {
-                    return retry(format!("限流（HTTP {status}）"), chat_request::retry_delay(attempt, retry_after), on);
+                    let reset = quota::reset_delay(header, &reply, now);
+                    return Request::RateLimited { status, reset, message: Failure::Status { status, body: reply, retry_after }.message() };
                 }
                 _ => {}
             }
@@ -817,6 +829,37 @@ fn request(
             Request::Failed(Failure::Status { status, body: reply, retry_after }.message())
         }
     }
+}
+
+/// 额度用完（或限流太久）：同 Friday，等它恢复（服务说了几点就到点后 30 秒，没说按 10、20、30 分钟、之后每小时试；余额每 30 分钟），
+/// 到点接着做这一段（已经做完的步骤不重做）；停下就不等了
+#[allow(clippy::too_many_arguments)]
+fn wait_quota(
+    model: &Model,
+    context: &Context,
+    kind: quota::WaitKind,
+    resume_at: Option<chrono::DateTime<chrono::Utc>>,
+    message: &str,
+    quota_waits: i64,
+    cancel: &AtomicBool,
+    on: &mut dyn FnMut(Event),
+) {
+    let now = chrono::Utc::now();
+    crate::usage::note_quota(&model.base_url, &model.secret_name, kind_name(kind), resume_at, now);
+    note_usage(model, context, true);
+    let planned = quota::wait_for(kind, resume_at, quota_waits, now);
+    let text = quota::wait_text(kind, planned.resume_at, planned.known, now);
+    on(Event::Quota {
+        text: format!("{text}（{}）", message.chars().take(200).collect::<String>()),
+        kind: kind_name(kind).to_string(),
+        resume_at: planned.resume_at.to_rfc3339(),
+    });
+    let mut seconds = (planned.resume_at - now).num_milliseconds().max(0) as f64 / 1000.0;
+    // 测试用：最多等这么多秒（真用时没有这个变量）
+    if let Some(most) = std::env::var("EDITH_QUOTA_WAIT_MAX").ok().and_then(|value| value.parse::<f64>().ok()) {
+        seconds = seconds.min(most);
+    }
+    wait(seconds, cancel);
 }
 
 /// 干一轮。interject：工具跑完、下一段请求之前取等着补充的话（已经包好给模型看的样子）
@@ -926,6 +969,8 @@ pub fn run(
         let show_reasoning = prepared["showReasoning"].as_bool().unwrap_or(true);
         let mut attempt = 1;
         let mut quota_waits = 0;
+        // 这一段被限流了几次、累计等了多久（秒）
+        let (mut rate_limits, mut throttled) = (0, 0.0);
         let (pass, started, finished, first) = loop {
             match request(&mut brain, model, context, include_tools, show_reasoning, attempt, cancel, on) {
                 Request::Done { pass, started, finished, first, images } => {
@@ -937,26 +982,34 @@ pub fn run(
                     break (pass, started, finished, first);
                 }
                 Request::Retry => attempt += 1,
-                Request::Quota { kind, resume_at, message } => {
-                    // 同 Friday：额度用完等它恢复（服务说了几点就到点后 30 秒，没说按 10、20、30 分钟、之后每小时试；余额每 30 分钟），
-                    // 到点接着做这一段（已经做完的步骤不重做）；停下就不等了
-                    quota_waits += 1;
-                    let now = chrono::Utc::now();
-                    crate::usage::note_quota(&model.base_url, &model.secret_name, kind_name(kind), resume_at, now);
-                    note_usage(model, context, true);
-                    let planned = quota::wait_for(kind, resume_at, quota_waits, now);
-                    let text = quota::wait_text(kind, planned.resume_at, planned.known, now);
-                    on(Event::Quota {
-                        text: format!("{text}（{}）", message.chars().take(200).collect::<String>()),
-                        kind: kind_name(kind).to_string(),
-                        resume_at: planned.resume_at.to_rfc3339(),
-                    });
-                    let mut seconds = (planned.resume_at - now).num_milliseconds().max(0) as f64 / 1000.0;
-                    // 测试用：最多等这么多秒（真用时没有这个变量）
-                    if let Some(most) = std::env::var("EDITH_QUOTA_WAIT_MAX").ok().and_then(|value| value.parse::<f64>().ok()) {
-                        seconds = seconds.min(most);
+                Request::RateLimited { status, reset, message } => {
+                    // 同 Friday（2026-11-26 239 上实测：智谱免费模型账号级限流 1302 时，以前退避 5 次、约 1 分钟就判这一轮失败）：
+                    // 不算进重试次数，按 rate_limit_delay 等一会儿重发（服务说了多久就按它）；累计等了 10 分钟还不行、或服务说要等更久，
+                    // 当成额度用完，走下面等额度的路（这一轮先停下，到点接着做）
+                    rate_limits += 1;
+                    let jitter = i64::from(uuid::Uuid::new_v4().as_bytes()[0]) * 1000 / 256;
+                    let delay = chat_request::rate_limit_delay(rate_limits, reset, jitter);
+                    throttled += delay.max(1.0);
+                    let patience = rate_limit_patience();
+                    if throttled <= patience {
+                        on(Event::Notice(format!("限流（HTTP {status}）——{delay:.0} 秒后重试（第 {rate_limits} 次）")));
+                        wait(delay, cancel);
+                    } else {
+                        let note =
+                            if reset.unwrap_or(0.0) > patience { "" } else { "持续被限流超过 10 分钟，放弃这次请求。" };
+                        let now = chrono::Utc::now();
+                        let resume_at = reset
+                            .filter(|seconds| *seconds > 0.0)
+                            .map(|seconds| now + chrono::Duration::milliseconds((seconds * 1000.0).round() as i64));
+                        (rate_limits, throttled) = (0, 0.0);
+                        quota_waits += 1;
+                        wait_quota(model, context, quota::WaitKind::Usage, resume_at, &format!("{note}{message}"), quota_waits, cancel, on);
+                        attempt = 1;
                     }
-                    wait(seconds, cancel);
+                }
+                Request::Quota { kind, resume_at, message } => {
+                    quota_waits += 1;
+                    wait_quota(model, context, kind, resume_at, &message, quota_waits, cancel, on);
                     attempt = 1;
                 }
                 Request::Failed(message) => {

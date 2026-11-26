@@ -227,6 +227,35 @@ fn stdin_that_never_closes_does_not_hang() {
     assert!(finished, "标准输入不关就一直卡着");
 }
 
+/// 2026-11-26 同 Friday：限流不算进重试次数（239 上实测智谱免费模型账号级限流时，以前退避 5 次、约 1 分钟就判这一轮失败）
+#[test]
+fn rate_limits_do_not_use_up_retries() {
+    let (work, home) = scratch("ratelimit");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let output = common::command(&home, model.port, &work, &["限流测试"]).output().unwrap();
+    let all = text(&output);
+    assert!(output.status.success(), "{all}");
+    assert_eq!(all.matches("限流（HTTP 429）").count(), 7, "七次都等着重发了：{all}");
+    assert!(!all.contains("额度用完了"), "没到时限不转成等额度：{all}");
+}
+
+/// 限流累计等过了时限（真用时 10 分钟，测试设成 2 秒）：同 Friday 当成额度用完——这一轮先停下，到点接着做
+#[test]
+fn long_rate_limits_wait_like_quota() {
+    let (work, home) = scratch("longratelimit");
+    let model = fake_model(&home.join("requests.jsonl"));
+    let output = common::command(&home, model.port, &work, &["长限流测试"])
+        .env("EDITH_RATE_LIMIT_PATIENCE", "2")
+        .env("EDITH_QUOTA_WAIT_MAX", "1")
+        .output()
+        .unwrap();
+    let all = text(&output);
+    assert!(output.status.success(), "{all}");
+    assert!(all.contains("额度用完了") && all.contains("持续被限流超过 10 分钟"), "转成等额度：{all}");
+    assert_eq!(all.matches("限流（HTTP 429）").count(), 2, "到时限前等着重发了两次：{all}");
+    assert!(all.contains("做完了"), "恢复后接着做完：{all}");
+}
+
 #[test]
 fn quota_waits_and_usage_is_noted() {
     let (work, home) = scratch("quota");
