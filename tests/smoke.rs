@@ -2,6 +2,8 @@
 
 mod common;
 
+use std::path::Path;
+
 use common::{edith, fake, fake_model, python, scratch, text};
 use serde_json::{Value, json};
 
@@ -131,9 +133,17 @@ fn read_file_hands_images_to_a_model_that_sees() {
         std::fs::write(work.join("chart.png"), [0x89, b'P', b'N', b'G']).unwrap();
         let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), r#"调用工具 read_file 参数 {"path":"chart.png"}"#]);
         assert!(output.status.success(), "{}", text(&output));
-        let requests: Vec<Value> =
-            std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let (probes, requests) = split_probes(&home);
         assert_eq!(requests.len(), 2, "{requests:?}");
+        if vision {
+            // 能不能看图还没定、接口收了图：后台发一张写着四位数的小图核对一次，读对了记能看（config.json）
+            assert_eq!(probes.len(), 1, "{probes:?}");
+            let config: Value = serde_json::from_str(&std::fs::read_to_string(home.join("config.json")).unwrap()).unwrap();
+            assert_eq!(config["supportsVision"], json!(true));
+            assert_eq!(config["visionChecked"], json!(format!("http://127.0.0.1:{}/v1|fake", model.port)));
+        } else {
+            assert!(probes.is_empty(), "{probes:?}");
+        }
         let messages = requests[1]["messages"].as_array().unwrap();
         let position = messages.iter().position(|message| message["role"] == "tool").unwrap();
         let tool = messages[position]["content"].as_str().unwrap();
@@ -146,6 +156,48 @@ fn read_file_hands_images_to_a_model_that_sees() {
             assert_eq!(messages.len(), position + 1, "{messages:?}");
         }
     }
+}
+
+/// 收到的请求分成看图核对的（写着四位数的小图、纯文字对照）和别的
+fn split_probes(home: &Path) -> (Vec<Value>, Vec<Value>) {
+    std::fs::read_to_string(home.join("requests.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .partition(|request| {
+            let text = request.to_string();
+            text.contains("4-digit number") || text.contains("Reply with OK only")
+        })
+}
+
+#[test]
+fn a_model_dropping_images_is_caught_and_the_turn_continues() {
+    // 2026-11-26 同 Friday：第一次带图用还没确认的模型、接口收了图，后台发小图核对；核对出它其实看不了（接口悄悄丢了图，
+    // 刚才说的是猜的）——这一轮做完时记成看不了、图换成写着路径的一句话，按 vision.dropped 接着做、让它按实际内容核对
+    let (work, home) = scratch("image-dropped");
+    let model = fake_model(&home.join("requests.jsonl"));
+    std::fs::write(work.join("chart.png"), [0x89, b'P', b'N', b'G']).unwrap();
+    let task = r#"丢图测试：调用工具 read_file 参数 {"path":"chart.png"}"#;
+    let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), task]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("按实际内容核对了：没描述、有路径、没带图"), "{}", text(&output));
+    assert!(text(&output).contains("这个模型其实看不了图（接口把图悄悄丢了）"), "{}", text(&output));
+    let (probes, requests) = split_probes(&home);
+    assert_eq!(probes.len(), 1, "{probes:?}");
+    assert!(probes[0].to_string().contains("data:image/png;base64,"), "{}", probes[0]);
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert!(requests[1].to_string().contains("data:image/png;base64,iVBORw=="));
+    let resent = requests[2].to_string();
+    assert!(!resent.contains("image_url") && resent.contains("刚才发给你的图片其实没有送到") && resent.contains("chart.png）"), "{resent}");
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(home.join("config.json")).unwrap()).unwrap();
+    assert_eq!(config["supportsVision"], json!(false));
+    assert_eq!(config["visionChecked"], json!(format!("http://127.0.0.1:{}/v1|fake", model.port)));
+    // 再来一次：定了，不再核对，read_file 直接说看不了图
+    let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), task]);
+    assert!(output.status.success(), "{}", text(&output));
+    let (probes, again) = split_probes(&home);
+    assert_eq!((probes.len(), again.len()), (1, 5), "{again:?}");
+    assert!(again[3..].iter().all(|request| !request.to_string().contains("image_url")), "{again:?}");
 }
 
 #[test]

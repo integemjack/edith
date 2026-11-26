@@ -10,6 +10,7 @@
   Stop 第一次不让停（让它「只聊天：再看一遍」）
 - CAP_ACTION_SESSIONS（逗号分开的会话 id）：remember 只给这几段会话用（动作的 sessions）
 - CAP_ACTION_ALWAYS=1：remember 声明 always（一直给那几段会话，不按需加载）
+- CAP_VISION=1：再报一个动作 analyze_image（像 Friday 网关的看图能力），回「一只橘猫，图上写着 42（<image>）」
 - 收到的每一条都记进 CAP_LOG（一行一条）；大脑断开或发 shutdown 就退出"""
 import json
 import os
@@ -80,7 +81,10 @@ for line in reader:
             "actions": [dict({"name": "remember", "description": "记住一句话",
                               "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
                              **({"sessions": os.environ["CAP_ACTION_SESSIONS"].split(",")} if os.environ.get("CAP_ACTION_SESSIONS") else {}),
-                             **({"always": True} if os.environ.get("CAP_ACTION_ALWAYS") else {}))],
+                             **({"always": True} if os.environ.get("CAP_ACTION_ALWAYS") else {}))]
+                       + ([{"name": "analyze_image", "description": "看图",
+                            "parameters": {"type": "object", "properties": {"image": {"type": "string"}, "question": {"type": "string"}}}}]
+                          if os.environ.get("CAP_VISION") else []),
             "receives": receives,
             "approves": bool(os.environ.get("CAP_APPROVE")),
             "models": ["power://"] if os.environ.get("CAP_MODEL_URL") else [],
@@ -92,6 +96,9 @@ for line in reader:
             threading.Thread(target=relay, args=(os.environ["CAP_RELAY"],), daemon=True).start()
     elif method == "act":
         params = message["params"]
+        if params["action"] == "analyze_image":
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"text": "一只橘猫，图上写着 42（%s）" % params["arguments"].get("image", "")}})
+            continue
         send({"jsonrpc": "2.0", "method": "act.progress", "params": {"call": params["call"], "text": "在记", "fraction": 0.5}})
         time.sleep(float(os.environ.get("CAP_ACT_DELAY", "0")))
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"text": "记住了：" + params["arguments"].get("text", "")}})

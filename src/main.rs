@@ -32,6 +32,7 @@ mod terminal;
 mod tools;
 mod trust;
 mod usage;
+mod vision;
 mod web;
 mod worktree;
 

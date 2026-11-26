@@ -881,6 +881,48 @@ fn sense_brings_mode_thinking_engine_team_and_images() {
 }
 
 #[test]
+fn bare_action_names_reach_the_capability() {
+    // 2026-11-26 提示词里写的是「调用 analyze_image」（同 Friday），给模型的是「<能力>__<动作>」：光名字只要有能力有这个动作就认成它
+    let (work, home) = scratch("bare-action");
+    let model = fake_model(&home.join("requests.jsonl"));
+    configure_cap(&home, json!([]), "done");
+    let output = edith(&home, model.port, &work, &["-C", work.to_str().unwrap(), r#"调用工具 remember 参数 {"text":"光名字"}"#]);
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("结果：记住了：光名字"), "{}", text(&output));
+}
+
+#[test]
+fn dropped_images_are_described_before_the_turn_continues() {
+    // 2026-11-26 同 Friday：用户发的图交给还没确认的模型、接口收了，后台核对出它其实看不了（接口悄悄丢了图）——
+    // 这一轮做完时先用看图能力（能力的 analyze_image）把图描述成文字，按 vision.dropped 接着做、让它按描述核对
+    let (work, home) = scratch("image-dropped-described");
+    let model = fake_model(&home.join("requests.jsonl"));
+    std::fs::write(work.join("shot.png"), [0x89, b'P', b'N', b'G']).unwrap();
+    let params = json!({ "text": "丢图测试：看看这张图", "kind": "user", "images": [work.join("shot.png")] });
+    configure_cap(&home, json!([{ "delay": 0.3, "send": { "jsonrpc": "2.0", "method": "sense", "params": params } }]), "done");
+    let mut config: Value = serde_json::from_str(&std::fs::read_to_string(home.join("capabilities.json")).unwrap()).unwrap();
+    config["capabilities"][0]["env"]["CAP_VISION"] = json!("1");
+    std::fs::write(home.join("capabilities.json"), config.to_string()).unwrap();
+    let _edith = run(&home, model.port, &work);
+    let done = || events(&received(&home), "done").first().map(|event| event["data"]["answer"].to_string()).unwrap_or_default();
+    assert!(wait_until(60, || !done().is_empty()), "这一轮没做完：{:?}", received(&home));
+    assert!(done().contains("按实际内容核对了：有描述、有路径、没带图"), "{}", done());
+    // 看图能力看的是用户发的那张图
+    let acted: Vec<Value> = received(&home).into_iter().filter(|message| message["method"] == "act").collect();
+    assert_eq!(acted.len(), 1, "{acted:?}");
+    assert_eq!(acted[0]["params"]["action"], "analyze_image");
+    assert_eq!(acted[0]["params"]["arguments"]["image"], json!(work.join("shot.png")));
+    let requests: Vec<Value> =
+        std::fs::read_to_string(home.join("requests.jsonl")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let last = requests.last().unwrap().to_string();
+    assert!(last.contains("看图模型的描述：一只橘猫，图上写着 42") && !last.contains("image_url"), "{last}");
+    // 存档里图还在（换成能看图的模型时还能看）
+    let stored =
+        || common::read_sessions(&home, &work).first().map(|session| session["history"][0]["content"].to_string()).unwrap_or_default();
+    assert!(wait_until(30, || stored().contains("file://")), "存档里没有图片路径：{}", stored());
+}
+
+#[test]
 fn delegated_results_keep_the_turns_prefs() {
     let (work, home) = scratch("prefs-agent");
     let model = fake_model(&home.join("requests.jsonl"));

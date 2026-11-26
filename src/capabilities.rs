@@ -1574,6 +1574,18 @@ pub fn is_read_only(full_name: &str) -> bool {
     capability.actions().iter().any(|action| action["name"].as_str() == Some(rest) && read_only(action))
 }
 
+/// 2026-11-26 哪个能力有这个动作（如 Friday 网关的 analyze_image）：给模型的工具名「<能力名>__<动作名>」，没有的 None。
+/// 框架自己用（模型其实看不了图时先把图描述成文字，同 Friday 的 describeAttachments）
+pub fn action_named(action: &str) -> Option<String> {
+    native().into_iter().find_map(|capability| {
+        capability
+            .actions()
+            .iter()
+            .any(|listed| listed["name"].as_str() == Some(action))
+            .then(|| format!("{}{SEPARATOR}{action}", capability.name).chars().take(64).collect())
+    })
+}
+
 /// 调能力的动作（名字不是它们的返回 None）
 pub fn call(full_name: &str, arguments: &Map<String, Value>, context: &Context, cancel: &AtomicBool) -> Option<Outcome> {
     let (name, rest) = full_name.split_once(SEPARATOR)?;

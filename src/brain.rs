@@ -1,10 +1,8 @@
 //! 大脑：一轮对话——用户的话 → 调模型（流式）→ 有工具调用就用工具、把结果交回模型 → 直到给出最终回答。
 //! 决定都在 friday-core 的 engine_loop（截断续写、复读、工具轮次上限、上下文压缩、统计），这里只发请求、读流、用工具。
 
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use friday_core::chat_stream::{self, Parser, StreamError};
@@ -18,6 +16,7 @@ use crate::capabilities;
 use crate::home::{self, Model};
 use crate::http::{self, Failure};
 use crate::tools::{self, Outcome};
+use crate::vision::{self, sees};
 
 /// 一轮里最多请求几次模型（到了让模型把目前的结果交出来）
 const MAX_TOOL_ROUNDS: i64 = 200;
@@ -444,6 +443,15 @@ fn dispatch(
     {
         return outcome;
     }
+    // 2026-11-26 能力的动作用了光名字（提示词里写的「调用 analyze_image」，给模型的是「friday__analyze_image」；glm-4.7-flash 实测
+    // 被拒收图后就这样调）：有这个动作的能力就认成它（这一轮许可的才行）
+    if !name.contains(capabilities::SEPARATOR)
+        && let Some(full) = capabilities::action_named(name)
+        && context.tools.allows(&full, capabilities::is_read_only(&full))
+        && let Some(outcome) = capabilities::call(&full, arguments, context, cancel)
+    {
+        return outcome;
+    }
     Outcome { ok: false, text: format!("没有这个工具：{name}") }
 }
 
@@ -453,6 +461,8 @@ enum Request {
         started: i64,
         finished: i64,
         first: Option<i64>,
+        /// 这段请求带着图、接口收了
+        images: bool,
     },
     Retry,
     Failed(String),
@@ -500,21 +510,11 @@ fn user_content(text: &str, images: &[String]) -> Value {
     Value::Array(parts)
 }
 
-/// 2026-11-26 接口说过不收图的模型（引擎 id；同 Friday 的 visionRefused）：这个进程里之后不再给它图。也写回 config.json
-/// （home::remember_no_vision），下次读进来就是看不了
-static NO_VISION: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-
-/// 这个模型现在能不能看图：没定的在线模型读进来就当能看（friday-core engines.rs），接口拒收过的不能
-fn sees(model: &Model) -> bool {
-    model.supports_vision && !NO_VISION.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&model.engine_id())
-}
-
-/// 2026-11-26 带着图被拒、接口说这个模型不收图（chat_request::refused 的 `vision: false`）：记成看不了（这个进程里 + config.json），
-/// 这个循环历史里每条带图的消息末尾先写上图在哪，再由 Loop::drop_images 去掉图、接上说明（vision.refused-images）——
-/// 重发时不再带图，之后工具的图也不再接上，模型要看就照路径调 analyze_image
+/// 2026-11-26 带着图被拒、接口说这个模型不收图（chat_request::refused 的 `vision: false`）：记成看不了（vision::refused，
+/// 这个进程里 + config.json），这个循环历史里每条带图的消息末尾先写上图在哪，再由 Loop::drop_images 去掉图、接上说明
+/// （vision.refused-images）——重发时不再带图，之后工具的图也不再接上，模型要看就照路径调 analyze_image
 fn refuse_images(brain: &mut Loop, model: &Model) {
-    NO_VISION.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(model.engine_id());
-    let _ = home::remember_no_vision(&model.base_url, &model.model);
+    vision::refused(model);
     let labeled: Vec<Value> = brain
         .history()
         .iter()
@@ -532,6 +532,76 @@ fn refuse_images(brain: &mut Loop, model: &Model) {
         .collect();
     brain.set_history(labeled);
     brain.drop_images(None);
+}
+
+/// 请求体里有没有真发出去的图（inline_images 读成了 base64 的；chat 的 image_url、Responses 的 input_image）
+fn carries_images(body: &Value) -> bool {
+    ["messages", "input"]
+        .iter()
+        .flat_map(|key| body[*key].as_array().into_iter().flatten())
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .any(|part| matches!(part["type"].as_str(), Some("image_url" | "input_image")))
+}
+
+/// 2026-11-26 第一次带图用这个模型、接口收了图，这一轮做完时等后台核对的结果（同 Friday 的 checkImagesDelivered）：
+/// 核对出它其实看不了（接口把图悄悄丢了，刚才说的图里的内容是猜的）——这一轮用户发的图先用看图能力描述成文字（有 analyze_image 时），
+/// 历史里的图换成写着路径（和描述）的一句话、之后不再给它图，接一条 vision.dropped 让它按实际内容核对（同 Friday 的
+/// resumeAfterDroppedImages）。返回要不要接着做
+fn images_dropped(brain: &mut Loop, model: &Model, context: &Context, cancel: &AtomicBool, on: &mut dyn FnMut(Event)) -> bool {
+    vision::settle(model, vision::SETTLE);
+    if cancel.load(Ordering::Relaxed) || vision::verdict(model) != Some(false) {
+        return false;
+    }
+    let path_of = |part: &Value| part["image_url"]["url"].as_str()?.strip_prefix(IMAGE_PREFIX).map(str::to_string);
+    // 这个循环里用户发的图（跟在工具结果后面的截图不算）
+    let attached: Vec<String> = brain
+        .appended()
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_array())
+        .filter(|parts| !parts.iter().any(|part| part["text"].as_str().is_some_and(|text| text.contains(engine_loop::IMAGE_MARKER))))
+        .flat_map(|parts| parts.iter().filter_map(path_of).collect::<Vec<_>>())
+        .collect();
+    let mut described: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(tool) = capabilities::action_named("analyze_image").filter(|_| !attached.is_empty()) {
+        on(Event::Notice("这个模型其实看不了图，正在用看图模型描述附件…".into()));
+        for path in attached.iter().filter(|path| Path::new(path).is_file()) {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            let mut arguments = Map::new();
+            arguments.insert("image".into(), json!(path));
+            arguments.insert("question".into(), json!("详细描述这张图片的内容；如果图里有文字，逐字转录。"));
+            if let Some(outcome) = capabilities::call(&tool, &arguments, context, cancel).filter(|outcome| outcome.ok) {
+                described.insert(path.clone(), outcome.text);
+            }
+        }
+    }
+    let relabeled: Vec<Value> = brain
+        .history()
+        .iter()
+        .cloned()
+        .map(|mut message| {
+            if let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) {
+                for part in parts.iter_mut() {
+                    let Some(path) = path_of(part) else { continue };
+                    let text = match described.get(&path) {
+                        Some(description) => format!("（附了一张图片：{path}。看图模型的描述：{}）", description.trim()),
+                        None => format!("（附了一张图片：{path}）"),
+                    };
+                    *part = json!({ "type": "text", "text": text });
+                }
+            }
+            message
+        })
+        .collect();
+    brain.set_history(relabeled);
+    // 图都换成文字了：只是让循环记下看不了图（之后工具的图不再接上）
+    brain.drop_images(None);
+    on(Event::Notice("这个模型其实看不了图（接口把图悄悄丢了），已改成先用看图能力看图、让它按实际内容核对".into()));
+    brain.append(vec![json!({ "role": "user", "content": prompts::text("vision.dropped", &args(&[]), None) })]);
+    true
 }
 
 fn image_type(path: &str) -> &'static str {
@@ -693,7 +763,7 @@ fn request(
             }
             let recovered = crate::usage::note_success(&model.base_url, &model.secret_name, &header, now);
             note_usage(model, context, recovered);
-            Request::Done { pass: engine_loop::pass_from(object), started, finished: now_ms(), first }
+            Request::Done { pass: engine_loop::pass_from(object), started, finished: now_ms(), first, images: carries_images(&body) }
         }
         Err(Failure::Network(message)) if first.is_none() => {
             retry(format!("网络出错：{message}"), chat_request::retry_delay(attempt, None), on)
@@ -836,6 +906,8 @@ pub fn run(
         stopped,
     };
     let mut answer = String::new();
+    // 2026-11-26 这一轮带图用了能不能看图还没确认的模型、接口收了图（做完时等核对的结果，images_dropped）
+    let mut unverified = false;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return finish(&brain, answer, None, true);
@@ -856,7 +928,14 @@ pub fn run(
         let mut quota_waits = 0;
         let (pass, started, finished, first) = loop {
             match request(&mut brain, model, context, include_tools, show_reasoning, attempt, cancel, on) {
-                Request::Done { pass, started, finished, first } => break (pass, started, finished, first),
+                Request::Done { pass, started, finished, first, images } => {
+                    // 能不能看图还没确认、接口收了图：在后台发一张小图核对它是不是真看到了（不挡这一轮）
+                    if images && vision::needs_probe(model) {
+                        vision::confirm(model);
+                        unverified = true;
+                    }
+                    break (pass, started, finished, first);
+                }
                 Request::Retry => attempt += 1,
                 Request::Quota { kind, resume_at, message } => {
                     // 同 Friday：额度用完等它恢复（服务说了几点就到点后 30 秒，没说按 10、20、30 分钟、之后每小时试；余额每 30 分钟），
@@ -902,7 +981,15 @@ pub fn run(
         match decision["next"].as_str() {
             Some("prepare") => continue,
             Some("tools") => {}
-            _ => return finish(&brain, answer, None, cancel.load(Ordering::Relaxed)),
+            _ => {
+                if std::mem::take(&mut unverified)
+                    && !cancel.load(Ordering::Relaxed)
+                    && images_dropped(&mut brain, model, context, cancel, on)
+                {
+                    continue;
+                }
+                return finish(&brain, answer, None, cancel.load(Ordering::Relaxed));
+            }
         }
         let mut results = Vec::new();
         crate::tools::set_vision(sees(model));

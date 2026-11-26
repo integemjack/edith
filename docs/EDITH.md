@@ -163,7 +163,12 @@ MCP 服务每次请求再多 2.1k，而大多数用不上（改完实测：「�
   `supportsVision`，没定的在线模型（顶层那个、`engines` 里的，规则在 friday-core 读引擎表时）一律先当能看；第一次带图发出去时接口说不收图
   （`chat_request::refused` 返回 `vision: false`，如智谱 coding 端点 glm-5.3 的 1210「messages.content.type 参数非法，取值范围 ['text']」）：
   这个循环里带图的消息先写上图在哪、再由 `Loop::drop_images` 去掉图接上说明（提示词 `vision.refused-images`）重发，之后工具的图也不再接上；
-  这个模型记成看不了（这个进程里一份，`config.json` 里对得上的 `engines` 和顶层那个写 `supportsVision: false` + `visionChecked`，`home::remember_no_vision`）。
+  这个模型记成看不了（这个进程里一份，`config.json` 里对得上的 `engines` 和顶层那个写 `supportsVision: false` + `visionChecked`，`home::remember_vision`）。
+  接口收了图：在后台发一张写着随机四位数的 5×7 点阵小图核对一次（`src/vision.rs`，同 Friday 的 VisionProbe：关思考、温度 0，读对了——差一位也算——记能看，
+  读不对记看不了；接口拒收图再发纯文字对照，能过也是看不了；额度、限流、连不上算没测出来，10 分钟内不再测）。一轮做完时等核对的结果（最多 60 秒），
+  核对出它其实看不了（接口把图悄悄丢了，刚才说的是猜的）：这个循环里用户发的图先用能力的 `analyze_image` 描述成文字，历史里的图都换成写着路径（和描述）的一句话、
+  之后不再给它图，接一条 `vision.dropped` 接着做、让它按实际内容核对（同 Friday 的 resumeAfterDroppedImages）。
+  提示词里写的是「调用 analyze_image」（同 Friday），给模型的是「<能力>__analyze_image」：模型用光名字调能力的动作时，有这个动作的能力就认成它。
 - **记忆库**（`src/memory.rs`，同 Friday 的 MEMORY.md 精简）：`memory.json`，一条是 `{id（m + 4 位）, kind, text, project, pinned, source, state, uses, …}`。
   模型用 `save_memory` 把用户明说要记住的当场记下（`replaces` 改掉记过的那条），`search_memory` 按关键词查（这个项目的和通用的，没有再找全部项目）；
   常驻的（pinned）每轮放进系统提示。Friday 的 设置 › 记忆 经 edith-friday 直接改这份文件。

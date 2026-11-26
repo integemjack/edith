@@ -44,9 +44,24 @@ pub fn post_sse(
     api_key: &str,
     body: &Value,
     headers: &mut Vec<(String, String)>,
+    on_data: impl FnMut(&str) -> bool,
+) -> Result<bool, Failure> {
+    post_sse_within(url, api_key, body, headers, None, on_data)
+}
+
+/// 同 post_sse，timeout：这次请求整个最多多久（看图核对这类后台的小请求用，到点算网络出错）
+pub fn post_sse_within(
+    url: &str,
+    api_key: &str,
+    body: &Value,
+    headers: &mut Vec<(String, String)>,
+    timeout: Option<Duration>,
     mut on_data: impl FnMut(&str) -> bool,
 ) -> Result<bool, Failure> {
     let mut request = agent().post(url).header("Content-Type", "application/json").header("Accept", "text/event-stream");
+    if timeout.is_some() {
+        request = request.config().timeout_global(timeout).build();
+    }
     if !api_key.is_empty() && api_key != "none" {
         request = request.header("Authorization", format!("Bearer {api_key}"));
     }

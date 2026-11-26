@@ -13,6 +13,47 @@ def chunk(delta, finish=None):
     return {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
 
 
+# 看图核对的小图（EDITH vision.rs 画的 5×7 点阵四位数，一格 12 像素、四周留 3 格）：能看图的假模型照图读出数字
+GLYPHS = {
+    "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+    "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+    "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+    "3": ["11111", "00010", "00100", "00010", "00001", "10001", "01110"],
+    "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+    "5": ["11111", "10000", "11110", "00001", "00001", "10001", "01110"],
+    "6": ["00110", "01000", "10000", "11110", "10001", "10001", "01110"],
+    "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+    "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+    "9": ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
+}
+
+
+def read_probe(url):
+    import base64
+    import struct
+    import zlib
+    data = base64.b64decode(url.split(",", 1)[1])
+    pos, idat, width = 8, b"", 0
+    while pos < len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        payload = data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if kind == b"IHDR":
+            width = struct.unpack(">I", payload[:4])[0]
+        elif kind == b"IDAT":
+            idat += payload
+    raw = zlib.decompress(idat)
+    scale, margin = 12, 3
+    pixel = lambda x, y: raw[y * (width + 1) + 1 + x]
+    digits = (width // scale - margin * 2 + 1) // 6
+    found = ""
+    for index in range(digits):
+        rows = ["".join("1" if pixel((margin + index * 6 + column) * scale + 6, (margin + row) * scale + 6) == 0 else "0"
+                        for column in range(5)) for row in range(7)]
+        found += next((digit for digit, glyph in GLYPHS.items() if glyph == rows), "?")
+    return found
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -50,6 +91,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.responses_api(body)
         messages = body["messages"]
         has_image = any(isinstance(m.get("content"), list) and any(part.get("type") == "image_url" for part in m["content"]) for m in messages)
+        # 看图核对（EDITH 发的写着四位数的小图）：照图读出数字；「丢图测试」的接口悄悄丢了图，模型只好说看不到；纯文字对照回 OK
+        probe = [part for m in messages if isinstance(m.get("content"), list) for part in m["content"]]
+        if any("4-digit number" in part.get("text", "") for part in probe):
+            urls = [part["image_url"]["url"] for part in probe if part.get("type") == "image_url"]
+            text = "我看不到图片。" if os.path.exists(LOG + ".drops") or not urls else read_probe(urls[0])
+            return self.stream([chunk({"role": "assistant", "content": text}, "stop")])
+        if messages and messages[-1].get("content") == "只回答 OK。Reply with OK only.":
+            return self.stream([chunk({"role": "assistant", "content": "OK"}, "stop")])
+        # 「丢图测试」：接口收了图、其实悄悄丢掉了（之后的核对读不出数字）
+        if has_image and "丢图测试" in json.dumps(messages, ensure_ascii=False):
+            open(LOG + ".drops", "w").close()
         # 带图片的用户消息是一段段的（text / image_url）：按文字看
         for m in messages:
             if isinstance(m.get("content"), list):
@@ -165,6 +217,13 @@ class Handler(BaseHTTPRequestHandler):
             events.append(dict(chunk({}), x_friday={"tool": dict(tool, status="running")}))
             events.append(dict(chunk({}), x_friday={"tool": dict(tool, status="success", output="内容 42")}))
             events.append(chunk({"content": "带不带工具：" + ("带了" if body.get("tools") else "没带")}, "stop"))
+        elif "其实没有送到" in last_user:
+            # 核对出看不了图后接着做（vision.dropped）：图都换成了文字（有看图能力时带描述）
+            described = "有描述" if "看图模型的描述：" in everything else "没描述"
+            located = "有路径" if ".png" in everything else "没路径"
+            events.append(say(f"按实际内容核对了：{described}、{located}、{'还带着图' if has_image else '没带图'}"))
+        elif "丢图测试" in last_user and not called:
+            events.append(say("图里是一只狗"))
         elif "原样回答：" in last_user and not called:
             # 「原样回答：X」：把 X 原样答出来（定时任务的 /loop next、/loop done 这类单独一行的指令）
             events.append(say(last_user.split("原样回答：", 1)[1]))
@@ -215,7 +274,10 @@ class Handler(BaseHTTPRequestHandler):
             seen = tools[-1]["content"].splitlines()
             events.append(chunk({"role": "assistant", "content": "做完了：hello.txt 已写好，"}))
             events.append(chunk({"content": "核对结果：" + " / ".join(seen[:3])}, "stop"))
-        events.append({"choices": [], "usage": {"prompt_tokens": 1200, "completion_tokens": 30}})
+        self.stream(events)
+
+    def stream(self, events):
+        events = events + [{"choices": [], "usage": {"prompt_tokens": 1200, "completion_tokens": 30}}]
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         # 限流余量（OpenAI 系的写法）：EDITH 顺手记下（service-usage.json）
