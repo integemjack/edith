@@ -1,7 +1,8 @@
 //! 能不能看图用到时才确认（同 Friday 2026-11-26 的 VisionProbe / VisionProbes）：没定的在线模型先当能看，第一次带图发出去时——
 //! - 接口说不收图（chat_request::refused 的 `vision: false`）：refused 记看不了（brain::refuse_images 把图换成说明重发）；
 //! - 接口收了：confirm 在后台发一张写着随机四位数的小图核对一次（个别兼容接口会把图悄悄丢掉，模型只好瞎猜），读对记能看、读不对记看不了；
-//! - 没测出来（额度、限流、连不上）：不改，10 分钟内再用到也不再测。
+//! - 被限流：在一次核对的时限（TIMEOUT）里等一会儿重发（同 Friday：免费模型常回 429，一次就放弃的话多半测不出来）；
+//! - 没测出来（额度、到时限还在限流、连不上）：不改，10 分钟内再用到也不再测。
 //!
 //! 结果记在这个进程里，也写回 config.json（home::remember_vision：supportsVision、visionChecked「接口地址|模型名」）。
 //! 一轮做完时 brain::run 等核对的结果（settle，最多 60 秒），核对出看不了就把这一轮的图先用看图能力描述成文字、按 vision.dropped 接着做
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use friday_core::chat_stream::{Parser, StreamError};
 use friday_core::engine_loop::{self, Loop, Settings};
+use friday_core::quota::{self, Limit};
 use friday_core::{chat_request, responses};
 use serde_json::{Value, json};
 
@@ -23,7 +25,7 @@ pub const PROMPT: &str =
     "图片里写着一个四位数，只回答这个数字，不要别的。What 4-digit number is written in the image? Reply with the digits only.";
 /// 纯文字对照：接口拒收图片时用它确认模型本身能用
 const CONTROL_PROMPT: &str = "只回答 OK。Reply with OK only.";
-/// 一次核对最多等多久（推理模型关不掉思考时要多想一会儿）
+/// 一次核对最多等多久（推理模型关不掉思考时要多想一会儿；被限流时等着重发也算在里面）
 const TIMEOUT: Duration = Duration::from_secs(120);
 /// 没测出来的，隔多久再用到才再测
 const RETRY_AFTER: Duration = Duration::from_secs(600);
@@ -172,7 +174,7 @@ impl Asked {
 }
 
 /// 发一次（不带工具、关思考、温度 0）：请求体照这个引擎的规则拼（思考参数、记下的「不接受的参数」）；
-/// 接口说不接受某个参数、思考关不掉的按 chat_request::refused 改了重发
+/// 接口说不接受某个参数、思考关不掉的按 chat_request::refused 改了重发；被限流（不是额度、余额用完）的在 TIMEOUT 里等一会儿重发
 fn ask(model: &Model, prompt: &str, image: Option<&str>) -> Result<String, Asked> {
     let engine_id = model.engine_id();
     let config = engine_loop::Config {
@@ -198,7 +200,13 @@ fn ask(model: &Model, prompt: &str, image: Option<&str>) -> Result<String, Asked
     };
     brain.append(vec![json!({ "role": "user", "content": content })]);
     let mut last = Asked::Other("没发出去".into());
-    for _ in 0..3 {
+    let deadline = Instant::now() + TIMEOUT;
+    let (mut adjusted, mut rate_limits) = (0, 0);
+    while adjusted < 3 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
         let use_responses = chat_request::uses_responses(&engine_id);
         let mut body = brain.body(false, None, false);
         if use_responses {
@@ -208,7 +216,7 @@ fn ask(model: &Model, prompt: &str, image: Option<&str>) -> Result<String, Asked
         let mut parser = Parser::for_engine(false, true, &engine_id);
         let mut failed: Option<String> = None;
         let mut headers = Vec::new();
-        let outcome = http::post_sse_within(&url, &model.api_key, &body, &mut headers, Some(TIMEOUT), |data| {
+        let outcome = http::post_sse_within(&url, &model.api_key, &body, &mut headers, Some(left), |data| {
             let Ok(chunk) = serde_json::from_str::<Value>(data) else { return true };
             let feed = parser.feed(&chunk, chrono::Utc::now());
             if let Some(error) = feed.error {
@@ -229,7 +237,7 @@ fn ask(model: &Model, prompt: &str, image: Option<&str>) -> Result<String, Asked
                 return Ok(content);
             }
             Err(Failure::Network(message)) => return Err(Asked::Other(format!("网络出错：{message}"))),
-            Err(Failure::Status { status, body: reply, .. }) => {
+            Err(Failure::Status { status, body: reply, retry_after }) => {
                 if let Some(fixed) = chat_request::refused(i64::from(status), &reply, &body, &engine_id) {
                     if fixed["vision"] == json!(false) {
                         return Err(Asked::Refused(format!(
@@ -239,7 +247,19 @@ fn ask(model: &Model, prompt: &str, image: Option<&str>) -> Result<String, Asked
                     }
                     // 改了什么记在引擎上，下一次拼的请求体照它
                     last = Asked::Status { status, body: reply };
+                    adjusted += 1;
                     continue;
+                }
+                // 2026-11-26 被限流（239 上实测：智谱免费模型的核对第一次就回 429 1305，以前直接算没测出来、丢图认不出来）：
+                // 同 Friday 的核对，时限里等一会儿重发
+                if matches!(quota::classify(i64::from(status), &reply), Some(Limit::RateLimit)) {
+                    rate_limits += 1;
+                    let wait = Duration::from_secs_f64(chat_request::rate_limit_delay(rate_limits, retry_after, 0));
+                    if Instant::now() + wait < deadline {
+                        std::thread::sleep(wait);
+                        last = Asked::Status { status, body: reply };
+                        continue;
+                    }
                 }
                 return Err(Asked::Status { status, body: reply });
             }
@@ -422,6 +442,46 @@ mod tests {
             extra_body: String::new(),
             secret_name: String::new(),
         }
+    }
+
+    /// 2026-11-26 239 上实测：智谱免费模型核对时第一次回 429 1305，以前直接算没测出来——现在等一会儿重发
+    #[test]
+    fn rate_limited_probe_retries() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            for reply in [
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 0\r\nConnection: close\r\n\r\n{\"error\":{\"code\":\"1305\",\"message\":\"该模型当前访问量过大，请您稍后再试\"}}".to_string(),
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"4729\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+                ),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                stream.write_all(reply.as_bytes()).unwrap();
+                served += 1;
+            }
+            served
+        });
+        let probe = Model { base_url: format!("http://127.0.0.1:{port}/v1"), model: "rate-limited".into(), ..model(true, false) };
+        assert_eq!(run(&probe, "4729"), Verdict::Vision);
+        assert_eq!(server.join().unwrap(), 2, "限流的那次之后重发了一次");
     }
 
     #[test]
